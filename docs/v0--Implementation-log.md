@@ -2,6 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
+updated_at: 2026-11-13--14-16
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -81,7 +83,7 @@ Work by phase:
   active on `:8100`; `ragnart-ingest.timer` enabled (next slot 19:00); `rag-ingest.timer`
   disabled. First RAGNART ingestion run 13:01-13:50 CET: NFS sync of 11773 files, 4263
   Claude sessions and 433 OpenCode sessions; 32 new files ingested, 0 failed; the
-  20 GiB Qdrant snapshot downloaded in 34 min (12:16:13Z-12:50:40Z), the Qdrant-local
+  20 GiB Qdrant snapshot downloaded in 34 min (13:16:13-13:50:40 CET), the Qdrant-local
   copy then deleted; Result=success; 12/12 snapshot pairs after rotation.
 - **P6 -- client repoint.** Both `/rag` command files (`dot.claude-Linux/commands/rag.md`
   and `~/.config/opencode/commands/rag.md`) pointed at `http://192.168.1.95:8100/v1/search`
@@ -94,7 +96,7 @@ Work by phase:
   The gateway reloader did not pick up the edits; the operator restarted it (Deviation 7).
 - **P8 -- docs and close.** RAG docs corrected by name and path; `docs/design-history.md`,
   this log and the plan status updated; RAGNART `README.md` and avatar assets committed
-  as described above.
+  as described above. After review, two residual `~/Gin-AI/projects/SoHoAI` mentions in the carried-over RAG docs were fixed (RAG-strategy.md setup instruction repointed; RAG-troubleshoot.md gateway-reload note annotated).
 
 #### Deviations from the plan
 
@@ -103,7 +105,7 @@ Work by phase:
    v0.1 and Plan Section 7.
 2. **`numpy` dropped from `pyproject.toml`.** Plan Section 6 v0.1 named it. After dropping
    `multi_query.py` and `utils/rag_mmr_bench.py`, nothing in the import graph imports
-   `numpy` directly. Recorded in Plan Section 6 v0.1.
+   `numpy` directly. Recorded in Plan Section 6 v0.1. All other pins in `pyproject.toml` were likewise aligned to the versions actually installed in the shared venv (`fastapi==0.135.1`, `qdrant-client==1.17.1`, `uvicorn==0.42.0`) instead of the plan's literal values; `python-pptx==1.0.2` was taken from the venv as planned.
 3. **Snapshot work was not a named v0.1 item.** The download timeout fix (`--max-time`
    3600 to 7200 and a failure trap), the cleanup of six orphaned artefacts, and the
    removal of the 03:00 cron line were done here. They were required by this session's
@@ -182,9 +184,7 @@ directory; the aggregate results are below.
   PASS (P3, and again after cutover).
 - `systemctl list-timers`: `ragnart-ingest.timer` enabled, next run 19:00 CET;
   `rag-ingest.timer` disabled.
-- Live 307 from SoHoAI `/v1/rag/search?q=...` to `http://192.168.1.95:8100/v1/search?...`,
-  checked at 12:59:38Z and again at 13:01:28Z (P7). Then verified on the operator-restarted
-  gateway after 13:24:56 CET.
+- Live 307 from SoHoAI `/v1/rag/search?q=...` to `http://192.168.1.95:8100/v1/search?...`: first verified at about 13:25 CET, right after the operator's restart of the Server 1 gateway (13:24:56 CET); re-verified after the final P7 edits at 13:59:38 and 14:01:28 CET (12:59:38Z / 13:01:28Z), and again by the Reviewer.
 - Ingestion run 13:01-13:50 CET: 32 new files, 0 failed; WAL checkpoint logged; snapshot
   phase completed with `Result=success`.
 

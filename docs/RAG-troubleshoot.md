@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged)
-updated_at: 2026-11-13--14-04
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
+updated_at: 2026-11-13--14-16
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -152,6 +152,8 @@ After editing orchestrator code from Server 2, trigger the reload on Server 1
 before testing. Testing the removed endpoints before the reload had happened hit the old code:
 `POST /v1/rag/ingest/start` started a worker on Server 1. The WAL was still empty and the queue
 unchanged afterwards (nothing was pending), so no harm followed.
+
+**Note (2026-11-13, RAGNART v0.1):** this gotcha concerns the SoHoAI gateway on Server 1, which no longer contains RAG code. During the v0.1 spin-off even a `touch` run on Server 1 did not trigger the reload; the gateway had to be restarted by hand. RAGNART's search service runs on Server 2 under systemd and is restarted with `sudo systemctl restart ragnart-search.service` (see `docs/v0--Implementation-log.md`, v0.1).
 
 ### Is this a pattern?
 

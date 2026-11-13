@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged)
-updated_at: 2026-11-13--14-04
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
+updated_at: 2026-11-13--14-16
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -1132,7 +1132,7 @@ from the project root.
 
 ```bash
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
-cd ~/Gin-AI/projects/SoHoAI
+cd ~/Gin-AI/projects/RAGNART
 ```
 
 #### Verify Ollama is running with bge-m3
