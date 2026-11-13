@@ -2,6 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion)
+updated_at: 2026-11-13--14-05
 context: >
   Produced by a /brain session on 2026-11-13, tasked with writing a versioned,
   staged implementation plan for RAGNART — SoHoAI's RAG spun off into its own
@@ -301,6 +303,15 @@ whether the carried follow-ups from SoHoAI `docs/design-history.md` (stale
 `ollama_url` Server-1 defaults, unused models in `schemas.py`) are cleaned
 up now or in a follow-up.
 
+**Dated note, 2026-11-13.** `docs/Changelog.md` (per Section 7) was not created;
+`docs/v0--Implementation-log.md` (AYA format) serves that purpose from v0.1 onward.
+The work-item list above named `numpy`; it was dropped after verifying that no direct
+import remains once `multi_query.py` and `rag_mmr_bench.py` are dropped. Port chosen: 8100.
+The old-vs-new bench check uses a tie-aware gate (operator-approved), because search is
+non-deterministic on the old endpoint alone; see `docs/v0--Implementation-log.md`, v0.1
+Deviation 6. The SoHoAI `/v1/rag/search` 307 stub is kept until 2026-11-16 (operator
+date); check `SoHoAI-gateway.log` for 307 hits before removing it.
+
 **Estimated sessions.** 1.
 
 ### v0.2 — Nested
@@ -310,7 +321,10 @@ by payload-only backfill, with no vectors touched, and give search project
 scoping.
 
 **Entry criteria.** v0.1's Definition of done met (RAGNART's service and
-timer are live and are the only ones running).
+timer are live and are the only ones running). **Also:** SoHoAI's
+`/v1/rag/search` 307 stub removed (on or after 2026-11-16, after checking
+`SoHoAI-gateway.log` for 307 hits), per `docs/v0--Implementation-log.md`, v0.1
+Open items.
 
 **Work items.**
 - Add tables (`projects`, `project_links`, `source_links`, `grants`) and
@@ -582,6 +596,7 @@ does not pick one.
   carried-over RAG-strategy and RAG-troubleshoot docs) gets one dated entry
   per version session, naming the commit(s) and the Definition-of-done
   checks that passed.
+  **2026-11-13:** `docs/Changelog.md` not created — see the dated note under §6 v0.1; `docs/v0--Implementation-log.md` is the changelog from here on.
 - This document is itself updated at the end of each version: the
   version's row in §9, and a dated note in §6 for anything that changed
   during the work.
@@ -626,7 +641,7 @@ does not pick one.
 
 | Version | Status | Session(s) | Commit(s) |
 | --- | --- | --- | --- |
-| v0.1 Spin-off | planned | — | — |
+| v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
 | v0.2 Nested | planned | — | — |
 | v0.3 Transient | planned | — | — |
 | v0.4 Kotaemon | planned | — | — |

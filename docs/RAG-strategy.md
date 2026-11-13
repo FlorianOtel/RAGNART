@@ -2,13 +2,13 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule)
-updated_at: 2026-11-04--17-15
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged)
+updated_at: 2026-11-13--14-04
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
   NFS corpus survey, Qdrant payload schema, multi-tenancy (Google OAuth2),
-  rag_engine/ package layout, fail-safe ingestion (crash recovery, retry,
+  ragnart/ package layout, fail-safe ingestion (crash recovery, retry,
   delete-before-insert idempotency), incremental sync (additions + deletions),
   Phase 2 implementation plan, ingestion runbook, advanced retrieval and
   generation patterns (rag_mode, system-prompt tool-use, multi-query + MMR,
@@ -54,20 +54,22 @@ context: >
 ---
 ---
 
+> Moved here from SoHoAI on 2026-11-13; see docs/v0--Implementation-log.md.
+
 # RAG Strategy — SoHoAI
 
 ---
 
 ## RAG client mode — external LLM client retrieval
 
-SoHoAI exposes a single retrieval endpoint: `GET /v1/rag/search`. External clients
+SoHoAI exposes a single retrieval endpoint: `GET /v1/search`. External clients
 (Claude Code, Cline, custom scripts) call this endpoint directly and manage their
 own RAG loops. The server has no visibility into how the retrieved text is used.
 
 **Server-managed RAG was removed on 2026-05-27.** The `rag_mode` parameter, the
 three-mode system (off/on/only), the server-side tool-use loop, and `cli_chat.py`
-were deleted as part of Session 2 cleanup. Files removed: `rag_engine/tool_use.py`,
-`prompts/rag_system_prompts.py`, `rag_engine/main.py`, `utils/cli_chat.py`.
+were deleted as part of Session 2 cleanup. Files removed: `ragnart/tool_use.py`,
+`prompts/rag_system_prompts.py`, `ragnart/main.py`, `utils/cli_chat.py`.
 
 ---
 
@@ -114,8 +116,8 @@ Other user directories not yet surveyed — ingestion will scan all configured r
 
 ### 1.2 Exclusion filters (updated 2026-04-23)
 
-Exclusion filters are configured in `SoHoAI-config.yaml` under `rag.scanner` (required — no
-hardcoded fallback). `rag_engine/scanner.py` validates all four keys at startup and
+Exclusion filters are configured in `ragnart.yaml` under `rag.scanner` (required — no
+hardcoded fallback). `ragnart/scanner.py` validates all four keys at startup and
 raises `ValueError` immediately if any are missing.
 
 ```yaml
@@ -187,16 +189,16 @@ the old one was moved to `.Gin-AI-python-3.12.old/` and the next run ingested 76
 `.uv-python/`, `.cache/`) rather than only a venv's name. Details: RAG-troubleshoot.md,
 2026-11-04 entry.
 
-To add or remove an exclusion, edit `SoHoAI-config.yaml` and re-run `rag_sync_nfs.py`.
+To add or remove an exclusion, edit `ragnart.yaml` and re-run `rag_sync_nfs.py`.
 No code change is required. When a directory is newly excluded, `rag_sync_nfs.py`
 purges its files from the queue and Qdrant automatically (via `handle_deleted`).
 
 **Claude Code sessions — `.claude/` exclusion + `claude_chats` two-path design (updated 2026-05-04)**
 
-The `.claude/` directory is excluded from the generic NFS scanner to prevent ingestion of Claude Code's internal state (settings, caches, IDE configs, tool metadata) and the `chats/` symlink tree. However, the `.jsonl` session transcripts in `~/.claude/projects/` have high RAG value and must be ingested. A **dedicated scanner function** `scan_claude_chats()` (in `rag_engine/scanner.py`) re-enters the specific subdirectory `~/.claude/projects/` via a separate code path that:
+The `.claude/` directory is excluded from the generic NFS scanner to prevent ingestion of Claude Code's internal state (settings, caches, IDE configs, tool metadata) and the `chats/` symlink tree. However, the `.jsonl` session transcripts in `~/.claude/projects/` have high RAG value and must be ingested. A **dedicated scanner function** `scan_claude_chats()` (in `ragnart/scanner.py`) re-enters the specific subdirectory `~/.claude/projects/` via a separate code path that:
 1. Bypasses all generic exclusion rules
 2. Scans *only* for `.jsonl` files
-3. Uses a dedicated parser `_parse_claude_chat()` (in `rag_engine/ingest.py`) that extracts structured user/assistant text turns from the JSONL format
+3. Uses a dedicated parser `_parse_claude_chat()` (in `ragnart/ingest.py`) that extracts structured user/assistant text turns from the JSONL format
 
 A raw UTF-8 read of `.jsonl` produces unreadable JSON blobs; the dedicated parser is mandatory for RAG-quality content. Additionally, `_build_title_map()` reads `~/.claude/chats/` as a read-only side channel to derive human-readable session titles — it is never ingested, only consulted during ingest time for metadata enrichment. This two-path architecture solves three constraints: (1) avoid duplicate ingestion via `.chats/` symlinks, (2) ingest high-value sessions at all, (3) process them correctly with structured parsing. Full rationale and code locations documented in `docs/design-history.md` (2026-05-04--12-46).
 
@@ -230,7 +232,7 @@ Specifically:
   see §3 Qdrant payload schema. (Renderers fall back to `session_title`, which
   is also copied into `file_name` at ingest time, so search output stays
   human-readable.)
-- **`derive_owner()`** in `rag_engine/schema.py` is path-prefix-based and only
+- **`derive_owner()`** in `ragnart/schema.py` is path-prefix-based and only
   works for NFS files. It is **never called** for opencode (or for Claude Code
   chats — those derive owner from `claude_chats.roots[i].owner`). Opencode
   owner comes from the new `opencode.owner` config field.
@@ -267,7 +269,7 @@ known limitation.**
 ---
 
 **Discovery — v2 `/api/session`.** A dedicated scanner function
-`scan_opencode_sessions()` (in `rag_engine/scanner.py`) walks
+`scan_opencode_sessions()` (in `ragnart/scanner.py`) walks
 `GET /api/session` (the v2 endpoint, operationId `v2.session.list`) with
 cursor-based pagination until exhausted. This endpoint returns every session
 opencode knows about — project-bound or loose, archived or active — with no
@@ -279,7 +281,7 @@ worktree (the same trap oc-history falls into; see
 
 **Authentication — OpenCode 2.x (since 2026-10-14).** The server at
 `192.168.1.95:4096` (`opencode-v2-server.service`) requires HTTP Basic auth: user
-`opencode`, password `OPENCODE_SERVER_PASSWORD`. `rag_engine/opencode_client.py` reads the
+`opencode`, password `OPENCODE_SERVER_PASSWORD`. `ragnart/opencode_client.py` reads the
 password from the server's own environment file (`opencode.password_env_file`, default
 `~/.config/opencode/opencode-server.env`), so a password change on the server is followed
 without touching SoHoAI. The file exists on Server 2, where the ingestion service runs.
@@ -287,7 +289,7 @@ without touching SoHoAI. The file exists on Server 2, where the ingestion servic
 unknown or legacy routes are served by the web app's catch-all with HTTP 200 and HTML,
 which would otherwise parse as "no content". A 401/403 is logged at ERROR.
 
-**Parsing (OpenCode 2.x).** `_parse_opencode_session()` (in `rag_engine/ingest.py`) reads
+**Parsing (OpenCode 2.x).** `_parse_opencode_session()` (in `ragnart/ingest.py`) reads
 `GET /api/session/{id}` (`{"data": {title, time.created, location.directory, ...}}`) and walks
 `GET /api/session/{id}/message?order=asc&limit=200` by `cursor.next` until an empty page
 (the route is newest-first by default; `cursor.next` is set on every non-empty page). 2.x
@@ -312,7 +314,7 @@ compares against every queue row, so all opencode rows counted as gone. The firs
 the 2.x upgrade (2026-10-14 13:01, HTTP 401) deleted all 445 sessions from Qdrant under a
 log line saying they were preserved. Canonical caller: `utils/rag_sync_nfs.py`.
 
-**Configuration** — keys in `SoHoAI-config.yaml`:
+**Configuration** — keys in `ragnart.yaml`:
 - `opencode.api_url` — base URL of the opencode HTTP API (scanner and parser).
 - `opencode.owner` — single constant owner stamped onto every opencode point.
   Single-user-per-host assumption (see "multi-tenant blind spot" above).
@@ -326,7 +328,7 @@ daemon invocations.
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 
-`rag_engine/scanner.py` uses `os.walk(..., followlinks=True)` so that symlinked
+`ragnart/scanner.py` uses `os.walk(..., followlinks=True)` so that symlinked
 directories are traversed. Two global dedup sets prevent the same content from being
 indexed twice regardless of how many symlink aliases exist:
 
@@ -418,7 +420,7 @@ this wait. Do not reduce below 60s while the ingest daemon may be running.
 To reduce search latency during ingestion in CPU mode, lower `--batch` (e.g. `--batch 2`).
 
 **Query latency (GPU mode)**: ~10–20ms/chunk. There is a single `rag.ollama_url` key, read by
-both `rag_engine/search.py:88` and `rag_engine/ingest.py:697`, so ingestion and search *cannot*
+both `ragnart/search.py:88` and `ragnart/ingest.py:697`, so ingestion and search *cannot*
 diverge — there is nothing to keep "consistent". Queries do still contend with ingestion, since
 both hit the same Ollama instance; on GPU the queue simply drains fast enough not to be noticed.
 
@@ -453,7 +455,7 @@ Two real differences exist between the hosts, and only one matters:
   nothing and takes Ollama's 4096 default. Ollama ties `batch_size` to context for embedding
   models, so a chunk longer than the configured context is truncated — and a chunk truncated on
   one host but not the other yields genuinely different vectors. Bounded by the chunk budgets in
-  `rag_engine/ingest.py:105-110` (child 250, flat 512, measured in tiktoken `cl100k_base` per
+  `ragnart/ingest.py:105-110` (child 250, flat 512, measured in tiktoken `cl100k_base` per
   `:128-129`), but bge-m3 tokenises with XLM-R SentencePiece, which runs longer than tiktoken on
   dense technical content — the same effect described under "Why not `mxbai-embed-large`?" below
   — so a 512-cl100k flat chunk can straddle 768. **If embedding is ever served from Server 1, set
@@ -491,7 +493,7 @@ bge-m3 is the practical optimum: near-top MTEB quality, 8192-token context, fits
 **Access**: REST API via `qdrant-client` Python library (`QdrantClient(url="http://192.168.1.93:6333")`).
 No LangChain wrapper.
 
-Config key: `rag.qdrant_url: "http://192.168.1.93:6333"` in `SoHoAI-config.yaml`.
+Config key: `rag.qdrant_url: "http://192.168.1.93:6333"` in `ragnart.yaml`.
 
 **Why Qdrant?**
 Qdrant's payload system stores arbitrary JSON per vector point and returns it with every
@@ -823,7 +825,7 @@ Family Group but have separate Google accounts.
 > does **not** apply to opencode sessions: those have synthetic
 > `opencode://{session_id}` keys with no derivable owner, and every opencode
 > point is currently stamped with a single config-constant
-> (`opencode.owner` in `SoHoAI-config.yaml`). Per-user isolation for opencode
+> (`opencode.owner` in `ragnart.yaml`). Per-user isolation for opencode
 > content is **not implemented** today — acceptable while opencode runs as a
 > single-user local API on a single host, but needs revisiting if multiple
 > users ever start accessing opencode through SoHoAI. See §1.2 "OpenCode
@@ -837,7 +839,7 @@ Family Group but have separate Google accounts.
 3. **Authorization**: at every RAG search and chat operation, the `owner` value determines what
    the user can access
 
-#### User → NFS root mapping (in `SoHoAI-config.yaml`)
+#### User → NFS root mapping (in `ragnart.yaml`)
 
 ```yaml
 users:
@@ -912,26 +914,26 @@ Google OAuth requires internet. For a home lab this means:
 | ------ | ------ |
 | Choose docling over unstructured | ✅ done |
 | Replace sentence-transformers with Ollama in rag.py | ✅ done (2026-04-08) |
-| Fix SoHoAI-config.yaml RAG section (mxbai-embed-large, ollama_url) | ✅ done (2026-04-16) |
+| Fix ragnart.yaml RAG section (mxbai-embed-large, ollama_url) | ✅ done (2026-04-16) |
 | Fix stale collection defaults in rag.py and schemas.py (`"default"` → `"documents"`) | ✅ done (2026-04-16) |
 | Add `owner` field to Qdrant payload schema and search filter | ✅ designed (2026-04-16) |
 | Add `user_id` to ChatRequest, SearchRequest, SQLite chats table | ✅ designed (2026-04-16) |
-| Add multi-user config (`users:` + `shared:` sections in SoHoAI-config.yaml) | ✅ done (2026-04-16) |
-| Define `rag_engine/` package layout + shared modules (`collection.py`, `schema.py`) | ✅ designed (2026-04-16) |
+| Add multi-user config (`users:` + `shared:` sections in ragnart.yaml) | ✅ done (2026-04-16) |
+| Define `ragnart/` package layout + shared modules (`collection.py`, `schema.py`) | ✅ designed (2026-04-16) |
 | Define `ingestion_queue` schema with crash recovery + retry columns | ✅ designed (2026-04-16) |
 | Define worker loop with delete-before-insert idempotency | ✅ designed (2026-04-16) |
-| Implement `rag_engine/collection.py` + `schema.py` (shared constants) | ✅ done (2026-04-16) |
-| Implement `rag_engine/embeddings.py` (extract from `rag.py`) | ✅ done (2026-04-16) |
-| Implement `rag_engine/state.py` (SQLite tracker CRUD + crash recovery) | ✅ done (2026-04-16) |
-| Implement `rag_engine/scanner.py` (NFS filesystem scanner) | ✅ done (2026-04-16) |
-| Implement `rag_engine/ingest.py` (docling parse + chunking + upsert) | ✅ done (2026-04-16) |
-| Implement `rag_engine/search.py` + `__init__.py` (`search_rag()` export) | ✅ done (2026-04-16) |
-| Wire RAG into main.py — delete `rag.py`, import `rag_engine` | ✅ done (2026-04-16) |
+| Implement `ragnart/collection.py` + `schema.py` (shared constants) | ✅ done (2026-04-16) |
+| Implement `ragnart/embeddings.py` (extract from `rag.py`) | ✅ done (2026-04-16) |
+| Implement `ragnart/state.py` (SQLite tracker CRUD + crash recovery) | ✅ done (2026-04-16) |
+| Implement `ragnart/scanner.py` (NFS filesystem scanner) | ✅ done (2026-04-16) |
+| Implement `ragnart/ingest.py` (docling parse + chunking + upsert) | ✅ done (2026-04-16) |
+| Implement `ragnart/search.py` + `__init__.py` (`search_rag()` export) | ✅ done (2026-04-16) |
+| Wire RAG into main.py — delete `rag.py`, import `ragnart` | ✅ done (2026-04-16) |
 | Implement standalone CLI utils (`utils/rag_*.py`) | ✅ done (2026-04-16) |
 | Add `POST /v1/rag/ingest/*` endpoints with user scoping | ✅ done (2026-04-16); ⛔ removed 2026-11-04 (§4.6) |
 | Add `db_base_path` global config variable | ✅ done (2026-04-16) |
-| Configure `users:` section in `SoHoAI-config.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
-| Move exclusion filters to SoHoAI-config.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
+| Configure `users:` section in `ragnart.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
+| Move exclusion filters to ragnart.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
 | Incremental sync deletes orphaned Qdrant points (not just SQLite rows) | ✅ done (2026-04-19) |
 | Run initial NFS scan + data ingestion | ⏳ in progress — see §5 |
 | Implement Google OAuth2 middleware (Phase 3, not blocking for RAG) | ⏳ Phase 3 |
@@ -939,13 +941,13 @@ Google OAuth requires internet. For a home lab this means:
 ### 4.2 Decoupled RAG Pipeline Architecture
 
 To support parallel development without disrupting the main LLM orchestrator, the RAG system is strictly isolated into its own boundary:
-* **`rag_engine/` Module:** An independent package containing all ingestion, chunking, and Qdrant DB connection logic.
+* **`ragnart/` Module:** An independent package containing all ingestion, chunking, and Qdrant DB connection logic.
 * **Interface Contract:** The main application (`router.py`/`main.py`) imports only a single function: `search_rag(query, user_id, limit)`. The `user_id` is the `owner` string (e.g. `"florian"`) — the RAG engine applies the Qdrant filter internally. The caller remains completely unaware of `docling`, Ollama batching, or Qdrant internals.
 
 #### Package layout (confirmed 2026-04-16)
 
 ```
-rag_engine/
+ragnart/
 ├── __init__.py          # exports search_rag(query, user_id, limit) only
 ├── embeddings.py        # embed_text(), embed_batch() — shared by ingestion + search
 ├── ingest.py            # docling parse, parent-child chunking, Qdrant upsert
@@ -967,14 +969,14 @@ rag_engine/
 
 | Work stream | Files | Can proceed independently? |
 |-------------|-------|---------------------------|
-| NFS scanner + SQLite tracker | `state.py`, `utils/rag_sync_nfs.py` | Yes — only needs SoHoAI-config.yaml + NFS |
+| NFS scanner + SQLite tracker | `state.py`, `utils/rag_sync_nfs.py` | Yes — only needs ragnart.yaml + NFS |
 | docling parsing + chunking | `ingest.py` (parse/chunk functions) | Yes — pure functions, no Qdrant |
 | Embedding integration | `embeddings.py` | Yes — only needs Ollama on Server 1 |
 | Qdrant upsert worker | `ingest.py` (upsert), `utils/rag_ingest_daemon.py` | Yes, after `collection.py` exists |
 | Search + prompt injection | `search.py`, main.py wiring | Yes, after `collection.py` + data exists |
 | CLI utils (status, search, reset) | `utils/rag_*.py` | Yes — reads SQLite/Qdrant |
 
-`rag.py` has been deleted. `rag_engine/` is the complete implementation.
+`rag.py` has been deleted. `ragnart/` is the complete implementation.
 
 ### 4.3 State Management (The Tracker)
 
@@ -1025,7 +1027,7 @@ full incremental reconciliation on every run:
   (the worker loop handles Qdrant cleanup before re-ingestion — see §4.4 step 0)
 - **Deleted or excluded files:** if a previously `completed` file no longer appears in the
   scan results — whether because it was physically deleted from NFS, or because it is now
-  matched by an exclusion filter in `SoHoAI-config.yaml` — its SQLite row is removed **and** all
+  matched by an exclusion filter in `ragnart.yaml` — its SQLite row is removed **and** all
   corresponding Qdrant points are deleted, filtered by `source_path`. Each delete uses
   `wait=False` (fire-and-forget) — Qdrant queues it and returns immediately, so the script
   never blocks on index re-optimization. Any exception (Qdrant unreachable) aborts the
@@ -1063,7 +1065,7 @@ To prevent the Qdrant database from serving partial context during active buildi
    `"Embedding progress: N/M  filename"` — consumed by `rag_status.py --watch`.
 5. **Build Payloads:** Construct Qdrant point objects, binding the vector, UUID, and payload
    (`source_path`, `parent_text`, `owner` from SQLite row). All field names imported from
-   `rag_engine/schema.py` constants — no string literals.
+   `ragnart/schema.py` constants — no string literals.
 6. **Batched Upsert:** Send all points for the document to Qdrant in batches of
    `_UPSERT_BATCH_SIZE` (256) points per `client.upsert()` call. Update `progress_detail = "upserting"`.
    A single upsert with all points can exceed Qdrant's HTTP body limit for large files
@@ -1087,7 +1089,7 @@ chunking changes produce a different number of chunks.
 ### 4.5 Standalone Utilities (`utils/`)
 
 Standalone CLI scripts enable independent progress monitoring and RAG pipeline management without launching the FastAPI server:
-* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `SoHoAI-config.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
+* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `ragnart.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
 * `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload). Both `--workers` and `--batch` are **required** flags — see §5.4 for operating points. `--workers` controls file-level concurrency (how many files parse+embed simultaneously, each in its own OS thread with a thread-local `DocumentConverter`); `--batch` controls chunk-level Ollama concurrency within each file.
 * `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `processing`, `completed`, `ignored`). `ignored` count always shown; `--ignored` for full detail listing with retry count and last error. Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps. `--list-pending [N]` prints pending file paths one per line (pipeable into `wc -l`, `head`, etc.); combinable with `--user`.
   `--watch` log parser (`parse_log`) tracks all in-flight files simultaneously (updated 2026-04-22). The original single-state machine reset on every `Processing` line and would lose any file whose `Chunked` line had already appeared before a later `Processing` line — i.e. it broke silently with `--workers > 1`. Fix: per-file state dict keyed by full NFS path; `name_to_path` lookup associates `Chunked`/`Embedding progress`/`Ingested` lines (filename only) back to their full-path entry. Display picks the file currently in `embedding` phase with the most recent progress timestamp.
@@ -1096,7 +1098,7 @@ Standalone CLI scripts enable independent progress monitoring and RAG pipeline m
 
 ### 4.6 APIs for Control & Monitoring — ingestion endpoints removed (2026-11-04)
 
-The orchestrator (Server 1) serves **search only** (`GET /v1/rag/search`, which reads Qdrant
+The orchestrator (Server 1) serves **search only** (`GET /v1/search`, which reads Qdrant
 and never the SQLite tracker). Search is scoped to the user's `owner` + `"la-familia"`.
 
 The four ingestion endpoints added 2026-04-16 — `POST /v1/rag/ingest/sync`, `/start`, `/stop`
@@ -1112,8 +1114,8 @@ Equivalents, run on **Server 2**:
 | Removed endpoint | Use instead (on Server 2) |
 |---|---|
 | `POST /v1/rag/ingest/sync[?user=]` | `python utils/rag_sync_nfs.py --user florian` |
-| `POST /v1/rag/ingest/start` | `bash scripts/rag-ingest-run.sh` (or `utils/rag_ingest_daemon.py`) |
-| `POST /v1/rag/ingest/stop` | `sudo systemctl stop rag-ingest.service` |
+| `POST /v1/rag/ingest/start` | `bash scripts/ragnart-ingest-run.sh` (or `utils/rag_ingest_daemon.py`) |
+| `POST /v1/rag/ingest/stop` | `sudo systemctl stop ragnart-ingest.service` |
 | `GET /v1/rag/ingest/status[?user=]` | `python utils/rag_status.py [--user florian]` |
 
 ---
@@ -1162,10 +1164,10 @@ ls /mnt/nfs/__Backups/SoHoAI--databases/
 ```
 
 All directories must exist and be writable. They are all under `db_base_path` in
-`SoHoAI-config.yaml` — change that single key to relocate everything (also update `redis.dir`
+`ragnart.yaml` — change that single key to relocate everything (also update `redis.dir`
 manually, as it is not auto-derived in Python).
 
-### 5.2 Configure NFS roots in `SoHoAI-config.yaml`
+### 5.2 Configure NFS roots in `ragnart.yaml`
 
 `florian.otel@gmail.com` is already active. The `shared:` section (`/mnt/nfs/La-Familia`)
 is already active. Other users (Eva, Annika, Laura) remain commented out until ready.
@@ -1178,7 +1180,7 @@ To add another user, uncomment their block and fill in the real Google email:
   #   nfs_roots: ["/mnt/nfs/Eva"]
 ```
 
-To adjust exclusion filters (add or remove paths), edit `SoHoAI-config.yaml` under `rag.scanner`
+To adjust exclusion filters (add or remove paths), edit `ragnart.yaml` under `rag.scanner`
 (see §1.2). No code change required — the scanner reads these at runtime.
 
 ### 5.3 Populate the ingestion queue (NFS scan)
@@ -1188,7 +1190,7 @@ python utils/rag_sync_nfs.py
 ```
 
 This walks `/mnt/nfs/Florian` and `/mnt/nfs/La-Familia`, applies all exclusion filters
-from `SoHoAI-config.yaml` (`rag.scanner`), and inserts discovered files into the SQLite ingestion
+from `ragnart.yaml` (`rag.scanner`), and inserts discovered files into the SQLite ingestion
 queue (`rag_state.db`) as `pending`. Takes 1–3 minutes — filesystem `stat()` calls only,
 no embedding yet.
 
@@ -1229,7 +1231,7 @@ embed are strictly sequential so they do not compete. `--workers 1` keeps doclin
 4 internal threads from crowding out Ollama.
 
 ```bash
-# SoHoAI-config.yaml: ollama_url: http://192.168.1.93:11434/api/embeddings
+# ragnart.yaml: ollama_url: http://192.168.1.93:11434/api/embeddings
 screen -S rag-ingest
 python utils/rag_ingest_daemon.py --workers 1 --batch 5
 # Ctrl-A D to detach; screen -r rag-ingest to reattach
@@ -1270,7 +1272,7 @@ leaving only ~1GB headroom in the RTX 5070's 12GB — fine at low concurrency bu
 under a heavy `--batch 20` load.
 
 ```bash
-# SoHoAI-config.yaml: ollama_url: http://192.168.1.95:11434/api/embeddings
+# ragnart.yaml: ollama_url: http://192.168.1.95:11434/api/embeddings
 screen -S rag-ingest
 python utils/rag_ingest_daemon.py --workers 3 --batch 20
 # Ctrl-A D to detach; screen -r rag-ingest to reattach
@@ -1383,7 +1385,7 @@ python utils/rag_smoke_test.py --query "AWS certifications" --user florian \
 Alternatively call the endpoint directly:
 
 ```bash
-curl "http://192.168.1.93:8000/v1/rag/search?q=AWS+certifications&user=florian"
+curl "http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian"
 ```
 
 Note: server-managed RAG (`rag_mode`) was removed on 2026-05-27. Clients manage
@@ -1533,7 +1535,7 @@ python utils/rag_reset.py --user florian
 | `.xlsx` | Skipped | Not supported by docling |
 | `.jpg` / `.png` / `.mp4` | Skipped | Phase 4 (CLIP embeddings) |
 
-Exclusion filters (directories and file patterns) are configured in `SoHoAI-config.yaml` under
+Exclusion filters (directories and file patterns) are configured in `ragnart.yaml` under
 `rag.scanner` — see §1.2 for the full list and how to add new exclusions.
 
 ---
@@ -1590,11 +1592,11 @@ relevance-plus-diversity-optimised candidate set.
 **Scope (implemented):**
 - `schemas.py` — `rag_mode: RagMode` enum (legacy boolean flag removed)
 - `main.py` — tool-use loop, `_retrieve()` dispatcher, `_apply_system_prompt()`, `_fold_tool_messages()`, `variant_llm_fn` startup closure
-- `rag_engine/multi_query.py` — new (multi-query + MMR)
-- `rag_engine/tool_use.py` — new (tool-call protocol parser + formatter)
+- `ragnart/multi_query.py` — new (multi-query + MMR)
+- `ragnart/tool_use.py` — new (tool-call protocol parser + formatter)
 - `prompts/rag_system_prompts.py` — new (system prompts for off/on/only modes)
-- `rag_engine/__init__.py` — simplified to clean re-export of `search_rag` + `multi_query_search`
-- `SoHoAI-config.yaml` — single merged `rag:` block with `tool_use:` and `multi_query:` sub-sections
+- `ragnart/__init__.py` — simplified to clean re-export of `search_rag` + `multi_query_search`
+- `ragnart.yaml` — single merged `rag:` block with `tool_use:` and `multi_query:` sub-sections
 - `utils/cli_chat.py` — `/rag on|off|only`, sends `rag_mode` field
 - `utils/rag_smoke_test.py` — updated to `rag_mode: "on"` payload
 
@@ -1609,11 +1611,11 @@ issues found and fixed:
 | File | Issue | Fix |
 |---|---|---|
 | `main.py` | Entire orchestrator replaced with a mock stub returning static strings | Restored from git; §8 changes applied surgically on top |
-| `SoHoAI-config.yaml` | Duplicate `rag:` key — second block silently shadowed the first, destroying `qdrant_url`, `ollama_url`, `top_k`, `scanner` | Merged into one `rag:` block |
-| `rag_engine/__init__.py` | `def search_rag()` shadowed its own import; `else` branch called itself → infinite recursion | Reduced to two-line re-export; dispatch lives in `main.py:_retrieve()` |
-| `rag_engine/__init__.py` | `multi_query_search(..., llm_fn=None)` — crash on first multi-query call | Removed from `__init__`; only `main.py:_retrieve()` calls it with a valid `llm_fn` |
-| `rag_engine/multi_query.py` | Missing `from typing import Any` | Added |
-| `rag_engine/tool_use.py` | Unused `PointStruct` import | Removed |
+| `ragnart.yaml` | Duplicate `rag:` key — second block silently shadowed the first, destroying `qdrant_url`, `ollama_url`, `top_k`, `scanner` | Merged into one `rag:` block |
+| `ragnart/__init__.py` | `def search_rag()` shadowed its own import; `else` branch called itself → infinite recursion | Reduced to two-line re-export; dispatch lives in `main.py:_retrieve()` |
+| `ragnart/__init__.py` | `multi_query_search(..., llm_fn=None)` — crash on first multi-query call | Removed from `__init__`; only `main.py:_retrieve()` calls it with a valid `llm_fn` |
+| `ragnart/multi_query.py` | Missing `from typing import Any` | Added |
+| `ragnart/tool_use.py` | Unused `PointStruct` import | Removed |
 | `schemas.py` | `SearchRequest.rag_mode` — irrelevant on retrieval-only endpoint | Removed |
 | `prompts/rag_system_prompts.py` | Imported dead `build_tool_spec`; defined its own `RagMode = Literal[...]` | Removed dead import; imports `RagMode` from `schemas` |
 | `utils/cli_chat.py` + `rag_smoke_test.py` | Still sent legacy boolean payload | Updated to `rag_mode: str` |
@@ -1628,23 +1630,23 @@ All service addresses in the codebase now use explicit IPs:
 |---|---|---|
 | Redis | `127.0.0.1:6379` | **Loopback required** — Redis runs in protected mode on Server 1; orchestrator is co-located. Config comment explains this. Do not change. |
 | Ollama | `192.168.1.93:11434` | Ollama runs on Server 1 CPU. Explicit IP for consistency and correctness if any util is ever run from Server 2. |
-| Qdrant | `192.168.1.93:6333` | Qdrant runs on Server 1 NVMe. Explicit IP in both `SoHoAI-config.yaml` and all Python fallbacks. |
+| Qdrant | `192.168.1.93:6333` | Qdrant runs on Server 1 NVMe. Explicit IP in both `ragnart.yaml` and all Python fallbacks. |
 | llama-server | `192.168.1.95:8000` | Server 2 GPU. Always been explicit — unchanged. |
 
-`SoHoAI-config.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `SoHoAI-config.yaml` exactly and are only reached if the config file fails to load.
+`ragnart.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `ragnart.yaml` exactly and are only reached if the config file fails to load.
 
 ### 8.1 Server-managed RAG modes ⛔ removed 2026-05-27
 
 The `rag_mode` parameter, three-mode system (off/on/only), system-prompt injection,
 and server-side tool-use loop were removed as part of Session 2 cleanup. Clients
-retrieve documents directly via `GET /v1/rag/search` and manage their own RAG loops.
+retrieve documents directly via `GET /v1/search` and manage their own RAG loops.
 
-Files removed: `rag_engine/tool_use.py`, `prompts/rag_system_prompts.py`,
-`utils/cli_chat.py`, `rag_engine/main.py` (dead code).
+Files removed: `ragnart/tool_use.py`, `prompts/rag_system_prompts.py`,
+`utils/cli_chat.py`, `ragnart/main.py` (dead code).
 
 ### 8.2 Tool-use RAG loop ⛔ removed 2026-05-27
 
-See §8.1 tombstone. The `rag_engine/tool_use.py` module and all associated
+See §8.1 tombstone. The `ragnart/tool_use.py` module and all associated
 pipeline code in `main.py` were deleted.
 
 ### 8.3 Multi-query retrieval with MMR reranking 🚫 evaluated 2026-04-22 — no-go, permanently disabled
@@ -1684,7 +1686,7 @@ MMR = argmax_{d ∈ C \ S} [ λ · sim(q, d) − (1 − λ) · max_{d' ∈ S} si
 Iterative selection until `|S| == top_k`. Returns `S` in selection order (the first-
 picked chunk is the most relevant + novel; subsequent picks add diversity).
 
-#### New module: `rag_engine/multi_query.py`
+#### New module: `ragnart/multi_query.py`
 
 ```python
 """Multi-query retrieval with MMR reranking.
@@ -2078,7 +2080,7 @@ also spends money). Not appropriate until:
 
 #### What the implementation will look like (when approved)
 
-- **Where**: `rag_engine/ingest.py`, between the chunking step (step 3) and the
+- **Where**: `ragnart/ingest.py`, between the chunking step (step 3) and the
   embedding step (step 4). New helper `_contextualise_chunks(parent_text, child_chunks,
   llm_fn) -> list[str]`.
 - **Prompt** (per Anthropic, adapted):
@@ -2193,7 +2195,7 @@ Prompt caching and rolling summarization are mildly antagonistic:
 
 **Sonnet 4.6 path**: Will eventually support native Anthropic tool-use (tool-use blocks in request → tool-use blocks in response). For now, tool-use still uses the `<tool_call>` XML sentinel (legacy, inherited from local models).
 
-**Qwen3.5 fallback path**: Stays on XML sentinel (`<tool_call>…</tool_call>` in both system prompt and response parsing). When fallback occurs mid-RAG-loop, the XML sentinel still works — `parse_tool_call()` in `rag_engine/tool_use.py` handles both paths.
+**Qwen3.5 fallback path**: Stays on XML sentinel (`<tool_call>…</tool_call>` in both system prompt and response parsing). When fallback occurs mid-RAG-loop, the XML sentinel still works — `parse_tool_call()` in `ragnart/tool_use.py` handles both paths.
 
 ### Future: premium/high-stakes mode
 
@@ -2211,9 +2213,9 @@ preventing concurrent daemon instances across both servers.
 
 | File | Role |
 |------|------|
-| `scripts/rag-ingest.timer` | Fires at 01:00, 07:00, 13:00, 19:00 local time; `Persistent=true` catches missed slots after reboot |
-| `scripts/rag-ingest.service` | `Type=oneshot`; `Wants=network-online.target` (NFS safety at boot); `Environment=HOME=/home/florian` (reliable venv path) |
-| `scripts/rag-ingest-run.sh` | Shell wrapper: multi-user sync loop → daemon |
+| `scripts/ragnart-ingest.timer` | Fires at 01:00, 07:00, 13:00, 19:00 local time; `Persistent=true` catches missed slots after reboot |
+| `scripts/ragnart-ingest.service` | `Type=oneshot`; `Wants=network-online.target` (NFS safety at boot); `Environment=HOME=/home/florian` (reliable venv path) |
+| `scripts/ragnart-ingest-run.sh` | Shell wrapper: multi-user sync loop → daemon |
 | `scripts/rag-ingest-logrotate` | Daily rotation, 7 days, `copytruncate` |
 
 The service is installed on one server only. Installing on both servers works (both timers
@@ -2223,7 +2225,7 @@ fire, one daemon wins the lock, the other skips) but doubles chatter in the log.
 still running from a previous slot. This prevents buildup of concurrent instances for free,
 even before the lock is checked.
 
-### 10.2 Shell wrapper — `scripts/rag-ingest-run.sh`
+### 10.2 Shell wrapper — `scripts/ragnart-ingest-run.sh`
 
 The wrapper is the sole entry point — invoked by the service and by operators for manual runs.
 
@@ -2241,7 +2243,7 @@ Key design choices:
 
 ### 10.3 NFS distributed lock — `rag.ingest_lock`
 
-**Config** (`SoHoAI-config.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
+**Config** (`ragnart.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
 
 The daemon (`utils/rag_ingest_daemon.py`) acquires an exclusive lock on this NFS file at
 startup, before any ingestion work begins. The lock prevents two daemon instances from
@@ -2292,47 +2294,47 @@ Other concurrency scenarios:
 
 **Install (run once on target server):**
 ```bash
-sudo cp scripts/rag-ingest.service /etc/systemd/system/
-sudo cp scripts/rag-ingest.timer   /etc/systemd/system/
+sudo cp scripts/ragnart-ingest.service /etc/systemd/system/
+sudo cp scripts/ragnart-ingest.timer   /etc/systemd/system/
 sudo cp scripts/rag-ingest-logrotate /etc/logrotate.d/rag-ingest
 sudo systemctl daemon-reload
-sudo systemctl enable --now rag-ingest.timer
+sudo systemctl enable --now ragnart-ingest.timer
 ```
 
 **Check status:**
 ```bash
-systemctl status rag-ingest.timer
-systemctl list-timers rag-ingest.timer
-journalctl -u rag-ingest.service -f          # live output from last/current run
+systemctl status ragnart-ingest.timer
+systemctl list-timers ragnart-ingest.timer
+journalctl -u ragnart-ingest.service -f          # live output from last/current run
 ```
 
 **Manual trigger (same code path as timer):**
 ```bash
-bash scripts/rag-ingest-run.sh
+bash scripts/ragnart-ingest-run.sh
 tail -f /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
 python utils/rag_status.py --watch /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
 ```
 
 **Debug (stop timer, run scripts individually):**
 ```bash
-sudo systemctl stop rag-ingest.timer         # prevent auto-start during debug session
-sudo systemctl stop rag-ingest.service       # stop any active run (SIGTERM; daemon finishes current file)
+sudo systemctl stop ragnart-ingest.timer         # prevent auto-start during debug session
+sudo systemctl stop ragnart-ingest.service       # stop any active run (SIGTERM; daemon finishes current file)
 
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 python utils/rag_sync_nfs.py --user florian  # safe to run standalone, idempotent
 python utils/rag_ingest_daemon.py --workers 1 --batch 5 \
     --log-file /tmp/rag-debug.log            # daemon acquires lock; second invocation exits cleanly
 
-sudo systemctl start rag-ingest.timer        # re-enable when done
+sudo systemctl start ragnart-ingest.timer        # re-enable when done
 ```
 
 **Add a second user:**  
-Edit `scripts/rag-ingest-run.sh`, line `RAG_SYNC_USERS=("florian")` → `RAG_SYNC_USERS=("florian" "eva")`.
+Edit `scripts/ragnart-ingest-run.sh`, line `RAG_SYNC_USERS=("florian")` → `RAG_SYNC_USERS=("florian" "eva")`.
 No other changes needed — the wrapper loops over the array sequentially.
 
 **CPU-embed mode** (if Ollama GPU on Server 2 is unavailable):
 ```bash
-RAG_WORKERS=1 RAG_BATCH=5 bash scripts/rag-ingest-run.sh
+RAG_WORKERS=1 RAG_BATCH=5 bash scripts/ragnart-ingest-run.sh
 ```
 Or set `Environment=RAG_WORKERS=1` / `Environment=RAG_BATCH=5` in the service unit and
 `sudo systemctl daemon-reload`.
@@ -2349,7 +2351,7 @@ copies coherent, and NFS file locking (which does cross hosts here, §10.3) does
 the index contents. `StateDB()`'s constructor is itself a write (`PRAGMA journal_mode=WAL`,
 `CREATE TABLE IF NOT EXISTS`, migrations, `commit`).
 
-**Rule:** only Server 2 opens `rag_state.db`. That is where `rag-ingest.timer` runs
+**Rule:** only Server 2 opens `rag_state.db`. That is where `ragnart-ingest.timer` runs
 `rag_sync_nfs.py`, the daemon and the snapshot. Run `rag_status.py`, `rag_reset.py`,
 `rag_purge_corrupt.py` and ad-hoc `sqlite3` sessions on Server 2 too. A read-only
 `sqlite3 "file:...?mode=ro"` from another host can still return a wrong answer or
@@ -2388,7 +2390,7 @@ recovery.
 
 ### 11.2 How consistency is guaranteed
 
-After every ingestion run `scripts/rag-ingest-run.sh` executes two additional steps
+After every ingestion run `scripts/ragnart-ingest-run.sh` executes two additional steps
 (inserted after the daemon exits and before the final log line):
 
 **Step A — SQLite WAL checkpoint**
@@ -2492,7 +2494,7 @@ and the Qdrant `.snapshot` files are on NFS and are recoverable from any NFS sna
 Prevents new data from being written to `rag_state.db` or Qdrant while restoring.
 ```bash
 # On Server 2 (192.168.1.95)
-sudo systemctl stop rag-ingest.timer rag-ingest.service
+sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
 ```
 Confirm no daemon is running (the lock file should be absent or unlocked):
 ```bash
@@ -2555,7 +2557,7 @@ rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-{wal,shm}
 
 ```bash
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
-cd /mnt/nfs/Florian/Gin-AI/projects/SoHoAI
+cd /mnt/nfs/Florian/Gin-AI/projects/RAGNART
 
 # Queue counts — completed should match the Qdrant point count roughly
 python utils/rag_status.py
@@ -2582,8 +2584,8 @@ python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
 
 ```bash
 # On Server 2
-sudo systemctl start rag-ingest.timer
-systemctl list-timers rag-ingest.timer
+sudo systemctl start ragnart-ingest.timer
+systemctl list-timers ragnart-ingest.timer
 ```
 
 ### 11.6 SQLite-only rollback (Qdrant healthy)
@@ -2592,7 +2594,7 @@ Use this when `rag_state.db` is corrupted but Qdrant's NVMe storage is intact.
 
 ```bash
 # 1. Stop ingestion on Server 2
-sudo systemctl stop rag-ingest.timer rag-ingest.service
+sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
 
 # 2. Restore rag_state.db from NFS snapshot
 cp /path/to/nfs-snapshot-at-T/sqlite/rag_state.db \
@@ -2602,7 +2604,7 @@ rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-{wal,shm}
 # 3. Reconcile: rag_sync_nfs.py will re-queue any file in SQLite marked 'completed'
 #    that is absent from Qdrant, and remove SQLite rows for files no longer on NFS
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
-cd /mnt/nfs/Florian/Gin-AI/projects/SoHoAI
+cd /mnt/nfs/Florian/Gin-AI/projects/RAGNART
 python utils/rag_sync_nfs.py --user florian
 
 # 4. Re-ingest any gaps
@@ -2610,24 +2612,24 @@ python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
   --log-file /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
 
 # 5. Restart ingestion timer
-sudo systemctl start rag-ingest.timer
+sudo systemctl start ragnart-ingest.timer
 ```
 
 ### 11.7 Portability — moving snapshot ownership to another server
 
-All snapshot automation (`rag-ingest-run.sh` tail steps + 03:00 cron) currently runs on
+All snapshot automation (`ragnart-ingest-run.sh` tail steps + 03:00 cron) currently runs on
 **Server 2** (192.168.1.95, NucBoxK11). The wrapper script is on NFS (shared), so only
 the systemd unit activation and crontab entry are server-local.
 
 To migrate to a different server:
 ```bash
 # On Server 2 — disable the timer and remove the cron
-sudo systemctl disable rag-ingest.timer
+sudo systemctl disable ragnart-ingest.timer
 crontab -l | grep -v qdrant-snapshot | crontab -
 
 # On the new server — enable the timer and add the cron
-sudo systemctl enable --now rag-ingest.timer
-(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log 2>&1") | crontab -
+sudo systemctl enable --now ragnart-ingest.timer
+(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log 2>&1") | crontab -
 ```
 
 Ensure the new server can reach Qdrant at `http://192.168.1.93:6333` and has the NFS
@@ -2661,7 +2663,7 @@ After corpus growth to ~1.46M points, RAG search quality degraded:
   Skips files still on disk unless `--force`. Retries on Qdrant 500s (optimizer lock).
 - Uses a **read-only** SQLite connection (`mode=ro` URI) — never writes to SQLite.
 
-**Ingest quality gate** (`rag_engine/ingest.py`):
+**Ingest quality gate** (`ragnart/ingest.py`):
 - After parsing, skip documents where `printable_ratio(text) < 0.85`.
 - Marks such files as `ignored` in SQLite so they don't re-enter the pipeline.
 - Prevents corrupt scanned PDFs and binary-encoded files from re-ingesting.
@@ -2674,13 +2676,13 @@ After corpus growth to ~1.46M points, RAG search quality degraded:
 
 ### 12.3 Search improvements
 
-**Score threshold + expanded pool** (`rag_engine/search.py`):
+**Score threshold + expanded pool** (`ragnart/search.py`):
 - New `score_threshold: float = 0.0` parameter; passed to `query_points(score_threshold=)`.
 - Internally fetches `min(limit × 3, 50)` candidates, then slices to `limit` after
   threshold filtering — better recall without widening the public API.
 
 **Endpoint exposure** (`main.py`):
-- `/v1/rag/search` gains `?score_threshold=FLOAT` and `?multi_query=BOOL` params.
+- `/v1/search` gains `?score_threshold=FLOAT` and `?multi_query=BOOL` params.
 - `multi_query=true` routes through `multi_query_search()` (Gemma query expansion + MMR).
   Uses `app.state.variant_llm_fn` built at startup from `rag.multi_query.variant_model`.
 
@@ -2787,7 +2789,7 @@ path as server-unreachable).
 
 ### 13.3 Configuration
 
-All settings are in the `rag.rerank` block of `SoHoAI-config.yaml`:
+All settings are in the `rag.rerank` block of `ragnart.yaml`:
 
 ```yaml
 rag:
@@ -2870,7 +2872,7 @@ top-5.
 ### 13.5 Failure mode
 
 If the reranker is unavailable (network error, timeout, server crash):
-1. HTTP error is caught in `rag_engine/rerank.py`.
+1. HTTP error is caught in `ragnart/rerank.py`.
 2. Single WARN log is issued: `"reranker failed: <reason> — falling back to Qdrant order"`.
 3. Candidates list is returned in Qdrant cosine order (unchanged).
 4. Chat continues without exception.
@@ -2905,9 +2907,9 @@ Reranking is **enabled by default** but can be disabled at multiple levels:
        enabled: false              # disable for all calls
    ```
 
-2. **API endpoint** (`/v1/rag/search`):
+2. **API endpoint** (`/v1/search`):
    ```bash
-   curl http://192.168.1.93:8000/v1/rag/search?q=...&user=florian&rerank=false
+   curl http://192.168.1.95:8100/v1/search?q=...&user=florian&rerank=false
    ```
 
 3. **CLI** (`utils/rag_search_cli.py`):
@@ -2970,7 +2972,7 @@ query
                                   cross-encoder rerank (bge-reranker-v2-m3) → top 5
 ```
 
-### 14.3 Configuration (SoHoAI-config.yaml)
+### 14.3 Configuration (ragnart.yaml)
 
 ```yaml
 rag:
@@ -3079,6 +3081,6 @@ query_points(..., query=FusionQuery(fusion=Fusion.RRF))
 
 Effect: Qdrant returns HTTP 400 with a JSON parse error pointing to the wrong field type.
 
-All three fixes are in `rag_engine/collection.py`, `rag_engine/search.py`, and
+All three fixes are in `ragnart/collection.py`, `ragnart/search.py`, and
 `utils/rag_sparse_migrate.py`. Smoke test passes after all fixes applied.
 

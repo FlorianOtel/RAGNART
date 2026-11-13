@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed")
-updated_at: 2026-11-04--17-20
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged)
+updated_at: 2026-11-13--14-04
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -38,6 +38,8 @@ context: >
   the orchestrator on Server 1 opening the WAL-mode state DB during an ingest on Server 2. The
   orchestrator's ingest endpoints were removed. The 2026-05-12 SQLite incident is reassessed.
 ---
+
+> Moved here from SoHoAI on 2026-11-13; see docs/v0--Implementation-log.md.
 
 # SoHoAI RAG Pipeline — Troubleshooting
 
@@ -76,7 +78,7 @@ The OpenCode server on Server 2 became 2.x on 2026-10-14 (`opencode-v2-server.se
    purged, **445 of them opencode sessions** — under a log line saying they were preserved.
    Measured 2026-11-04: 0 `opencode://` rows in the queue, 0 opencode points in Qdrant.
 
-Fix (RAG-strategy.md §1.2): `rag_engine/opencode_client.py` (Basic auth from the server's own
+Fix (RAG-strategy.md §1.2): `ragnart/opencode_client.py` (Basic auth from the server's own
 env file `opencode.password_env_file`; non-JSON answers raise); the parser reads
 `/api/session/{id}` and walks `/api/session/{id}/message?order=asc` by cursor with the 2.x
 message shape, raising on errors; `StateDB.paths_with_prefix("opencode://")` keeps the rows when
@@ -120,7 +122,7 @@ curl -s -X POST http://192.168.1.93:6333/collections/documents/facet \
 The first manual re-run failed in `rag_sync_nfs.py`:
 
 ```
-File ".../rag_engine/state.py", line 128, in discover_or_update
+File ".../ragnart/state.py", line 128, in discover_or_update
 sqlite3.DatabaseError: database disk image is malformed
 ```
 
@@ -184,7 +186,7 @@ just had far more "at-bats" than any other (see root cause #1).
 `/home/florian/.claude` is a symlink → `/home/florian/Gin-AI/dot.claude-Linux` → (NFS)
 `/mnt/nfs/Florian/Gin-AI/dot.claude-Linux`. `scan_nfs_roots()` walks the NFS root directly, so
 `os.walk()` sees the real directory name `dot.claude-Linux`, never `.claude`.
-`_is_excluded_dir()` (`rag_engine/scanner.py`) does exact trailing-slash name matching, so the
+`_is_excluded_dir()` (`ragnart/scanner.py`) does exact trailing-slash name matching, so the
 existing `.claude/` entry in `rag.scanner.exclude_dir_names` never fires for this tree.
 
 Result: the generic NFS scanner freely ingested, as ordinary documents:
@@ -203,7 +205,7 @@ advances on almost every scan cycle — it's reset to `pending` and reprocessed 
 than any static file, which is why it disproportionately hit the timeout window in root cause #2.
 
 **Fix:** added `"dot.claude-Linux/"` to `rag.scanner.exclude_dir_names` in
-`SoHoAI-config.yaml`. `scan_claude_chats()` is a separate function scanning
+`ragnart.yaml`. `scan_claude_chats()` is a separate function scanning
 `/home/florian/.claude/projects` directly — unaffected by this change.
 
 ### Root cause #2 — no Qdrant payload index on `source_path`
@@ -211,7 +213,7 @@ than any static file, which is why it disproportionately hit the timeout window 
 `GET /collections/documents` returned `"payload_schema": {}` — no payload index existed on
 any field, despite the collection having grown to **2,561,962 points** (vs. 98,737 at Phase 2
 completion in April; the duplication in root cause #1 contributed to this growth). Every
-ingestion's step 0 (`rag_engine/ingest.py::ingest_file()`) deletes stale points via:
+ingestion's step 0 (`ragnart/ingest.py::ingest_file()`) deletes stale points via:
 
 ```python
 qdrant_client.delete(
@@ -222,14 +224,14 @@ qdrant_client.delete(
 ```
 
 Without an index this is an unindexed linear scan across every point in the collection —
-routinely exceeding the `QdrantClient(timeout=60)` set in `get_client()` (`rag_engine/
+routinely exceeding the `QdrantClient(timeout=60)` set in `get_client()` (`ragnart/
 collection.py`) at this scale. This is a **refinement**, not a contradiction, of the
 2026-04-22 entry below: at 473K points the 60s timeout bump was sufficient because Qdrant's
 own index-optimization pauses were the bottleneck; at 2.5M+ points the *lack of a payload
 index* became the dominant cost, and no client timeout increase fixes an O(n) scan that grows
 with corpus size.
 
-**Fix:** `rag_engine/collection.py::ensure_payload_indexes()` — called from `ensure_collection()`
+**Fix:** `ragnart/collection.py::ensure_payload_indexes()` — called from `ensure_collection()`
 on every process, cached per-process after the first check — creates a `KEYWORD` index on
 `source_path` via `create_payload_index()` (idempotent; Qdrant no-ops if already present).
 Verified on the live collection:
@@ -243,7 +245,7 @@ payload_schema: {'source_path': {'data_type': 'keyword', 'points': 2561962}}
 
 ### Verification
 
-1. `python3 -c "from rag_engine.collection import get_client, ensure_collection; ..."` — index
+1. `python3 -c "from ragnart.collection import get_client, ensure_collection; ..."` — index
    created and confirmed via `get_collection().payload_schema`.
 2. `python utils/rag_sync_nfs.py --user florian` — with the exclude fix live, the scanner
    correctly flagged 2,629 now-excluded files under `dot.claude-Linux/` (including
@@ -355,7 +357,7 @@ Nothing was listening on port 8001 on Server 2. RAG kept answering, so nothing l
 from the outside — the gateway log just carried a steady drip of:
 
 ```
-[rag_engine.rerank] WARNING: reranker failed: All connection attempts failed — falling back to Qdrant order
+[ragnart.rerank] WARNING: reranker failed: All connection attempts failed — falling back to Qdrant order
 ```
 
 That is the designed fallback (RAG-strategy.md §13.5). No outage, only silently unranked results.
@@ -379,7 +381,7 @@ at 23:28, the reranker was not.
 `bge-reranker-v2-m3` is a llama-swap model (backing port 8012), reached through llama-swap's
 proxy at **`http://192.168.1.95:8000/v1/rerank`**. llama-swap routes `/v1/rerank` by the
 request's `model` field, so the llama-swap model key must stay identical to `rag.rerank.model`
-in `SoHoAI-config.yaml`. `rag.rerank.server_url` moved from `:8001` to `:8000` to match.
+in `ragnart.yaml`. `rag.rerank.server_url` moved from `:8001` to `:8000` to match.
 
 ### GPU tenancy — measured, not estimated
 
@@ -448,7 +450,7 @@ stack down until someone reattaches. That remains unfixed.
 
 ### Gotcha — the gateway does not hot-reload config edited over NFS
 
-After `SoHoAI-config.yaml` was edited, the gateway kept calling the old `:8001`. `main.py` reads
+After `ragnart.yaml` was edited, the gateway kept calling the old `:8001`. `main.py` reads
 the config once at import (~line 138) and exposes no reload endpoint; `uvicorn --reload` watches
 via inotify, which **does not fire for NFS writes made from another host**. Editing the config
 from Server 2 leaves Server 1's gateway on stale values indefinitely. After any remote config
@@ -471,7 +473,7 @@ even after a successful migration. Hybrid search silently falls back to dense-on
 Python client, but the code checked `sparse_vectors_config` (which doesn't exist, so
 `getattr(..., None)` always returns `None`).
 
-**Fix** (`rag_engine/collection.py`, `utils/rag_sparse_migrate.py`):
+**Fix** (`ragnart/collection.py`, `utils/rag_sparse_migrate.py`):
 ```python
 # Wrong:
 sparse = getattr(info.config.params, "sparse_vectors_config", None)
@@ -498,7 +500,7 @@ hybrid search call. Traceback points to `Prefetch` model construction.
 **Root cause:** `Prefetch` Pydantic model uses `filter` (not `query_filter`) for the
 ownership/file-type filter parameter.
 
-**Fix** (`rag_engine/search.py`):
+**Fix** (`ragnart/search.py`):
 ```python
 # Wrong:
 Prefetch(query=vector, using="", limit=30, query_filter=query_filter)
@@ -515,7 +517,7 @@ Prefetch(query=vector, using="", limit=30, filter=query_filter)
 **Root cause:** `query_points()` `query` parameter accepts `FusionQuery` (a Pydantic
 model), not the raw `Fusion` enum value.
 
-**Fix** (`rag_engine/search.py`):
+**Fix** (`ragnart/search.py`):
 ```python
 from qdrant_client.models import FusionQuery
 
@@ -622,7 +624,7 @@ same corpus contained the relevant content but it never surfaced.
 
 **Root cause 1 — zombie vectors from old `handle_deleted()` race condition:**
 
-The old `handle_deleted()` method in `rag_engine/state.py` had the wrong crash-safe
+The old `handle_deleted()` method in `ragnart/state.py` had the wrong crash-safe
 ordering: it purged SQLite rows **before** the caller had a chance to delete the
 corresponding Qdrant vectors. Any crash (OOM, kill, network drop) between those two
 steps left vectors in Qdrant with no SQLite row — "zombie vectors." `find_deleted()`
@@ -796,7 +798,7 @@ New ingestion writes trigger compaction organically.
 
 ---
 
-#### `rag_engine/ingest.py` — ingest quality gate (MODIFIED — commit `94f9d56`)
+#### `ragnart/ingest.py` — ingest quality gate (MODIFIED — commit `94f9d56`)
 
 Added a printable-char-ratio check in `ingest_file()` after document parsing (step 2),
 before chunking and embedding.
@@ -828,7 +830,7 @@ sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
 
 ---
 
-#### `rag_engine/search.py` — score threshold + expanded pool (MODIFIED — commit `94f9d56`)
+#### `ragnart/search.py` — score threshold + expanded pool (MODIFIED — commit `94f9d56`)
 
 Two improvements to `search_rag()`:
 
@@ -884,16 +886,16 @@ python utils/rag_search_cli.py --query '$CWD blindly' --user florian \
 
 ---
 
-#### `main.py` — `/v1/rag/search` new query params (MODIFIED — commit `94f9d56`)
+#### `main.py` — `/v1/search` new query params (MODIFIED — commit `94f9d56`)
 
-`GET /v1/rag/search` accepts two new optional query parameters:
+`GET /v1/search` accepts two new optional query parameters:
 
 ```bash
 # Score threshold
-curl "http://192.168.1.93:8000/v1/rag/search?q=your+query&user=florian&score_threshold=0.50"
+curl "http://192.168.1.95:8100/v1/search?q=your+query&user=florian&score_threshold=0.50"
 
 # Multi-query expansion
-curl "http://192.168.1.93:8000/v1/rag/search?q=your+query&user=florian&multi_query=true"
+curl "http://192.168.1.95:8100/v1/search?q=your+query&user=florian&multi_query=true"
 ```
 
 These are used by the `/user:rag` slash command in Claude Code and by any external
@@ -975,7 +977,7 @@ no schema migrations, no PRAGMA changes. Safe to run concurrently with anything.
 3. Stopped ingest timer, restored main file only (do NOT restore -shm/-wal from
    a snapshot taken at a different time):
    ```bash
-   sudo systemctl stop rag-ingest.timer
+   sudo systemctl stop ragnart-ingest.timer
    cp ~/Gin-AI/tmp/SQLite-db-snapshots/rag_state.db \
       /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
    rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-wal
@@ -994,7 +996,7 @@ no schema migrations, no PRAGMA changes. Safe to run concurrently with anything.
 **General rule for SQLite recovery:** Always restore only the main `.db` file from
 a snapshot. Remove existing `-wal` and `-shm` files — SQLite recreates them fresh
 on first open. The snapshot for restore must be from a `PRAGMA wal_checkpoint(TRUNCATE)`
-checkpoint point (written after each ingest run by `rag-ingest-run.sh`).
+checkpoint point (written after each ingest run by `ragnart-ingest-run.sh`).
 
 ---
 
@@ -1021,7 +1023,7 @@ Nokia/Scan garbage completely absent from results.
 
 ### How consistency is guaranteed
 
-After each ingestion run, `rag-ingest-run.sh` (Server 2):
+After each ingestion run, `ragnart-ingest-run.sh` (Server 2):
 1. Checkpoints the SQLite WAL with `PRAGMA wal_checkpoint(TRUNCATE)` — the main
    `rag_state.db` file becomes fully self-contained (no WAL file needed to restore).
 2. Creates a Qdrant snapshot via API — written directly to NFS at
@@ -1039,7 +1041,7 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
 1. Stop services:
    ```bash
    # On Server 2:
-   sudo systemctl stop rag-ingest.timer rag-ingest.service
+   sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
    # On Server 1:
    sudo systemctl stop qdrant
    ```
@@ -1083,7 +1085,7 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
 
 7. Restart ingestion timer (Server 2):
    ```bash
-   sudo systemctl start rag-ingest.timer
+   sudo systemctl start ragnart-ingest.timer
    ```
 
 ### Rollback SQLite only (Qdrant healthy, rag_state.db corrupted)
@@ -1132,7 +1134,7 @@ exceed the 60-second timeout, crashing the script.
 
 #### Fix
 
-Two changes in `rag_sync_nfs.py` and `rag_engine/collection.py`:
+Two changes in `rag_sync_nfs.py` and `ragnart/collection.py`:
 
 **`wait=False` on every delete call** — Qdrant queues the operation and returns immediately;
 the client never blocks on index re-optimization. No retry loop needed: with fire-and-forget
@@ -1152,7 +1154,7 @@ def _delete_path_from_qdrant(client, path: str, file_num: int, total: int) -> No
     logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
 ```
 
-`get_client()` in `rag_engine/collection.py` now accepts an optional `timeout: int = 60`
+`get_client()` in `ragnart/collection.py` now accepts an optional `timeout: int = 60`
 parameter (added in the same session) — no other callers are affected.
 
 #### Expected outcome
@@ -1249,12 +1251,12 @@ still in the queue) were retried on every daemon run.
 
 ```python
 # Before (broken)
-from rag_engine.state import StateDB, re_queue_failed
+from ragnart.state import StateDB, re_queue_failed
 ...
 n_requeued = re_queue_failed()
 
 # After (fixed)
-from rag_engine.state import StateDB
+from ragnart.state import StateDB
 ...
 n_requeued = state_db.re_queue_failed()
 ```
@@ -1305,7 +1307,7 @@ Effect on VRAM (measured before/after):
 The compute buffer dropped 22× from 1168 MiB to 53 MiB. bge-m3 now fits reliably alongside
 llama-server even with both KV slots active.
 
-**Immediate workaround applied in parallel:** `SoHoAI-config.yaml` `ollama_url` temporarily reverted to
+**Immediate workaround applied in parallel:** `ragnart.yaml` `ollama_url` temporarily reverted to
 Server 1 CPU embed (`192.168.1.93:11434`) while Server 2 was being fixed.
 **Resolved 2026-05-04:** `ollama_url` restored to Server 2 GPU (`192.168.1.95:11434`) after
 `OLLAMA_CONTEXT_LENGTH=768` was deployed. GPU embed is now the active configuration.
@@ -1588,7 +1590,7 @@ qdrant_client.http.exceptions.ResponseHandlingException: timed out
 ```
 
 #### Root Cause
-The `QdrantClient` in `rag_engine/collection.py` was initialized with the httpx default timeout
+The `QdrantClient` in `ragnart/collection.py` was initialized with the httpx default timeout
 (~5 seconds). During heavy ingestion:
 
 1. Large bulk operations (e.g., ingesting 70K+ chunks from a single file) cause Qdrant to
@@ -1603,7 +1605,7 @@ The `QdrantClient` in `rag_engine/collection.py` was initialized with the httpx 
 - Database remained healthy throughout (473K points, green status)
 
 #### Solution
-Increase the HTTP timeout to 60 seconds in `rag_engine/collection.py`. The function now also
+Increase the HTTP timeout to 60 seconds in `ragnart/collection.py`. The function now also
 accepts an optional `timeout` parameter so callers with heavier workloads (e.g. bulk-delete
 in `rag_sync_nfs.py`) can request a longer timeout without affecting ingestion:
 
@@ -1652,6 +1654,6 @@ If timeouts persist after applying this fix:
    - Consider reducing `--workers` or `--batch` flags to decrease concurrency
 
 #### Related Configuration
-- `rag_engine/collection.py::get_client()` — Client initialization
+- `ragnart/collection.py::get_client()` — Client initialization
 - `utils/rag_ingest_daemon.py --workers` — Number of concurrent files
 - `utils/rag_ingest_daemon.py --batch` — Concurrent embedding requests per file

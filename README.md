@@ -1,2 +1,154 @@
-# RAGNART
-RAG with Nested Archive, Runtime, and Transient tiers
+<p align="center">
+  <img src="assets/ragnart-avatar.png" alt="RAGNART — a Viking painter with a paint-dipped sword" width="240">
+</p>
+
+<h1 align="center">RAGNART</h1>
+
+<p align="center">
+  <b>RAG with Nested Archive, Runtime, and Transient tiers</b><br>
+  A self-hosted retrieval service over a home NAS, AI-assistant chat history, and live project notes.
+</p>
+
+---
+
+## What it is
+
+RAGNART is a self-hosted Retrieval-Augmented Generation (RAG) **retrieval
+service**. It indexes everything worth remembering on a home/small-office
+setup (documents on a NAS, the transcripts of Claude Code and OpenCode
+sessions, and scratch material captured while working on a project) and
+serves it over a small HTTP API. Any LLM client, such as Claude Code, an
+editor plugin, a script or a notebook UI, can call that API to ground its
+answers in your own material.
+
+RAGNART does **retrieval only**. It returns ranked text chunks with their
+sources and leaves the generation step to the LLM client that called it.
+
+It started as the RAG subsystem of [SoHoAI](https://github.com/FlorianOtel/SoHoAI)
+and was spun off into its own repository and service in November 2026.
+
+## The three tiers
+
+The name spells out the design: one index, **nested** by project, holding
+three tiers of material with different lifetimes.
+
+| Tier | What it holds | How it gets in | Lifetime |
+| --- | --- | --- | --- |
+| **Archive** | Files on the NAS: PDF, DOCX, PPTX, Markdown, text, CSV, YAML, notebooks, HTML, shell scripts | Periodic incremental scan (systemd timer) | Long-lived; follows the files on disk |
+| **Runtime** | AI-assistant sessions: Claude Code chat logs (`.jsonl`) and OpenCode sessions (through its HTTP API) | The same periodic ingestion | Long-lived; one record per session |
+| **Transient** | Material captured *now* for the current project: notes, snippets and files dropped into a project's `.ragnart/inbox/` | Real-time capture through the `ragnart` CLI | Short-lived until you **keep** it (it moves into the Archive) or **drop** it |
+
+**Nested** means every chunk belongs to a project in a directory tree. A
+search can be scoped to one project, optionally including its sub-projects
+and linked projects, or run across everything you are allowed to see.
+
+> **Status:** Archive and Runtime exist today, inherited from SoHoAI. Project
+> nesting, the Transient tier, a notebook UI and real authentication are
+> planned. See [Roadmap](#roadmap).
+
+## How it works
+
+```
+                  ┌───────────────────────── ingestion (systemd timer) ─────────────────────────┐
+ NAS files ──────▶│ scanner ─▶ docling parse ─▶ parent/child chunking ─▶ bge-m3 dense embeddings │
+ Claude Code logs │            (PDF/DOCX/PPTX/…)   (tiktoken)              + BM25 sparse vectors   │──▶ Qdrant
+ OpenCode API ───▶│ state DB (SQLite): queue, retries, crash recovery, deletions               │
+                  └──────────────────────────────────────────────────────────────────────────────┘
+
+ LLM client ──GET /v1/search──▶ RAGNART service ──▶ hybrid search in Qdrant (dense + sparse, RRF fusion)
+            ◀── ranked chunks ──                 ──▶ cross-encoder rerank (bge-reranker-v2-m3)
+```
+
+**Ingestion.** A scanner walks the configured NAS roots and assistant
+transcripts, honouring include and exclude lists. A SQLite state database
+tracks every source: what is queued, done or failed, and what disappeared.
+New and changed files are parsed with [Docling](https://github.com/docling-project/docling)
+and split into *parent/child* chunks. Small child chunks (~200–300 tokens)
+are embedded for precise matching. The larger parent chunk (~800–1200
+tokens) is what gets returned, so the LLM gets enough surrounding context.
+Each chunk gets two vectors: a dense **bge-m3** embedding (served by Ollama)
+and a sparse **BM25** vector (fastembed). Ingestion is idempotent: a changed
+file is deleted, then re-inserted. It survives crashes and retries failed
+files, and it is guarded by a cross-host lock on NFS so only one run is
+active at a time.
+
+**Retrieval.** `GET /v1/search` runs a hybrid query in
+[Qdrant](https://qdrant.tech/): dense and sparse candidates are fused with
+Reciprocal Rank Fusion. The pool is then reordered by a **cross-encoder
+reranker** (bge-reranker-v2-m3). Results can be filtered by owner and file
+type. Each hit carries its source path, scores and parent text.
+
+**Ownership.** Every chunk records an owner (a person, or a shared
+"family" space), and searches are filtered to what the caller may see. A
+logical access-control model (owners, projects and grants, checked in one
+place) is planned, so multi-tenancy does not depend on filesystem
+permissions.
+
+## Repository layout
+
+| Path | What's there |
+| --- | --- |
+| `ragnart/` | The Python package: scanner, chunking/ingestion, embeddings, Qdrant collection, hybrid search, reranking, state DB, OpenCode client, and the FastAPI service (`ragnart/service.py`) |
+| `ragnart.yaml` | All configuration: model and service URLs, scanner include/exclude rules, rerank and hybrid parameters, users and shared spaces |
+| `utils/` | Operator tools: ingestion daemon, NFS sync, search CLI, status, smoke and benchmark scripts, endpoint comparison |
+| `scripts/` | systemd units (`ragnart-search.service`, `ragnart-ingest.{service,timer}`), the ingestion wrapper, Qdrant + SQLite snapshot script, install script |
+| `docs/` | Design and operations docs (see below) |
+| `assets/` | Logo / avatar images |
+
+## Running it
+
+Requirements: Python 3.12, a reachable Qdrant, an Ollama instance serving
+`bge-m3`, and (optionally) a `/v1/rerank` endpoint (e.g. llama-server behind
+llama-swap) for the reranker. Endpoints are set in `ragnart.yaml`.
+
+```bash
+# from the repo root, in a Python 3.12 env with the dependencies from pyproject.toml
+uvicorn ragnart.service:app --host 0.0.0.0 --port 8100    # start the search service
+
+curl 'http://localhost:8100/v1/search?q=how+do+snapshots+work&top_k=5'
+curl 'http://localhost:8100/health'
+```
+
+`GET /v1/search` parameters: `q` (query), `user` (owner scope), `top_k`,
+`file_types`, `score_threshold`, `rerank`.
+
+For a permanent install, `sudo scripts/install-units.sh` installs the
+search service and the ingestion timer as systemd units.
+
+## Roadmap
+
+| Version | Scope |
+| --- | --- |
+| **v0.1 — Spin-off** | Move the RAG code out of SoHoAI into this repo and its own service, with no change to search behaviour |
+| **v0.2 — Nested** | Project tree in the state DB and Qdrant payload (payload-only backfill, no re-embedding); project-scoped search |
+| **v0.3 — Transient** | `ragnart` CLI (`init`, `capture`, `inbox`, `keep`, `drop`, `search`, …), shared assistant skill, real-time `transient` collection |
+| **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin, with citations per tier |
+| **v0.5 — Tenancy & auth** | Per-client API tokens, enforced grants, private-until-kept Transient items |
+
+Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md).
+
+## Documentation
+
+- [`docs/Implementation-plan.md`](docs/Implementation-plan.md): versioned plan (v0.1 to v0.5), decisions and invariants
+- [`docs/RAG-strategy.md`](docs/RAG-strategy.md): design of the RAG pipeline (chunking, hybrid search, reranking, ingestion service), inherited from SoHoAI
+- [`docs/RAG-troubleshoot.md`](docs/RAG-troubleshoot.md): incident log and fixes
+
+## Not to be confused with
+
+A few open-source RAG projects have similar names. They are unrelated to
+RAGNART:
+
+- **[ragnar](https://ragnar.tidyverse.org/)**, an R package from the
+  tidyverse team for building RAG workflows in R (Markdown conversion,
+  chunking, DuckDB store, vector + BM25 retrieval), designed to work with
+  `ellmer`. On [CRAN](https://cran.r-project.org/package=ragnar).
+- **[Ragna](https://github.com/Quansight/ragna)**, an open-source RAG
+  orchestration framework in Python from Quansight, with a Python API, a
+  FastAPI REST API and a Panel web UI.
+
+RAGNART is neither a library nor a framework. It is one opinionated,
+self-hosted service for one household/small-office setup.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
