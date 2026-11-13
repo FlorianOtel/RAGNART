@@ -36,7 +36,7 @@ three tiers of material with different lifetimes.
 | --- | --- | --- | --- |
 | **Archive** | Files on the NAS: PDF, DOCX, PPTX, Markdown, text, CSV, YAML, notebooks, HTML, shell scripts | Periodic incremental scan (systemd timer) | Long-lived; follows the files on disk |
 | **Runtime** | AI-assistant sessions: Claude Code chat logs (`.jsonl`) and OpenCode sessions (through its HTTP API) | The same periodic ingestion | Long-lived; one record per session |
-| **Transient** | Material captured *now* for the current project: notes, snippets and files dropped into a project's `.ragnart/inbox/` | Real-time capture through the `ragnart` CLI | Short-lived until you **keep** it (it moves into the Archive) or **drop** it |
+| **Transient** | Material in flight for the current project: pages, files and notes gathered into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Gathered through the `ragnart` CLI and the assistant skill | Ephemeral: expires unless you **keep** it (compact moves it into the project's references, which the Archive indexes) or **drop** it |
 
 **Nested** means every chunk belongs to a project in a directory tree. A
 search can be scoped to one project, optionally including its sub-projects
@@ -121,15 +121,16 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | Version | Scope |
 | --- | --- |
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
-| **v0.2 — Nested** | Project tree in the state DB and Qdrant payload (payload-only backfill, no re-embedding); project-scoped search |
-| **v0.3 — Transient** | `ragnart` CLI (`init`, `capture`, `inbox`, `keep`, `drop`, `search`, …), shared assistant skill, real-time `transient` collection |
-| **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin, with citations per tier |
-| **v0.5 — Tenancy & auth** | Per-client API tokens, enforced grants, private-until-kept Transient items |
+| **v0.2 — Nested** | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
+| **v0.3 — Project mode** | `ragnart` CLI (`init`, `add`, `inbox`, `keep`, `drop`, `compact`, `ingest-now`, …), the `/ragnart` assistant skill with scope and grounding, project memory (`MEMORY.md`), the Transient cache |
+| **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
+| **v0.5 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
 
-Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md).
+Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md); design: [`docs/RAGNART-design.md`](docs/RAGNART-design.md).
 
 ## Documentation
 
+- [`docs/RAGNART-design.md`](docs/RAGNART-design.md): the design: data model, pipeline, access model, tiers, scope and grounding, open issues
 - [`docs/Implementation-plan.md`](docs/Implementation-plan.md): versioned plan (v0.1 to v0.5), decisions and invariants
 - [`docs/RAG-strategy.md`](docs/RAG-strategy.md): design and operation of the RAG pipeline (corpus, chunking, hybrid search, reranking, ingestion, backup and recovery)
 - [`docs/RAG-troubleshoot.md`](docs/RAG-troubleshoot.md): troubleshooting guide (symptom, check, fix)
