@@ -61,9 +61,10 @@ a **Status** line. Summary:
 | Projects, `project.toml`, tags, grants, `resolve_scope()` / `authorize()` (§4.5, §6) | v0.2 (data model); authentication and grant management: v0.5 |
 | Scope and grounding in the API and the `/ragnart` skill and commands (§8) | API scope and project listing: v0.2; skill, commands and `ragnart` CLI: v0.3 |
 | Project mode, compact, `MEMORY.md`, ingest-now (§7.3, §7.4) | v0.3, after the Transient lifecycle is defined (§13.3) |
-| Retrieval-quality knobs and calibration (§9) | Not yet scheduled |
-| Deletion rules, reconciliation (§10.2, §10.3) | Partly v0.2 (fix-first guards, tombstone and grace); reconciliation not yet scheduled |
-| OpenCode database backup (§10.5) | Not yet scheduled |
+| Pipeline `p2` and corpus cleanup (§13.1) | v0.2 fix-first item 0, delivered by a separate bridge session |
+| Retrieval-quality knobs and calibration (§9) | `max_hits_per_source` and collapse: v0.2; other knobs and calibration: v0.3 |
+| Deletion rules, reconciliation (§10.2, §10.3) | v0.2 (fix-first guards, tombstone and grace, reconciliation); purge log and confirmed deletes not yet scheduled |
+| OpenCode database backup (§10.5) | v0.2 |
 | Kotaemon (§12) | v0.4 |
 
 ## 2. Architecture
@@ -553,6 +554,10 @@ features exist only in `/ragnart`.
 
 ## 9. Retrieval quality
 
+**Status.** Today search has none of these knobs except `rerank` and the fetch sizes in
+`ragnart.yaml`. `max_hits_per_source` and collapse by `content_hash` arrive in v0.2; the
+other knobs, the labelled set and `ragnart calibrate` in v0.3.
+
 ### 9.1 Predictable, not rigidly deterministic
 
 The corpus changes and polluting content appears; rankings must be able to change with it.
@@ -628,8 +633,8 @@ Deletion is the dangerous operation:
 
 ### 10.3 Operating rules
 
-**Status.** Single writer (the lock) and idempotent ingestion are built. Reconciliation and
-notifications are not yet built or scheduled.
+**Status.** Single writer (the lock) and idempotent ingestion are built. Reconciliation is
+part of v0.2; notifications are not yet scheduled.
 
 - **Single writer.** One process at a time changes the index, holding the ingestion lock
   (`RAGNART--databases/rag-ingest.lock`). Ingest-now, compact, keep and drop take the lock or
@@ -657,7 +662,7 @@ notifications are not yet built or scheduled.
 
 ### 10.5 OpenCode database
 
-**Status.** Decided, not yet built or scheduled.
+**Status.** Decided; built in v0.2.
 
 `opencode.db` stays on Server 2's local disk. A nightly online copy (`sqlite3 .backup`) is
 written to `RAGNART--databases/opencode-backups/<hostname>-<ip>/opencode-<YYYY-MM-DD>.db`,

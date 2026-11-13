@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode)
-updated_at: 2026-11-14--00-13
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned)
+updated_at: 2026-11-14--00-26
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -78,8 +78,10 @@ repository and the live services; operational detail is in
 
 1. **Corpus.** About **2.99M points** in one collection: dense vector
    (1024-dim, Cosine, unnamed) plus sparse `sparse_text` (IDF),
-   `on_disk_payload: true`. Every migration step in this plan is sized for
-   millions of points: no step may require re-embedding or rewriting vectors.
+   `on_disk_payload: true`. About 2.6M of them are pollution from 249 items
+   (`docs/RAGNART-design.md` §13.1), removed by v0.2 fix-first item 0; the
+   clean corpus is about 400k points. No migration step may require
+   re-embedding or rewriting vectors.
 2. **`documents` is an alias.** `documents` → `documents_new`. Every
    reference to "the `documents` collection" below means the alias; the
    underlying name `documents_new` matters only for snapshot restore
@@ -217,12 +219,31 @@ scoping.
 
 **Entry criteria.** v0.1 done (§9). SoHoAI's `GET /v1/rag/search` 307 stub
 removed, on or after 2026-11-16, after checking `SoHoAI-gateway.log` for 307
-hits and repointing any caller found.
+hits and repointing any caller found. Fix-first item 0 delivered (below).
 
 **Fix first (before any schema or backfill work).** The backfill and the
-move detection below rely on the sync never deleting wrongly, so these four
-defects are fixed, tested and run once by hand (log inspected) before the
-timer picks up the new sync. None of them changes Qdrant data or the schema.
+move detection below rely on a clean corpus and on the sync never deleting
+wrongly. Item 0 is delivered by a separate operator session that bridges
+v0.1 and v0.2; the v0.2 session verifies it. Items 1–4 are fixed, tested and
+run once by hand (log inspected) before the timer picks up the new sync.
+None of items 1–4 changes Qdrant data or the schema.
+
+0. **Corpus hygiene: pipeline `p2` and the purge.** About 87% of the points
+   are pollution: PDF/DOCX read as raw bytes when docling fails, very large
+   generated text files, bulk CSV exports (`docs/RAGNART-design.md` §13.1).
+   Delivered by the bridge session:
+   - pipeline `p2` in code: no raw-read fallback for binary types, a binary
+     check before parsing, size and chunk caps that mark items `ignored` with a
+     visible reason, a corrected quality gate; `docs/RAGNART-design.md` §5
+     describes `p2` as explicitly as `p1`;
+   - a purge of the polluting items after a snapshot pair, their rows marked
+     `ignored` with the reason; `utils/rag_purge_corrupt.py` uses the corrected
+     test;
+   - the policy decisions behind it (CSV and data files, cap values, mirrored
+     trees) recorded in `docs/RAGNART-design.md`.
+   Verify at v0.2 kickoff: point count and composition (no item above the
+   caps, a sample of PDF chunks is text); the current pipeline version is
+   known (`p2`); §3 of this plan refreshed with the new figures.
 
 1. **An unreachable NFS root deletes its whole tree from the index (critical).**
    `ragnart/scanner.py` (`scan_nfs_roots`) skips a root that fails
@@ -289,8 +310,9 @@ timer picks up the new sync. None of them changes Qdrant data or the schema.
   tables (`projects`, `project_tags`, `project_links`, `source_links`,
   `grants`) and the per-item metadata of design §4.3 (`source_type`,
   `project_id`, `size_bytes`, `content_hash`, `hashed_at`, `first_seen_at`,
-  `modified_at`, `pipeline_version` = `p1`, `chunk_count`, `missing_since`,
-  origin details) to `ragnart/state.py`.
+  `modified_at`, `pipeline_version` (the version that produced the item's
+  chunks: `p2` for items ingested after item 0, `p1` otherwise),
+  `chunk_count`, `missing_since`, origin details) to `ragnart/state.py`.
 - Add the payload fields and indexes of design §4.4 (`project_id`, `owner`,
   `source_type`, `file_type`, `content_hash` as keywords; `modified_at`,
   `ingested_at` as datetimes) — online and additive; `documents` keeps serving
@@ -319,6 +341,15 @@ timer picks up the new sync. None of them changes Qdrant data or the schema.
   `all`; resolved scope echoed in the response; design §8.8), and
   `GET /v1/projects`.
 - Attach sessions to projects by launch directory (design §7.4).
+- Search: `max_hits_per_source` cap and collapse of identical copies by
+  `content_hash` (design §9.1, §8.7), with the cap as a knob in `ragnart.yaml`
+  and per request (echoed).
+- Reconciliation: a scheduled check of `chunk_count` against Qdrant and of
+  Qdrant keys against rows; repairs under the deletion rules and fails loudly
+  in the log (design §10.3).
+- Nightly online backup of `opencode.db` to
+  `RAGNART--databases/opencode-backups/<hostname>-<ip>/`, installed by
+  `scripts/install-units.sh` (design §10.5).
 
 **Data migration & rollback.**
 1. Snapshot pair first: Qdrant snapshot of `documents_new` plus a
@@ -351,10 +382,13 @@ time, not correctness).
   sources, and the response names the projects searched.
 - Moving a project directory changes one `projects` row and zero Qdrant
   points.
-- Fix-first items 1–4 pass their tests.
+- Fix-first item 0 verified; items 1–4 pass their tests.
+- Reconciliation reports zero unexplained differences on the clean corpus.
+- A result list never contains more than `max_hits_per_source` passages from
+  one item.
 
-**Risks.** Backfill runtime against ~2.99M points (§3 item 1) needs
-measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
+**Risks.** Backfill runtime against the clean corpus (about 400k points
+after item 0; §3 item 1) needs measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
 backfill time may disagree with what a later ingestion run derives if
 sessions moved in the meantime. The 10% missing-threshold default may be
 wrong for this corpus's real churn rate and needs a dry run before being
@@ -363,7 +397,8 @@ trusted.
 **Decisions to confirm at kickoff.** Scheduled sync scope: all configured
 roots in one run (recommended) or `la-familia` added to `RAG_SYNC_USERS`;
 missing-sources threshold (10% suggested); grace period before purge (24h suggested); backfill batch size;
-whether to pilot the backfill on one owner's data before the full corpus.
+whether to pilot the backfill on one owner's data before the full corpus;
+the default `max_hits_per_source`; how many OpenCode backup copies to keep.
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
@@ -406,6 +441,9 @@ compact rules, actors) is defined and recorded in `docs/RAGNART-design.md`
   `".ragnart/inbox/"`, `".opencode/"`, `".agents/"` to
   `rag.scanner.exclude_dir_names` (multi-component entries are supported per
   `ragnart/scanner.py:44-51`; verify at runtime).
+- Retrieval calibration (design §9.2, §9.3): `min_relevance`, `type_weights`
+  and the fetch sizes as knobs at three levels; the labelled set with
+  `/ragnart expect`; `ragnart calibrate`.
 
 **Data migration & rollback.** None to `documents`. The cache is plain files;
 references enter through the normal ingestion pipeline.
@@ -588,6 +626,8 @@ the project's references.
 | 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.3 kickoff |
 | 9 | Claude Desktop Code session transcript location | unverified — needed before the Runtime-tier check can be written | v0.5 kickoff |
 | 10 | Backfill batch size / pilot scope (one owner first?) | not pre-decided | v0.2 kickoff |
+| 11 | Notifications (channel, events: failed run, guard tripped, snapshot failed, reconciliation problems) | not scheduled; ntfy on Server 1 available | open |
+| 12 | Corpus-hygiene policy: CSV and data files, size and chunk caps, mirrored trees | decided in fix-first item 0 | bridge session |
 
 ## 9. Version status table
 

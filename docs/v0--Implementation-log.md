@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite)
-updated_at: 2026-11-13--16-45
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover)
+updated_at: 2026-11-14--00-27
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,94 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-14--00-30 -- design review, design document, as-is docs, corpus analysis, v0.2 handover
+
+Intermediate session between v0.1 and v0.2, run directly by Claude Opus 5.5 (with subagents
+for the doc rewrites and independent reviews). Operator-led design review of RAGNART before
+v0.2, producing `docs/RAGNART-design.md`.
+
+#### What was done
+
+| Commit | Repo | Subject |
+| --- | --- | --- |
+| `fd07805` | RAGNART | docs: describe the current state only (as-is rewrite) |
+| `938fe7e` | RAGNART | plan: v0.2 fix-first items (NFS root guard, --user scope, alias, health) |
+| `d44cc41` | RAGNART | docs: RAGNART design document; plan aligned with it |
+| `f384b20` | RAGNART | README: roadmap and tiers aligned with the design document |
+
+The commit carrying this entry also adds v0.2 fix-first item 0 and the version assignments
+below to `docs/Implementation-plan.md` and the matching status markers to
+`docs/RAGNART-design.md`.
+
+1. **As-is documentation rule** (operator): descriptive docs describe only the current state;
+   history lives in git and in this log. `docs/RAG-strategy.md` rewritten as a current-state
+   reference (3,119 -> ~1,010 lines), `docs/RAG-troubleshoot.md` as a symptom/check/fix guide
+   (1,661 -> ~712), plan and README given an as-is pass. Independent review: FIX, one item, fixed.
+   Rule recorded in project memory; README keeps one origin reference; log files are exempt.
+2. **Defects found in the code** while rewriting, verified and written into the plan as v0.2
+   fix-first items 1-4: an unreachable NFS root deletes its tree; a `--user` sync deletes other
+   owners' rows; `rag_status.py`/`rag_reset.py` ignore the `documents` alias; `/health` blocks
+   and search stays 503 after Qdrant was down at start.
+3. **Design review** (topics worked in order, decisions by the operator): identity (natural
+   key + MD5 attribute, no surrogate id); schema version vs pipeline version, `p1` defined
+   explicitly; payload metadata and filters, collapse of identical copies; everything is a
+   project, grants to persons and groups, inheritance opt-out, roles read/admin, sharing TBD;
+   projects addressed by path with immutable `id` and free tags; tiers by lifecycle with
+   Transient as an ephemeral, non-indexed cache; project mode (gather -> compact -> references,
+   `MEMORY.md` index); retrieval as scope x grounding with explicit-only changes; retrieval-only;
+   predictable-not-rigid quality with calibration knobs; failure and consistency rules;
+   `opencode.db` nightly backup. Full register: `docs/RAGNART-design.md` §14.
+4. **Corpus analysis** (operator suspected pollution): facet over `source_path` plus file sizes.
+   Of 2,988,440 points, 1,243,155 (41.6%) come from 211 PDF/DOCX read as raw bytes, 987,376
+   (33.0%) from 15 very large text files (P4OC R8 mapping files, VPN logs), 362,643 (12.1%) from
+   23 CSV exports; the real corpus is ~395k points. Root causes in `ragnart/ingest.py`: raw-read
+   fallback on docling failure; quality gate defeated by U+FFFD counting as printable; no size or
+   chunk caps; gate applied only at ingestion; static policy takes every txt/csv. Cleanup and
+   `p2` handed to a separate operator session (the bridge to v0.2).
+5. **Design document** `docs/RAGNART-design.md` written, independently reviewed (FIX: four
+   present-tense statements about unbuilt parts, a table residual; all fixed with a status
+   table and per-section status lines). Plan and README aligned with it; the handover in
+   `~/Gin-AI/tmp` is no longer referenced.
+
+#### Deviations from the plan
+
+1. v0.3 changed from "Transient" (real-time `transient` collection, `/v1/transient`) to
+   "Project mode" (CLI, `/ragnart` skill, compact, `MEMORY.md`, ingest-now; no second vector
+   index), per design decision D3.
+2. v0.2 drops `source_id` and gains: schema version, design §4.3/§4.4 metadata and indexes,
+   re-keying of Claude Code sessions to `claude-session://<uuid>`, the `scope` parameter,
+   `max_hits_per_source` and collapse, reconciliation, the `opencode.db` backup, and fix-first
+   item 0 (corpus hygiene, delivered by the bridge session).
+3. v0.3 gains retrieval calibration (`ragnart calibrate`, labelled set).
+
+#### Evidence
+
+- 19:00 ingestion run (2026-11-13): sync 1.5 min, 15 files ingested, 0 failed; snapshot
+  correctly skipped ("newest pair is younger than 20 h"). The deleted
+  `OpenFlow-Book-Preview.pdf` (105,116 points) was removed from disk at 00:09 on 2026-11-14,
+  after that run; its points are removed by the 01:00 run.
+- Corpus at the end of the session: 2,988,440 points (cleanup not yet started).
+
+#### Handover to v0.2
+
+- **Tree state:** RAGNART HEAD = the commit carrying this entry (parent `f384b20`); SoHoAI HEAD
+  `95d5d0d`. Clean tree.
+- **Read first:** `docs/RAGNART-design.md` §1.1 (what is built vs planned) and §14 (decision
+  register); then `docs/Implementation-plan.md` §2–§5 and §6 v0.2 in full.
+- **Prerequisites (entry criteria):** fix-first item 0 delivered by the bridge session and
+  verified (point count and composition, `p2` in code and described in design §5, plan §3
+  refreshed); SoHoAI `/v1/rag/search` 307 stub removed on or after 2026-11-16 after checking
+  `SoHoAI-gateway.log` for 307 hits.
+- **Decisions to take at kickoff:** plan §6 v0.2 "Decisions to confirm at kickoff" (sync scope,
+  missing-sources threshold, grace period, backfill batch size and pilot, `max_hits_per_source`
+  default, OpenCode backup retention).
+- **Open design topics not needed for v0.2:** Transient lifecycle (before v0.3), interfaces
+  (API versioning, CLI/skill/API split, Kotaemon fit), notifications, sharing and ownership
+  transfer, Qdrant placement after the cleanup.
+- **Environment:** Qdrant on `.93` (config `/etc/qdrant/config.yaml`, wired 1 Gb/s), search and
+  ingestion on `.95`, data root `/mnt/nfs/__Backups/RAGNART--databases/`; privileged commands via
+  `sudo -n` or `ssh root@localhost` (`.95`) and `ssh 192.168.1.93` + `sudo -n` (`.93`).
 
 ### 2026-11-13--16-15 -- post-close ops: Qdrant config, snapshot retention, data root, Server 1 back on wired
 
