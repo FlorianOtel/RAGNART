@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only)
-updated_at: 2026-11-13--16-37
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items)
+updated_at: 2026-11-13--17-16
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -241,6 +241,71 @@ scoping.
 removed, on or after 2026-11-16, after checking `SoHoAI-gateway.log` for 307
 hits and repointing any caller found.
 
+**Fix first (before any schema or backfill work).** The backfill and the
+move detection below rely on the sync never deleting wrongly, so these four
+defects are fixed, tested and run once by hand (log inspected) before the
+timer picks up the new sync. None of them changes Qdrant data or the schema.
+
+1. **An unreachable NFS root deletes its whole tree from the index (critical).**
+   `ragnart/scanner.py` (`scan_nfs_roots`) skips a root that fails
+   `os.path.isdir()`, so that root adds nothing to `existing_paths`;
+   `StateDB.find_deleted()` (`ragnart/state.py`) treats every queue row missing
+   from the scan as deleted, and `utils/rag_sync_nfs.py` then deletes the Qdrant
+   points of every completed file under that root and purges the rows.
+   Fix:
+   - `scan_nfs_roots()` returns `scanned_roots` and `skipped_roots`.
+   - If any in-scope root was skipped, `rag_sync_nfs.py` skips the whole deletion
+     phase (`find_deleted`, Qdrant deletes, `purge_deleted`), logs an ERROR and
+     exits non-zero; queueing new and modified files still runs.
+   - A root that is a directory but empty while the queue holds completed rows
+     for it counts as unmounted.
+   - Missing-sources threshold: if `deleted_paths` exceeds
+     `rag.sync.max_delete_fraction` of completed rows (default 0.10), the deletion
+     phase is skipped with an ERROR; `--allow-mass-delete` overrides it.
+   Test: a temporary root with one ingested file made inaccessible -> sync exits
+   non-zero, row and points remain; deleting more than 10% of rows -> deletion
+   phase aborted unless `--allow-mass-delete`.
+
+2. **`--user florian` deletes other owners' rows.** The scanners honour
+   `user_filter`, but `find_deleted()` selects all rows of `ingestion_queue`, so
+   rows of any other owner (including the shared `la-familia` root) look gone on
+   every scheduled run (`scripts/ragnart-ingest-run.sh` syncs only
+   `RAG_SYNC_USERS=("florian")`). No live impact while `/mnt/nfs/La-Familia` is
+   empty.
+   Fix:
+   - `find_deleted(existing_paths, owners)` restricts to `WHERE owner IN (...)`
+     (the `owner` column already exists); `rag_sync_nfs.py` passes the owners
+     whose sources were actually scanned.
+   - The scheduled sync covers every configured root (see Decisions to confirm).
+   Test: a `la-familia` row whose file is on disk survives a `--user florian` sync,
+   with its points.
+
+3. **`rag_status.py` and `rag_reset.py` ignore the `documents` alias.** Both
+   build their collection set from `get_collections()` (real names only:
+   `documents_new`) and test it for `documents`. `rag_status.py` reports the
+   collection as missing; `rag_reset.py --user X` skips the Qdrant delete but
+   still resets rows to `pending`, and the full reset skips its Qdrant step.
+   Fix:
+   - `collection_exists(client, name)` in `ragnart/collection.py`, true for a real
+     collection or an alias (`get_aliases()`); used by both scripts.
+   - `rag_reset.py` never drops a collection by alias name: the full reset either
+     refuses and points to `docs/RAG-strategy.md` §9.3, or deletes points by filter.
+   - `rag_reset.py --dry-run` reports what would be deleted.
+   Test: `rag_status.py` shows the point count; `rag_reset.py --user florian
+   --dry-run` reports the points it would delete.
+
+4. **`/health` hangs and `/v1/search` stays 503 when Qdrant was down.**
+   `ragnart/service.py` sets `app.state.qdrant_client = None` if Qdrant is
+   unreachable at start-up, so every `/v1/search` answers 503 until the service
+   restarts; `/health` calls `get_collections()` with the 60 s client timeout
+   (`ragnart/collection.py` `get_client`).
+   Fix:
+   - The client is always created at start-up; failures surface per request.
+   - `/health` checks Qdrant's `/healthz` with a 2 s timeout and answers
+     `{"status":"degraded","qdrant":false}` immediately when it fails.
+   Test: Qdrant stopped -> `/health` answers `degraded` within 3 s; Qdrant started
+   -> `/v1/search` answers 200 without restarting `ragnart-search.service`.
+
 **Work items.**
 - Add tables (`projects`, `project_links`, `source_links`, `grants`) and
   queue columns (`source_id`, `project_id`, `content_hash`, `size_bytes`,
@@ -262,22 +327,8 @@ hits and repointing any caller found.
   `.ragnart/project.toml` anywhere above it.
 - Extend the scanner and `rag_sync_nfs.py` with marker discovery
   (`.ragnart/project.toml`), the plan-then-apply reconciliation (the
-  handover §Keeping the tree in sync with the disk, steps 1–5), the mount
-  guard, and the missing-sources-threshold abort.
-- Fix the known defects in sync and tooling:
-  (a) an unreachable or unmounted NFS root is skipped by the scanner, so
-  `StateDB.find_deleted()` (`ragnart/state.py`) sees every completed file
-  under it as gone and `utils/rag_sync_nfs.py` deletes their Qdrant points —
-  the mount guard and missing-sources threshold must cover this;
-  (b) `rag_sync_nfs.py --user florian` (the timer's only sync) scans only
-  that owner's roots but checks deletions against all queue rows, so every
-  other owner's rows and points, including the shared `la-familia` root, are
-  deleted on each run (no live impact while `/mnt/nfs/La-Familia` is empty);
-  (c) `utils/rag_status.py` and `utils/rag_reset.py` check real collection
-  names and do not resolve the `documents` alias;
-  (d) `GET /health` can block up to the Qdrant client timeout (60 s) when
-  Qdrant is down, and `GET /v1/search` answers 503 for the process lifetime
-  if Qdrant was down at service start.
+  handover §Keeping the tree in sync with the disk, steps 1–5), on top of the
+  mount guard and missing-sources threshold of fix-first item 1.
 - Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the
   `project`/`include_children`/`include_links` parameters on `GET
   /v1/search`, and `GET /v1/projects`.
@@ -315,8 +366,7 @@ the baseline in §3 makes necessary).
 - A scoped search (`project=<id>`) returns only that project's sources.
 - Moving a project directory changes one `projects` row and zero Qdrant
   points.
-- The mount guard aborts the sync when a configured root is unmounted.
-- Defects (a)–(d) under Work items are fixed.
+- Fix-first items 1–4 pass their tests.
 
 **Risks.** Backfill runtime against ~2.99M points (§3 item 1) needs
 measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
@@ -325,8 +375,9 @@ sessions moved in the meantime. The 10% missing-threshold default may be
 wrong for this corpus's real churn rate and needs a dry run before being
 trusted.
 
-**Decisions to confirm at kickoff.** Missing-sources threshold (10%
-suggested); grace period before purge (24h suggested); backfill batch size;
+**Decisions to confirm at kickoff.** Scheduled sync scope: all configured
+roots in one run (recommended) or `la-familia` added to `RAG_SYNC_USERS`;
+missing-sources threshold (10% suggested); grace period before purge (24h suggested); backfill batch size;
 whether to pilot the backfill on one owner's data before the full corpus.
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
