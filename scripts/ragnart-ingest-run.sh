@@ -8,6 +8,11 @@
 #   RAG_WORKERS      file-level parallelism (default 3, GPU embed; use 1 for CPU embed)
 #   RAG_BATCH        chunk-level Ollama concurrency (default 20, GPU; use 5 for CPU)
 #   RAG_LOGFILE      log file path (default: NAS logs dir, see below)
+#   RAGNART_DATA_ROOT        data root (default /mnt/nfs/__Backups/RAGNART--databases)
+#   RAG_SNAPSHOT_MIN_AGE_H   take a snapshot only if the newest NAS snapshot is older
+#                            than this many hours (default 20 -> one snapshot per day,
+#                            normally on the 01:00 run)
+#   RAG_FORCE_SNAPSHOT=1     take a snapshot on this run regardless of age
 #
 # GPU embed (Ollama on Server 2, RTX 5070): RAG_WORKERS=3 RAG_BATCH=20
 # CPU embed (Ollama on Server 1, local):    RAG_WORKERS=1 RAG_BATCH=5
@@ -15,9 +20,12 @@ set -euo pipefail
 
 VENV="$HOME/Gin-AI/.Gin-AI-python-3.12/bin/activate"
 PROJECT="/mnt/nfs/Florian/Gin-AI/projects/RAGNART"
-LOGFILE="${RAG_LOGFILE:-/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log}"
+DATA_ROOT="${RAGNART_DATA_ROOT:-/mnt/nfs/__Backups/RAGNART--databases}"
+LOGFILE="${RAG_LOGFILE:-${DATA_ROOT}/logs/rag-ingest.log}"
 WORKERS="${RAG_WORKERS:-3}"
 BATCH="${RAG_BATCH:-20}"
+SNAPSHOT_MIN_AGE_H="${RAG_SNAPSHOT_MIN_AGE_H:-20}"
+SNAPSHOT_KEEP=7   # NAS retention: 7 daily restore pairs (~150 GB)
 
 # Users to sync — add entries here to run rag_sync_nfs.py for additional users.
 # Each user is synced sequentially before the ingestion daemon starts.
@@ -46,11 +54,23 @@ python utils/rag_ingest_daemon.py \
     --workers "$WORKERS" --batch "$BATCH" --log-file "$LOGFILE"
 
 log "--- SQLite WAL checkpoint ---"
-DB_PATH="/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db"
+DB_PATH="${DATA_ROOT}/sqlite/rag_state.db"
 sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | tee -a "$LOGFILE" || \
   log "WARN: WAL checkpoint failed (non-fatal)"
 
-log "--- sqlite-qdrant-snapshot.sh (keep 12) ---"
-bash scripts/sqlite-qdrant-snapshot.sh --keep 12 2>&1 | tee -a "$LOGFILE"
+# Snapshot policy: at most one restore pair per day. Ingestion itself runs 4x/day and
+# is idempotent, so a restore to the last daily pair loses nothing that the next run
+# will not re-ingest. Snapshot when the newest pair on the NAS is older than
+# SNAPSHOT_MIN_AGE_H hours (or none exists), or when RAG_FORCE_SNAPSHOT=1.
+SNAP_DIR="${DATA_ROOT}/qdrant-snapshots/documents"
+NEWEST_SNAP=$(find "$SNAP_DIR" -maxdepth 1 -type f -name "*.snapshot" -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+NOW=$(date +%s)
+if [[ "${RAG_FORCE_SNAPSHOT:-0}" == "1" ]] || [[ -z "$NEWEST_SNAP" ]] \
+   || (( NOW - ${NEWEST_SNAP%.*} > SNAPSHOT_MIN_AGE_H * 3600 )); then
+    log "--- sqlite-qdrant-snapshot.sh (keep ${SNAPSHOT_KEEP}) ---"
+    bash scripts/sqlite-qdrant-snapshot.sh --keep "$SNAPSHOT_KEEP" 2>&1 | tee -a "$LOGFILE"
+else
+    log "--- snapshot skipped: newest pair is younger than ${SNAPSHOT_MIN_AGE_H} h ---"
+fi
 
 log "=== RAG ingestion complete ==="

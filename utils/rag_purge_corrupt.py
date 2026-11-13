@@ -206,7 +206,7 @@ def main() -> None:
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
+    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     qdrant_url = config.get("rag", {}).get("qdrant_url", "http://192.168.1.93:6333")
 

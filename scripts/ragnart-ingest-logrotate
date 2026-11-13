@@ -1,4 +1,9 @@
-/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log {
+/mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log {
+    # The log lives on the NAS in a directory owned by florian (group-writable), so
+    # logrotate refuses to touch it unless told which user to rotate as. Without this
+    # line every nightly run since 2026-05-06 failed with "parent directory has
+    # insecure permissions" and the log grew to 228 MB.
+    su florian florian
     daily
     rotate 7
     compress

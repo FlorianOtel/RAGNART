@@ -1,6 +1,17 @@
+# Qdrant server config for Server 1 (um690, 192.168.1.93).
+#
+# Installed LOCALLY on Server 1 as /etc/qdrant/config.yaml by scripts/qdrant/install-qdrant.sh
+# (never read from NFS: at boot Qdrant may start before the NFS mount, and a missing
+# --config-path makes Qdrant silently fall back to built-in defaults -- see
+# docs/v0--Implementation-log.md, 2026-11-13 ops entry).
+#
+# Both paths are on Server 1's local NVMe (Qdrant refuses to run its storage on NFS).
+# snapshots_path is transient working space only: scripts/sqlite-qdrant-snapshot.sh
+# creates a snapshot here, downloads it to the NAS and then deletes it, so this
+# directory is normally empty (retention lives on the NAS, not here).
 storage:
   storage_path: /var/lib/qdrant/storage
-  snapshots_path: /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots
+  snapshots_path: /var/lib/qdrant/snapshots
 
 service:
   host: 0.0.0.0

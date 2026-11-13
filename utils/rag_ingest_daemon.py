@@ -186,7 +186,7 @@ def main() -> None:
     # File holding OPENCODE_SERVER_PASSWORD (OpenCode 2.x Basic auth); read only when
     # an opencode:// item is parsed. None -> opencode_client.DEFAULT_PASSWORD_ENV_FILE.
     rag_cfg["opencode_password_env_file"] = config.get("opencode", {}).get("password_env_file")
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
+    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)
     qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))

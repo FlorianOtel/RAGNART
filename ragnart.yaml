@@ -8,7 +8,7 @@
 
 # Change db_base_path to relocate all databases in one place.
 # Python derives: {db_base_path}/sqlite/rag_state.db.
-db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
+db_base_path: "/mnt/nfs/__Backups/RAGNART--databases"
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
@@ -23,12 +23,12 @@ rag:
   qdrant_collection: "documents"
   qdrant_url: "http://192.168.1.93:6333"         # Qdrant on Server 1 (local NVMe)
   # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
-  # Snapshots (DR):        /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
+  # Snapshots (DR):        /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/
 
   # -- Ingestion lock (shared across servers via NFS) ---------------------------
   # NFSv4.1 + local_lock=none forwards flock() to the NAS lock manager, making
   # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
-  ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"
+  ingest_lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock"
 
   # -- Cross-encoder reranking (§13) -----------------------------------------
   rerank:

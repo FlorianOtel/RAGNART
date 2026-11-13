@@ -75,7 +75,7 @@ def main() -> None:
     with open(Path(__file__).resolve().parent.parent / "ragnart.yaml") as f:
         config = yaml.safe_load(f)
 
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
+    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)
 

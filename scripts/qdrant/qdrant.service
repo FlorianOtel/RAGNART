@@ -6,7 +6,10 @@ After=network.target
 Type=simple
 User=florian
 WorkingDirectory=/var/lib/qdrant
-ExecStart=/usr/local/bin/qdrant --config-path /mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/qdrant/qdrant-config.yaml
+# Config is a LOCAL copy (installed by scripts/qdrant/install-qdrant.sh), never an NFS path:
+# at boot the NFS mount may not be up yet, and a missing config file makes Qdrant
+# silently start with built-in defaults.
+ExecStart=/usr/local/bin/qdrant --config-path /etc/qdrant/config.yaml
 Restart=on-failure
 RestartSec=5
 
