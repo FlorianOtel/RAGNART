@@ -1,6 +1,5 @@
 # RAGNART package metadata. Pins as set in the v0.1 spin-off plan (2026-11-13).
-# python-pptx matches the shared venv (1.0.2); fastapi, qdrant-client and uvicorn
-# differ from the venv's installed versions (0.135.1, 1.17.1, 0.42.0) — reconcile later.
+# All pins match the shared venv's installed versions (checked 2026-11-13).
 [project]
 name = "ragnart"
 version = "0.1.0"
@@ -9,12 +8,12 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "docling==2.89.0",
-    "fastapi==0.129.0",
+    "fastapi==0.135.1",
     "fastembed==0.8.0",
     "httpx==0.28.1",
     "pyyaml==6.0.3",
     "python-pptx==1.0.2",
-    "qdrant-client==1.17.0",
+    "qdrant-client==1.17.1",
     "tiktoken==0.12.0",
-    "uvicorn==0.41.0",
+    "uvicorn==0.42.0",
 ]
