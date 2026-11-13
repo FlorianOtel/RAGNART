@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items)
-updated_at: 2026-11-13--17-16
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode)
+updated_at: 2026-11-14--00-13
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -13,9 +13,7 @@ context: >
   fine); access control open-ended for multi-tenancy, enforced through one
   logical-ACL seam rather than filesystem permissions; the work kept to five
   versions, one working session each except v0.2, which may take two. The
-  design input is the handover document
-  `/home/florian/Gin-AI/tmp/RAGNART handover a nested, three-tier RAG system
-  spun off from SoHoAI.md`, cited below as "the handover". The current
+  design this plan implements is docs/RAGNART-design.md. The current
   baseline (§3) is checked against the repository and the live Qdrant
   collection on Server 1 (192.168.1.93:6333); operational detail lives in
   docs/RAG-strategy.md. This document states the plan as it currently stands.
@@ -25,15 +23,17 @@ context: >
 
 ## 1. Purpose and how to use this plan
 
-This plan turns the handover's build order into five versions, each sized to
-one Claude Code `/brain` session (v0.2 may take two). Each version section is
-meant to be self-contained: a future session should be able to read this
-document and its own version section and start work without re-reading the
-handover document in full.
+This plan implements the design in `docs/RAGNART-design.md` in five versions,
+each sized to one Claude Code `/brain` session (v0.2 may take two). The design
+document says *what* RAGNART is and why; this plan says in which order it is
+built and how each step is accepted. Each version section is meant to be
+self-contained: a session reads this document, its own version section, and the
+design sections it cites.
 
 Rules for a version session:
 
-1. Re-read this document in full, especially §2 (Decisions already taken),
+1. Re-read this document in full and `docs/RAGNART-design.md` §1 (principles
+   and the status table) and §14 (decision register), especially §2 (Decisions already taken),
    §3 (Current baseline), §4 (Backward-compatibility invariants)
    and §5 (Access-control model) — these apply to every version, not just
    one.
@@ -53,18 +53,22 @@ commit message and in the implementation log.
 
 | Decision | Choice | Source |
 | --- | --- | --- |
-| Where RAG work happens | The RAGNART repo and service only; SoHoAI carries no RAG code | the handover §Spin-off, not evolution; operator |
-| Access-control model | Logical ACL (principal / owner / project / grants), enforced only in `resolve_scope()`/`authorize()`; filesystem permissions recorded as hints, never consulted | operator (corroborated by §3 item 6) |
+| Where RAG work happens | The RAGNART repo and service only; SoHoAI carries no RAG code | operator |
+| Design basis | `docs/RAGNART-design.md`; its decision register (§14) is binding for every version | operator |
+| Item identity | Natural key per type; `content_hash` (MD5) as attribute; no surrogate `source_id` | design D1 (§4.2) |
+| Versions of data | Schema version (data model) and per-item pipeline version (`p1`) | design D1b (§4.1, §5) |
+| Access model | Everything is a project; grants to persons and groups; `inherit_access` opt-out; `owner` is metadata; enforced only in `resolve_scope()`/`authorize()` | design D2 (§6) |
+| Projects | Addressed by path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
+| Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
+| Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
 | Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator |
-| Version scope | v0.1 spin-off · v0.2 nested tree · v0.3 transient (merges the handover's stages 2 and 4) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator, reordered from the handover's six-stage build order |
-| Package name | `ragnart` | the handover §Names |
-| Dot-directory name | `.ragnart/` | the handover §`.ragnart/` or `.rag/` |
-| Service host | Server 2 (192.168.1.95), beside ingestion | the handover §Where the service runs |
-| Symlink rule | Real path decides the project (accepted) | the handover, decision #4 |
-| Session attribution | By launch directory (accepted) | the handover, decision #5 |
-| Transient visibility | Shared with the project; `created_by` stored for a later private-until-kept switch | the handover, decision #6 |
+| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, compact) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
+| Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
+| Service host | Server 2 (192.168.1.95), beside ingestion | operator |
+| Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
+| Session attribution | By launch directory | design §7.4 |
 | v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator; §3 items 1 and 4 |
-| `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | the handover §Cutover step 6 |
+| `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | operator |
 
 ## 3. Current baseline
 
@@ -82,27 +86,27 @@ repository and the live services; operational detail is in
    (`docs/RAG-strategy.md` §4.2 and §9.3).
 3. **Only `source_path` is Qdrant-indexed.** The live `payload_schema` has
    one keyword index, `source_path`; `ragnart/collection.py:121` is the only
-   `create_payload_index()` call. v0.2 adds indexes on `owner`, `project_id`
-   and `source_id`.
+   `create_payload_index()` call. v0.2 adds the indexes of
+   `docs/RAGNART-design.md` §4.4.
 4. **Point IDs are random; replace deletes by `source_path`.**
    `ragnart/ingest.py:846` uses `uuid.uuid4()`; a file replace deletes by a
    `source_path` filter (`ragnart/ingest.py:722-735`,
    `utils/rag_sync_nfs.py:45-67`). So `set_payload` filtered by
-   `source_path` can add or rewrite `project_id`/`source_id` without touching
-   vectors, and a later full re-ingest still replaces cleanly by filter.
+   `source_path` can add or rewrite payload fields (including the key itself)
+   without touching vectors, and a later full re-ingest still replaces cleanly by
+   filter.
 5. **Owner comes from config, per NFS root.** The scanner assigns each
    configured root's `owner` literal (`ragnart/scanner.py:119-132`);
    `derive_owner()` in `ragnart/schema.py:33` is not called. Search filters
    `owner IN [user, 'la-familia']` only when `user` is supplied
-   (`ragnart/search.py:104-110`). The handover's references to
-   `derive_owner()` describe intent, not behaviour.
+   (`ragnart/search.py:104-110`).
 6. **Filesystem permissions cannot carry tenancy.** Both NFS roots
    (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`) are `florian:florian`, mode
    `777`; nearly every file is owned by uid 555; there are no per-person Unix
    accounts; the NFS mount is `sec=sys` with no `all_squash`/`anonuid` on the
    client side. Hence §5 is a logical ACL rather than a mirror of
-   `uid`/`gid`/`mode` — those three columns in the handover's `projects`
-   table are recorded as hints only and never consulted by `authorize()`.
+   `uid`/`gid`/`mode`; those values may be recorded as hints only and are never
+   consulted by `authorize()`.
 7. **Data root and snapshots.** All persistent data lives under
    `/mnt/nfs/__Backups/RAGNART--databases/` (`sqlite/rag_state.db`, `logs/`,
    `qdrant-snapshots/documents/`, `rag-ingest.lock`). One restore pair
@@ -125,7 +129,7 @@ These are hard rules that every version from v0.2 onward obeys.
 
 - **No migration re-embeds.** Every schema or layout change after v0.1 is
   additive metadata, applied through `set_payload` (filtered by
-  `source_path`, or later by `project_id`/`source_id` once those exist) —
+  `source_path`, or later by `project_id`) —
   never a new collection, never a vector rewrite.
 - **SQLite and Qdrant move together.** `ingestion_queue.file_path` is the
   SQLite primary key. A project or source move updates the SQLite row and
@@ -138,9 +142,10 @@ These are hard rules that every version from v0.2 onward obeys.
   idempotently, with failures swallowed because the column already exists;
   there is no schema-version table). Never rename or drop a column, and
   never change `ingestion_queue.file_path`'s role as primary key.
-- **Search without new parameters is unchanged.** `GET /v1/search` called
-  with no `project`, `tiers`, `include_children` or `include_links`
-  parameter must return the same ranking it returns today. The regression
+- **Search without new parameters is unchanged.** Until the `/ragnart` client
+  replaces `/rag` (v0.3), `GET /v1/search` called without `scope` must return
+  the same ranking it returns today; from v0.3 `scope` is required
+  (`docs/RAGNART-design.md` §8.8). The regression
   test is the 14 queries in `utils/rag_bench_queries.txt`, run before and
   after every version's data migration (tie-aware, as search ordering is not
   fully deterministic; `docs/RAG-strategy.md` §6.5).
@@ -159,53 +164,26 @@ These are hard rules that every version from v0.2 onward obeys.
 
 ## 5. Access-control model
 
-RAGNART's access control is a **logical ACL**, stored in `rag_state.db` and
-enforced at exactly one seam. It is never derived from filesystem ownership
-or mode bits.
+The model is `docs/RAGNART-design.md` §6: everything is a project; access is
+granted on projects to persons and groups; grants inherit downward unless a
+project sets `inherit_access = false`; `owner` is the accountable person
+(metadata and default grantee), not a filter; grants live in the state
+database. Filesystem permissions carry no tenancy (§3 item 6).
 
-**Why not filesystem permissions:** both production NFS roots are
-`florian:florian`, mode `777`, almost entirely uid 555, with no per-person
-Unix accounts (§3 item 6). There is no uid diversity to read a tenant
-boundary from.
+**The single seam:** `resolve_scope()` in `ragnart/scope.py` is the only
+function that turns a request into a Qdrant filter; `authorize(principal,
+action, project_id)` is the only function that decides whether a principal may
+touch a project.
 
-**Model:**
-
-- **Principal** — whoever is making the request. A `user` value today; a
-  validated client identity from v0.5 on.
-- **Owner** — the existing, coarser label already in production (`florian`,
-  `la-familia`, …), assigned per NFS root at ingest time
-  (`ragnart/scanner.py:119-132`). It stays the outermost filter on every search — a
-  principal never sees across owners without a grant.
-- **Project** — a node in the project tree (the handover §Nested: the
-  project tree), identified by a UUID that never changes; the tree is read
-  from `.ragnart/project.toml` markers on disk.
-- **Grant** — a `(principal, project_id, role)` row in the `grants` table
-  (the handover §Where the tree is stored). Empty through v0.2 and v0.3;
-  starts being written in v0.4/v0.5.
-
-**The single seam:** `resolve_scope(principal, project_id=None,
-children=True, links=True)` in `ragnart/scope.py` is the only function that
-turns a request into a Qdrant filter; `authorize(principal, action,
-project_id)` is the only function that decides whether a principal may touch
-a project. No other code path builds a scope filter or an allow/deny
-decision (the handover §How a search is scoped carries the reference code
-sketch).
-
-**What each version adds to the seam:**
+**What each version adds:**
 
 | Version | Addition |
 | --- | --- |
 | v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
-| v0.2 | Seam introduced; `authorize()` implements only today's rule (project owner equals caller owner, or the shared owner). `grants` exists but stays empty. |
-| v0.3 | Path confinement on the one write path (`POST /v1/transient`): refuses targets outside `<project>/.ragnart/inbox/` under a configured root. `created_by` starts being recorded on every Transient point. |
-| v0.4 | Kotaemon's login name is mapped to an owner, the same way `user` is today. Still no stronger authentication. |
-| v0.5 | `user`/principal comes from a validated per-client API token (OIDC optional), not from the caller's own parameter. `grants` rows are enforced by `authorize()`. Transient's shared-by-default visibility becomes switchable to private-until-kept, keyed off `created_by`. |
-
-**Hints, not authority:** `uid`, `gid` and `mode` are recorded per project
-(the handover's `projects` table) for a possible future permissions-mirroring
-mode. No version in this plan reads them inside `authorize()`. Mirroring
-filesystem permissions later changes `authorize()` alone — nothing else in
-the system needs to know.
+| v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. One principal, granted every top-level project; the result equals today's owner filter. |
+| v0.3 | Project-mode actions (add, keep, drop, compact, ingest-now) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
+| v0.4 | Kotaemon's login is mapped to a principal; still no authentication. |
+| v0.5 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
 
 ## 6. Versions
 
@@ -307,33 +285,40 @@ timer picks up the new sync. None of them changes Qdrant data or the schema.
    -> `/v1/search` answers 200 without restarting `ragnart-search.service`.
 
 **Work items.**
-- Add tables (`projects`, `project_links`, `source_links`, `grants`) and
-  queue columns (`source_id`, `project_id`, `content_hash`, `size_bytes`,
-  `missing_since`) to `ragnart/state.py` through the existing `_MIGRATIONS`
-  list pattern.
-- Add Qdrant keyword payload indexes on `owner`, `project_id`, `source_id`
-  (online and additive — `documents` keeps serving search while they build).
+- Introduce the schema version (`docs/RAGNART-design.md` §4.1) and add the
+  tables (`projects`, `project_tags`, `project_links`, `source_links`,
+  `grants`) and the per-item metadata of design §4.3 (`source_type`,
+  `project_id`, `size_bytes`, `content_hash`, `hashed_at`, `first_seen_at`,
+  `modified_at`, `pipeline_version` = `p1`, `chunk_count`, `missing_since`,
+  origin details) to `ragnart/state.py`.
+- Add the payload fields and indexes of design §4.4 (`project_id`, `owner`,
+  `source_type`, `file_type`, `content_hash` as keywords; `modified_at`,
+  `ingested_at` as datetimes) — online and additive; `documents` keeps serving
+  search while they build.
+- Re-key Claude Code sessions from their `.jsonl` path to
+  `claude-session://<uuid>` (design §4.2), in the state database and the
+  payload together; no re-embedding.
 - Write a backfill script modelled on `utils/rag_sparse_migrate.py`, but
   doing `set_payload` by `source_path` filter on the live
   `documents` alias — no new collection, no alias swap. Dry-run first;
   resumable (checkpoint by last `source_path` processed); batched. It must
-  re-derive `project_id`/`source_id` the same way the extended scanner does, and
-  also backfill session attribution (Claude Code `cwd`, OpenCode
+  derive `project_id` and the new metadata the same way the extended scanner
+  does, and also backfill session attribution (Claude Code `cwd`, OpenCode
   `location.directory`) read fresh at parse time — this data is currently
-  parse-time-only and is not persisted (the handover §Runtime tier: one
-  change).
-- Create an implicit root project per owner, and a per-owner `sessions`
+  parse-time-only and is not persisted.
+- Make each NFS root a top-level project and create a per-owner `sessions`
   project, so every file and every session has a `project_id` even with no
-  `.ragnart/project.toml` anywhere above it.
+  `.ragnart/project.toml` anywhere above it (design §6.1).
 - Extend the scanner and `rag_sync_nfs.py` with marker discovery
-  (`.ragnart/project.toml`), the plan-then-apply reconciliation (the
-  handover §Keeping the tree in sync with the disk, steps 1–5), on top of the
-  mount guard and missing-sources threshold of fix-first item 1.
-- Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the
-  `project`/`include_children`/`include_links` parameters on `GET
-  /v1/search`, and `GET /v1/projects`.
-- Attach sessions to projects by launch directory (the handover, decision
-  #5, accepted).
+  (`.ragnart/project.toml`: `name`, `id`, `inherit_access`, `mode`, tags),
+  move detection by `content_hash`, tombstones with a grace period, and
+  plan-then-apply reconciliation (design §4.2, §10.2), on top of the mount
+  guard and missing-sources threshold of fix-first item 1.
+- Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the `scope`
+  parameter on `GET /v1/search` (project path, selection by paths and tags,
+  `all`; resolved scope echoed in the response; design §8.8), and
+  `GET /v1/projects`.
+- Attach sessions to projects by launch directory (design §7.4).
 
 **Data migration & rollback.**
 1. Snapshot pair first: Qdrant snapshot of `documents_new` plus a
@@ -357,13 +342,13 @@ rollback also reverts the backfill's checkpoint, so a retried backfill
 restarts from zero rather than resuming (it is idempotent, so this costs
 time, not correctness).
 
-**Definition of done** (the handover §Build order Stage 3, plus the checks
-the baseline in §3 makes necessary).
+**Definition of done.**
 - Point count in `documents` is unchanged before/after the backfill.
 - No vectors are rewritten (verified on a sample of points: vectors read
   before and after are identical).
 - The 14 bench queries return the same results with no `project` given.
-- A scoped search (`project=<id>`) returns only that project's sources.
+- A scoped search (`scope=<project path>`) returns only that project's
+  sources, and the response names the projects searched.
 - Moving a project directory changes one `projects` row and zero Qdrant
   points.
 - Fix-first items 1–4 pass their tests.
@@ -383,63 +368,66 @@ whether to pilot the backfill on one owner's data before the full corpus.
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
 
-### v0.3 — Transient
+### v0.3 — Project mode
 
-**Goal.** Ship the `ragnart` CLI, the shared skill, and the real-time
-`transient` collection. Merges the handover's stages 2 and 4, because
-`ragnart init` needs the project tree v0.2 built in order to attach captures
-to a project.
+**Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3,
+§7.4, §8): the `ragnart` CLI, the `/ragnart` skill and commands with scope and
+grounding, the project memory, compact, and ingest-now. The Transient tier is
+an ephemeral cache of files; nothing in this version creates a second vector
+index.
 
-**Entry criteria.** v0.2's Definition of done met.
+**Entry criteria.** v0.2's Definition of done met. The Transient lifecycle
+("cache dynamics": admission, states, transitions, eviction, invalidation,
+compact rules, actors) is defined and recorded in `docs/RAGNART-design.md`
+§7.5 (design §13.3).
 
 **Work items.**
-- `ragnart` CLI: `where`, `init`, `capture`, `add`, `inbox`, `grep`, `keep`,
-  `drop`, `search`, `sweep`, `reindex`.
-- Shared skill at `~/.claude/skills/ragnart/SKILL.md` (OpenCode's docs list
-  `~/.claude/skills` among its search directories — unverified, see §8)
-  plus `/research`, `/inbox`, `/curate` command files for Claude Code
-  (`~/.claude/commands/`) and OpenCode (`~/.config/opencode/commands/`).
+- `ragnart` CLI: `init` (writes `.ragnart/project.toml` with `name`, `id`,
+  `mode = "curated"`), `where`, `add`, `inbox`, `keep`, `drop`, `compact`,
+  `ingest-now`, plus the metadata listing (`ls` with type and time filters,
+  answered from the state database).
+- `.ragnart/inbox/` as the Transient cache: files only, project-scoped, with
+  the expiry and admission rules defined at kickoff.
+- Compact: deterministic selection (rules in `project.toml` and explicit
+  keep/drop, recorded) and file placement into the project's references; the
+  agent updates `.ragnart/MEMORY.md` (an index of pointers and hooks, design
+  §7.4). Compact and ingest-now take the ingestion lock.
+- Curated ingestion mode: the static crawl skips `curated` projects except
+  their references and `MEMORY.md`; `crawl` projects are indexed in full.
+- `/ragnart` skill and commands for Claude Code and OpenCode: scope and
+  grounding knobs, defaults `project + strict` inside a project and
+  `all + strict` outside, the status line, the "no good hits in this scope"
+  stop, one-off `ask`, verbose translation of natural-language scope, loading
+  the project's `MEMORY.md` on entry (design §8). `/rag` becomes an alias
+  (design §8.9).
+- `scope` becomes required on `GET /v1/search` once both clients use
+  `/ragnart` (§4).
 - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
-  `".ragnart/inbox/"`, `".opencode/"`, `".agents/"` to `rag.scanner
-  .exclude_dir_names` (multi-component entries are supported per
-  `ragnart/scanner.py:44-51`, but this is code-read-only and unverified at runtime —
-  verify it in this version).
-- Create the `transient` Qdrant collection with the same vector
-  configuration as `documents` (bge-m3 dense plus `sparse_text` sparse).
-- `POST`/`DELETE /v1/transient`: synchronous write, no queue, no ingestion
-  lock; path-confined to `<project>/.ragnart/inbox/` under a configured
-  root; markdown/text indexed immediately, PDF/Office parsed in a
-  background task.
-- `tiers` parameter and `tier` field on `GET /v1/search`; default
-  `archive,runtime`; `transient` included by default once a `project` is
-  given.
-- Expiry sweep (default 30 days, confirm at kickoff) and promotion removal
-  — a kept item's Transient points are removed once the Archive has
-  ingested it, so it is never missing from both.
+  `".ragnart/inbox/"`, `".opencode/"`, `".agents/"` to
+  `rag.scanner.exclude_dir_names` (multi-component entries are supported per
+  `ragnart/scanner.py:44-51`; verify at runtime).
 
-**Data migration & rollback.** None to `documents`. `transient` is a
-brand-new, additive collection — rollback is dropping it; it is explicitly
-rebuildable from the inbox files, which are the authority.
+**Data migration & rollback.** None to `documents`. The cache is plain files;
+references enter through the normal ingestion pipeline.
 
-**Definition of done** (the handover §Build order Stages 2 and 4 combined).
-- The same `/research`, `/inbox`, `/curate` flow works in Claude Code and
-  OpenCode on one test project.
-- A captured page is returned by a scoped search within seconds.
-- A dropped item is gone from both disk and the index.
-- A kept item is returned from `transient` until the next Archive ingestion
-  run has it, and from `documents` afterwards — never from neither.
+**Definition of done.**
+- In a test project created with `ragnart init`: gather (add pages and files),
+  keep some, drop others, compact; after ingest-now the kept references and
+  `MEMORY.md` are returned by a `project + strict` search with citations, and
+  dropped items are gone from disk.
+- The same flow works in Claude Code and OpenCode.
+- Every answer shows the status line; scope changes happen only through the
+  commands or a stated natural-language translation.
+- A `curated` project's non-reference files are not in the index.
 
-**Risks.** `POST /v1/transient` is an unauthenticated write path until
-v0.5, mitigated only by path confinement and LAN-only deployment — the
-handover's own risk list flags this explicitly. Capture depends on the
-skill being followed; nothing enforces it. Server 2's 16 GB RAM is shared
-with GPU models, now under added PDF-parsing load.
+**Risks.** Capture and curation depend on the skill being followed; nothing
+enforces it. Compact's generated hooks need review by the operator. Whether
+OpenCode loads skills from `~/.claude/skills` is unverified (§8).
 
-**Decisions to confirm at kickoff.** The 30-day expiry value; whether
-`grep`'s ripgrep dependency needs vendoring or can assume ripgrep is already
-on every host's `PATH`.
+**Decisions to confirm at kickoff.** The Transient lifecycle rules; expiry
+period; default compact rules for a new project.
 
-**Estimated sessions.** 1.
+**Estimated sessions.** 1–2.
 
 ### v0.4 — Kotaemon
 
@@ -447,39 +435,39 @@ on every host's `PATH`.
 plugin, for asking across a project's sources with citations, without
 driving the CLI.
 
-**Entry criteria.** None strict — the handover marks the stock-Kotaemon
-spike as doable any time. The plugin itself needs v0.3's `tiers` parameter
-on `GET /v1/search` and v0.2's `GET /v1/projects` to be meaningful.
+**Entry criteria.** None strict for the stock-Kotaemon spike, which can be
+done any time. The plugin needs v0.2's `scope` parameter and
+`GET /v1/projects`, and v0.3's ingest-now.
 
 **Work items.**
 - Spike (any time before this version, if useful): run stock Kotaemon
   against SoHoAI's `/proxy/v1`, confirm one chat turn works; change the
   default `admin` login immediately — LAN-only is not a reason to skip this.
 - Write the index plugin: retriever over `GET /v1/search`, project picker
-  from `GET /v1/projects`, `tier` surfaced on each citation. Registers
+  from `GET /v1/projects` as the scope, project and `source_type` shown on
+  each citation, librarian (strict) prompt by default (design §8.8). Registers
   through `KH_INDEX_TYPES`/`KH_INDICES` in `flowsettings.py`, modelled on
   Kotaemon's bundled GraphRAG index (`libs/ktem/ktem/index/file/graph`).
-- Route file uploads to `POST /v1/transient`.
-- Map the Kotaemon login to an `owner`, the same way `user` is derived
-  today, and pass it on every `GET /v1/search` and `GET /v1/projects` call
-  (§5, v0.4 row). Kotaemon's login is its own; RAGNART still trusts the
-  passed value until v0.5.
+- Uploads become references of the selected project (a deliberate act),
+  followed by ingest-now (design §7.4).
+- Map the Kotaemon login to a principal and pass it on every call (§5, v0.4
+  row). RAGNART still trusts the passed value until v0.5.
 - Pin the Kotaemon version used; deploy as one container on Server 1, port
   7860 (NAS mounted read-only if citation previews need source files).
 
 **Data migration & rollback.** None — this version adds a client, not
 state.
 
-**Definition of done** (the handover §Build order Stage 5).
+**Definition of done.**
 - A question asked with a project selected cites only that project's
   sources.
 - The top sources match `ragnart search` run with the same query and scope.
-- A search issued from a given Kotaemon login is scoped to that login's
-  owner (plus the shared owner), and never returns another owner's sources.
+- A search issued from a given Kotaemon login returns only projects granted
+  to that principal.
 
 **Risks.** Kotaemon's base-class interface for custom index types is
-thinly documented, per the handover's own "Not verified" list — the plugin
-may need more reverse-engineering than estimated. Version drift on every
+thinly documented (unverified) — the plugin may need more reverse-engineering
+than estimated. Version drift on every
 Kotaemon upgrade, since the plugin depends on internal classes. Whether
 Docker is installed on Server 1 is unverified and blocks the container step
 until checked.
@@ -492,9 +480,8 @@ be deferred.
 
 ### v0.5 — Tenancy & authentication
 
-**Goal.** Make `user`/principal non-spoofable, enforce grants, make
-Transient's visibility switchable, and validate the two desktop clients end
-to end.
+**Goal.** Make the principal non-spoofable, enforce grants, add grant
+management, and validate the two desktop clients end to end.
 
 **Entry criteria.** v0.2's `grants` table and `authorize()` seam exist;
 v0.3/v0.4 give something worth protecting.
@@ -510,29 +497,26 @@ v0.3/v0.4 give something worth protecting.
   calls now have teeth.
 - `user`/principal is derived from the validated token, never from a
   request parameter the caller sets.
-- Transient's shared-by-default visibility becomes switchable to
-  private-until-kept, keyed off the `created_by` field already recorded
-  since v0.3.
+- Grant management (`read`, `admin`) through the CLI and API; groups from
+  the token's groups claim (design §6.2–§6.4).
 - Validate OpenCode Desktop against the Server 2 OpenCode server
-  (`192.168.1.95:4096`) — confirm the skill and commands load there (the
-  handover flags this as not stated in OpenCode's docs).
+  (`192.168.1.95:4096`) — confirm the skill and commands load there (not
+  stated in OpenCode's docs).
 - Validate Claude Desktop Code sessions, local and over SSH; confirm where
   their transcripts land relative to `claude_chats.roots` (currently
-  `/home/florian/.claude/projects`) — the handover flags this as unverified
-  too.
+  `/home/florian/.claude/projects`) — unverified.
 
 **Data migration & rollback.** None to vector data. This version is
 additive application logic over tables that already exist from v0.2.
 Rollback is a feature flag / config revert (disable token enforcement, fall
 back to the owner-only rule), not a data rollback.
 
-**Definition of done** (the handover §Build order Stage 6, plus the
-tenancy checks this version exists for).
+**Definition of done.**
 - A request without a valid token is rejected, or mapped to an anonymous
   principal with no project access (operator's choice at kickoff, see §8).
 - A second principal (for example, a `la-familia`-only token) sees only
   content it has been granted, not the full corpus.
-- Transient private-until-kept works once switched on.
+- A group grant gives every member of the group access, and only them.
 - OpenCode Desktop sessions and Claude Desktop Code sessions (local and
   SSH) both appear correctly in the Runtime tier after the next ingestion
   run.
@@ -540,13 +524,12 @@ tenancy checks this version exists for).
 **Risks.** This version turns an until-now-open system into an enforced
 one — a bug here fails closed (locks someone out) or fails open (leaks
 data); test both directions before calling it done. Desktop-app transcript
-locations are unverified per the handover's own list and may require a
+locations are unverified and may require a
 short side investigation before the Runtime-tier check can be written.
 
 **Decisions to confirm at kickoff.** Tokens vs OIDC (or both, tokens
 first); whether an invalid/missing token means "rejected" (HTTP 401) or
-"anonymous, no grants" — these are different failure modes and the handover
-does not pick one.
+"anonymous, no grants" — these are different failure modes.
 
 **Estimated sessions.** 1.
 
@@ -583,14 +566,13 @@ does not pick one.
   `docs/design-history.md` are the operator's own documents: ask before any
   content edit.
 
-### Naming (adapted from the handover §Names)
+### Terms
 
-| Handover term | RAGNART name | Introduced in |
-| --- | --- | --- |
-| `.sohoai/` (marker name in earlier handovers) | `.ragnart/` | v0.2 |
-| `workbench` collection | `transient` collection | v0.3 |
-| `inbox/`, `sources/`, `notes/` | same names, under `.ragnart/` | v0.3 |
-| Corpus tier / Session tier / Workbench tier | Archive / Runtime / Transient | Archive and Runtime exist; Transient in v0.3 |
+The vocabulary is defined in `docs/RAGNART-design.md`: tiers (§7.1),
+ingestion policies (§7.2), project mode and compact (§7.3), scope and
+grounding (§8.1). The project marker directory is `.ragnart/`; inside it,
+`inbox/` is the Transient cache and `sources/`, `notes/` and `MEMORY.md` are
+the project's references.
 
 ## 8. Open decisions and parameters to confirm
 
@@ -613,7 +595,7 @@ does not pick one.
 | --- | --- | --- | --- |
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
 | v0.2 Nested | planned | — | — |
-| v0.3 Transient | planned | — | — |
+| v0.3 Project mode | planned | — | — |
 | v0.4 Kotaemon | planned | — | — |
 | v0.5 Tenancy & authentication | planned | — | — |
 
