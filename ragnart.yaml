@@ -10,14 +10,14 @@
 # Python derives: {db_base_path}/sqlite/rag_state.db.
 db_base_path: "/mnt/nfs/__Backups/RAGNART--databases"
 
-#### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
+#### -- RAG Settings (see RAG-strategy.md §7) ---------------------------------------
 rag:
   embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 2 (see ollama_url)
   # ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
   ollama_url: "http://192.168.1.95:11434/api/embeddings"   # Ollama on Server 2 (explicit IP — not localhost)
   opencode_api_url: "http://192.168.1.95:4096"  # OpenCode server — must match opencode.api_url
   top_k: 5
-  # Parent-child chunking (see RAG-strategy.md §3.4):
+  # Parent-child chunking (see RAG-strategy.md §3.1):
   #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
   #   Flat 512-token for PPTX / short TXT / YAML / config files
   qdrant_collection: "documents"
@@ -30,7 +30,7 @@ rag:
   # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
   ingest_lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock"
 
-  # -- Cross-encoder reranking (§13) -----------------------------------------
+  # -- Cross-encoder reranking (RAG-strategy.md §6.3) ------------------------
   rerank:
     enabled: true                             # on by default; override via ?rerank=false or --no-rerank
     server_url: "http://192.168.1.95:8000/v1/rerank"
@@ -44,7 +44,7 @@ rag:
     # so the client does not truncate; the server handles typical queries + child chunks.
     # Coexists with qwen3.5-9b-q4 on GPU; verified 9,810 MiB used / 1,965 MiB free (10-min soak).
 
-  # -- Hybrid sparse+dense retrieval (§14) -----------------------------------
+  # -- Hybrid sparse+dense retrieval (RAG-strategy.md §3.3, §6.1) -----------
   hybrid:
     enabled: true                             # default on; override per-call via hybrid=False
     sparse_vector_name: "sparse_text"

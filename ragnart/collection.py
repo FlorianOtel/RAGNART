@@ -94,7 +94,7 @@ def ensure_payload_indexes(client: QdrantClient) -> None:
     collection reaches (millions of points), that scan routinely exceeds the
     QdrantClient timeout (60s — see get_client()) and ingestion fails with
     "ResponseHandlingException: timed out" — see RAG-troubleshoot.md
-    (2026-09-13 investigation) for the incident that identified this.
+    §2.8 (Qdrant timeouts during ingestion or sync).
 
     Idempotent and cheap after the first call in a process: checks a
     module-level cache before hitting Qdrant, then checks the collection's

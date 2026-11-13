@@ -2,28 +2,23 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
-updated_at: 2026-11-13--16-15
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only)
+updated_at: 2026-11-13--16-37
 context: >
-  Produced by a /brain session on 2026-11-13, tasked with writing a versioned,
-  staged implementation plan for RAGNART — SoHoAI's RAG spun off into its own
-  repo and service, then extended into a nested, three-tier (Archive / Runtime
-  / Transient) RAG with a self-hosted notebook UI (Kotaemon). Constraints set
-  by the operator: stay backward compatible with the existing SoHoAI corpus
-  and ingestion pipeline (no re-embedding migration; renames and payload-only
-  changes are fine); keep access control open-ended for multi-tenancy from the
-  start, enforced through one logical-ACL seam rather than filesystem
-  permissions; and keep the work to a few, clearly demarcated sessions — five
-  versions, one working session each except v0.2, which may take two. Inputs:
-  the handover document
+  Versioned, staged implementation plan for RAGNART, a self-hosted RAG
+  retrieval service, built out into a nested, three-tier (Archive / Runtime /
+  Transient) RAG with a self-hosted notebook UI (Kotaemon). Operator
+  constraints: backward compatible with the existing corpus and ingestion
+  pipeline (no re-embedding migration; renames and payload-only changes are
+  fine); access control open-ended for multi-tenancy, enforced through one
+  logical-ACL seam rather than filesystem permissions; the work kept to five
+  versions, one working session each except v0.2, which may take two. The
+  design input is the handover document
   `/home/florian/Gin-AI/tmp/RAGNART handover a nested, three-tier RAG system
-  spun off from SoHoAI.md` (546 lines, checked against SoHoAI commit 5f4f1ed
-  on 2026-11-12); the SoHoAI repository itself at the same commit
-  (`rag_engine/`, `utils/`, `docs/RAG-strategy.md`, `docs/design-history.md`);
-  and a live read of the Qdrant `documents` collection on Server 1
-  (192.168.1.93:6333) taken on 2026-11-13, which corrected several of the
-  handover's numbers. This document is the sole deliverable of that /brain
-  session; no code was moved or written while producing it.
+  spun off from SoHoAI.md`, cited below as "the handover". The current
+  baseline (§3) is checked against the repository and the live Qdrant
+  collection on Server 1 (192.168.1.93:6333); operational detail lives in
+  docs/RAG-strategy.md. This document states the plan as it currently stands.
 ---
 
 # RAGNART — Implementation plan
@@ -39,107 +34,94 @@ handover document in full.
 Rules for a version session:
 
 1. Re-read this document in full, especially §2 (Decisions already taken),
-   §3 (Corrections to the handover), §4 (Backward-compatibility invariants)
+   §3 (Current baseline), §4 (Backward-compatibility invariants)
    and §5 (Access-control model) — these apply to every version, not just
    one.
 2. Read its own version section in §6 in full.
 3. Do its own `/brain` planning for the detailed design. This document gives
    goals, work items and acceptance checks, not file-by-file diffs — that
    level of detail belongs to each version's own planning session.
-4. At the end, update its row in §9 (Version status table) and add one dated
-   entry to the project changelog (see §7, Docs & git discipline).
+4. At the end, update its row in §9 (Version status table) and add its
+   entry to the implementation log, `docs/v0--Implementation-log.md` (see §7,
+   Docs & git discipline).
 
-This document is not rewritten version to version. Each session appends to
-§9 and to the changelog, and may add a dated note to a version's own section
-if something planned here turned out to be wrong — reopening a decision gets
-a note, not a silent rewrite of history.
+This document states the current plan. When something planned here turns out
+to be wrong, the affected text is rewritten in place; the reason goes in the
+commit message and in the implementation log.
 
 ## 2. Decisions already taken
 
 | Decision | Choice | Source |
 | --- | --- | --- |
-| Spin off or evolve SoHoAI in place | Spin off: new repo, new service; all work happens in the RAGNART repo | the handover §Spin-off, not evolution; operator, this session |
-| History carried into the new repo | Plain copy ("import from SoHoAI@5f4f1ed" as one commit), not `git filter-repo` | operator, this session |
-| Access-control model | Logical ACL (principal / owner / project / grants), enforced only in `resolve_scope()`/`authorize()`; filesystem permissions recorded as hints, never consulted | operator, this session (corroborated by evidence in §3 below) |
-| Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator, this session |
-| Version scope | v0.1 spin-off · v0.2 nested tree · v0.3 transient (merges the handover's stages 2 and 4) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator, this session, reordered from the handover's six-stage build order |
-| Package name | `rag_engine` → `ragnart` | the handover §Names |
+| Where RAG work happens | The RAGNART repo and service only; SoHoAI carries no RAG code | the handover §Spin-off, not evolution; operator |
+| Access-control model | Logical ACL (principal / owner / project / grants), enforced only in `resolve_scope()`/`authorize()`; filesystem permissions recorded as hints, never consulted | operator (corroborated by §3 item 6) |
+| Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator |
+| Version scope | v0.1 spin-off · v0.2 nested tree · v0.3 transient (merges the handover's stages 2 and 4) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator, reordered from the handover's six-stage build order |
+| Package name | `ragnart` | the handover §Names |
 | Dot-directory name | `.ragnart/` | the handover §`.ragnart/` or `.rag/` |
 | Service host | Server 2 (192.168.1.95), beside ingestion | the handover §Where the service runs |
 | Symlink rule | Real path decides the project (accepted) | the handover, decision #4 |
 | Session attribution | By launch directory (accepted) | the handover, decision #5 |
 | Transient visibility | Shared with the project; `created_by` stored for a later private-until-kept switch | the handover, decision #6 |
-| v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator + corrections in §3 |
-| `multi_query` / `rag_mmr_bench.py` | Dropped in v0.1, not ported | the handover §Cutover step 6; no-go verdict in SoHoAI `docs/RAG-strategy.md` §8.3 |
+| v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator; §3 items 1 and 4 |
+| `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | the handover §Cutover step 6 |
 
-## 3. Corrections to the handover
+## 3. Current baseline
 
-The handover was checked against SoHoAI at commit `5f4f1ed` by reading code
-only; it states plainly that "the live NAS data and the running services were
-not inspected." This `/brain` session did read the live Qdrant collection and
-re-checked several code claims. The following corrections hold for every
-version below.
+These facts hold for every version below. They are checked against the
+repository and the live services; operational detail is in
+`docs/RAG-strategy.md`.
 
-1. **Corpus size.** The handover gives 98,737 points "at Phase 2 completion."
-   A live read of `GET /collections/documents` on 192.168.1.93:6333 on
-   2026-11-13 shows **2,987,299 points** — dense (1024-dim, Cosine, unnamed
-   vector) plus sparse `sparse_text` (IDF), `on_disk_payload: true`. Every
-   migration step in this plan is sized for millions of points, not tens of
-   thousands: no step may require re-embedding or rewriting vectors.
-2. **`documents` is an alias, not a plain collection.** `GET /aliases` on
-   2026-11-13 shows `documents` → `documents_new` (also recorded in SoHoAI
-   `docs/RAG-strategy.md` §14.4, the sparse-vector migration that created the
-   alias). Every reference to "the `documents` collection" below means the
-   alias; the underlying name `documents_new` matters only for snapshot
-   restore, per SoHoAI `docs/RAG-strategy.md` §11.
-3. **`owner` is not Qdrant-indexed today.** `payload_schema` on the live
-   collection has only `source_path` (keyword) indexed; `rag_engine/
-   collection.py:121` is the only `create_payload_index()` call in the
-   codebase. v0.2 is the first version to add indexes, on `owner`,
-   `project_id` and `source_id`.
-4. **Point IDs are random, not path-derived.** `rag_engine/ingest.py:846`
-   uses `uuid.uuid4()`; a file replace deletes by a `source_path` filter
-   (`ingest.py:722-735`, `utils/rag_sync_nfs.py:45-67`). The favourable
-   consequence: `set_payload` filtered by `source_path` can add or rewrite
-   `project_id`/`source_path` without touching vectors, and a later full
-   re-ingest still replaces cleanly by filter.
-5. **`derive_owner()` is dead code.** Defined in `rag_engine/schema.py:33-61`
-   but never called. The real owner assignment is a per-NFS-root config
-   literal read in `scanner.py:119-132`; search filters
+1. **Corpus.** About **2.99M points** in one collection: dense vector
+   (1024-dim, Cosine, unnamed) plus sparse `sparse_text` (IDF),
+   `on_disk_payload: true`. Every migration step in this plan is sized for
+   millions of points: no step may require re-embedding or rewriting vectors.
+2. **`documents` is an alias.** `documents` → `documents_new`. Every
+   reference to "the `documents` collection" below means the alias; the
+   underlying name `documents_new` matters only for snapshot restore
+   (`docs/RAG-strategy.md` §4.2 and §9.3).
+3. **Only `source_path` is Qdrant-indexed.** The live `payload_schema` has
+   one keyword index, `source_path`; `ragnart/collection.py:121` is the only
+   `create_payload_index()` call. v0.2 adds indexes on `owner`, `project_id`
+   and `source_id`.
+4. **Point IDs are random; replace deletes by `source_path`.**
+   `ragnart/ingest.py:846` uses `uuid.uuid4()`; a file replace deletes by a
+   `source_path` filter (`ragnart/ingest.py:722-735`,
+   `utils/rag_sync_nfs.py:45-67`). So `set_payload` filtered by
+   `source_path` can add or rewrite `project_id`/`source_id` without touching
+   vectors, and a later full re-ingest still replaces cleanly by filter.
+5. **Owner comes from config, per NFS root.** The scanner assigns each
+   configured root's `owner` literal (`ragnart/scanner.py:119-132`);
+   `derive_owner()` in `ragnart/schema.py:33` is not called. Search filters
    `owner IN [user, 'la-familia']` only when `user` is supplied
-   (`search.py:104-118`). Treat the handover's references to
-   `derive_owner()` as describing intent, not shipped behaviour.
+   (`ragnart/search.py:104-110`). The handover's references to
+   `derive_owner()` describe intent, not behaviour.
 6. **Filesystem permissions cannot carry tenancy.** Both NFS roots
    (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`) are `florian:florian`, mode
    `777`; nearly every file is owned by uid 555; there are no per-person Unix
    accounts; the NFS mount is `sec=sys` with no `all_squash`/`anonuid` on the
-   client side. This is why §5 below is a logical ACL rather than a mirror of
+   client side. Hence §5 is a logical ACL rather than a mirror of
    `uid`/`gid`/`mode` — those three columns in the handover's `projects`
-   table are recorded as hints only and are never consulted by `authorize()`.
-7. **Snapshot backup path.** The correct, confirmed path is
-   `/mnt/nfs/__Backups/RAGNART--databases/` (`qdrant-snapshots/documents/`,
-   paired `documents_new-*.snapshot` files of roughly 21 GB each and
-   `rag_state-*.db` copies of roughly 258 MB; written by `scripts/
-   sqlite-qdrant-snapshot.sh`). The script's default is `KEEP=3`, but 24
-   database copies were present at read time — retention is not being
-   applied as documented. Every snapshot reference in this plan uses this
-   corrected path.
-8. **`main.py`'s RAG surface is larger than "handler plus client."** Besides
-   the `/v1/rag/search` handler and the Qdrant client set-up, `main.py:34-36`,
-   `100-135` and `185-228` carry config plumbing and the multi-query
-   expansion LLM variant. All of it is dropped or moved in v0.1, not only the
-   search handler.
-9. **Two independent `/rag` client copies exist, not one.**
-   `~/.claude/commands/rag.md` is a symlink into
-   `/mnt/nfs/Florian/Gin-AI/dot.claude-Linux/commands/rag.md`, and
-   `~/.config/opencode/commands/rag.md` is a separate, textually identical
-   file. v0.1 must repoint both, plus the `rag` skill entry listed in Claude
-   Code ("Search local SoHoAI RAG").
+   table are recorded as hints only and never consulted by `authorize()`.
+7. **Data root and snapshots.** All persistent data lives under
+   `/mnt/nfs/__Backups/RAGNART--databases/` (`sqlite/rag_state.db`, `logs/`,
+   `qdrant-snapshots/documents/`, `rag-ingest.lock`). One restore pair
+   (`documents_new-*.snapshot`, ~21 GB, plus `rag_state-*.db`) is taken per
+   day at the end of an ingestion run by `scripts/sqlite-qdrant-snapshot.sh`;
+   7 pairs are kept (`docs/RAG-strategy.md` §9.1).
+8. **Services and hosts.** Qdrant on Server 1 (192.168.1.93:6333).
+   `ragnart-search.service` (`GET /v1/search`, `GET /health`, port 8100) and
+   `ragnart-ingest.timer` (01:00, 07:00, 13:00, 19:00) on Server 2
+   (192.168.1.95), which is the only host that opens `rag_state.db`. Both
+   `/rag` command copies (`~/.claude/commands/rag.md`,
+   `~/.config/opencode/commands/rag.md`) call
+   `http://192.168.1.95:8100/v1/search`. SoHoAI's `GET /v1/rag/search` is a
+   307 redirect stub to this service (its removal is a v0.2 entry
+   criterion).
 
 ## 4. Backward-compatibility invariants
 
-These are hard rules that every version from v0.2 onward obeys. v0.1 obeys
-them trivially, since it moves code and changes no data.
+These are hard rules that every version from v0.2 onward obeys.
 
 - **No migration re-embeds.** Every schema or layout change after v0.1 is
   additive metadata, applied through `set_payload` (filtered by
@@ -152,29 +134,28 @@ them trivially, since it moves code and changes no data.
   corrupting, but it defeats the point of move detection.
 - **Schema changes are additive-only, through `_MIGRATIONS`.** New columns
   and tables go through the existing `_MIGRATIONS` list pattern in
-  `rag_engine/state.py` (currently a list of `ALTER TABLE` statements applied
+  `ragnart/state.py` (a list of `ALTER TABLE` statements applied
   idempotently, with failures swallowed because the column already exists;
   there is no schema-version table). Never rename or drop a column, and
   never change `ingestion_queue.file_path`'s role as primary key.
-- **Search without new parameters is unchanged.** `GET /v1/search` (and its
-  SoHoAI-era counterpart `/v1/rag/search`, during the v0.1 transition period)
-  called with no `project`, `tiers`, `include_children` or `include_links`
+- **Search without new parameters is unchanged.** `GET /v1/search` called
+  with no `project`, `tiers`, `include_children` or `include_links`
   parameter must return the same ranking it returns today. The regression
   test is the 14 queries in `utils/rag_bench_queries.txt`, run before and
-  after every version's data migration.
+  after every version's data migration (tie-aware, as search ordering is not
+  fully deterministic; `docs/RAG-strategy.md` §6.5).
 - **Collection name/alias and `rag_state.db`'s name do not change.**
-  `documents` → `documents_new` and the file name `rag_state.db` are
-  unchanged at every version. SoHoAI `docs/RAG-strategy.md` §11's recovery
-  procedures refer to both by name; that section itself moves (copied, then
-  the SoHoAI copy marked superseded) into RAGNART's docs in v0.1.
+  `documents` → `documents_new` and the file name `rag_state.db` stay the
+  same at every version. The recovery procedures in `docs/RAG-strategy.md`
+  §9 refer to both by name.
 - **One database host, one ingestion daemon.** `rag_state.db` is opened from
   Server 2 only, and one ingestion daemon runs at a time, enforced by an NFS
-  `lockf` lock — both already true in SoHoAI (`docs/RAG-strategy.md` §10.6)
-  and carried over unchanged. If the search service ever needs the SQLite
-  file directly rather than just Qdrant, it opens it read-only.
+  `lockf` lock (`docs/RAG-strategy.md` §5.6). If the search service ever
+  needs the SQLite file directly rather than just Qdrant, it opens it
+  read-only.
 - **Snapshot before scale.** A matching Qdrant snapshot and `rag_state.db`
   copy is taken before any step that touches payload or schema at scale
-  (v0.2's backfill, in particular), using the corrected path in §3 item 7.
+  (v0.2's backfill, in particular), in the data root of §3 item 7.
 
 ## 5. Access-control model
 
@@ -193,7 +174,7 @@ boundary from.
   validated client identity from v0.5 on.
 - **Owner** — the existing, coarser label already in production (`florian`,
   `la-familia`, …), assigned per NFS root at ingest time
-  (`scanner.py:119-132`). It stays the outermost filter on every search — a
+  (`ragnart/scanner.py:119-132`). It stays the outermost filter on every search — a
   principal never sees across owners without a grant.
 - **Project** — a node in the project tree (the handover §Nested: the
   project tree), identified by a UUID that never changes; the tree is read
@@ -214,11 +195,11 @@ sketch).
 
 | Version | Addition |
 | --- | --- |
-| v0.1 | No seam yet. Search behaves exactly as `/v1/rag/search` does today (owner-only filter). |
+| v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
 | v0.2 | Seam introduced; `authorize()` implements only today's rule (project owner equals caller owner, or the shared owner). `grants` exists but stays empty. |
 | v0.3 | Path confinement on the one write path (`POST /v1/transient`): refuses targets outside `<project>/.ragnart/inbox/` under a configured root. `created_by` starts being recorded on every Transient point. |
 | v0.4 | Kotaemon's login name is mapped to an owner, the same way `user` is today. Still no stronger authentication. |
-| v0.5 | `user`/principal is no longer self-asserted — per-client API tokens first (OIDC optional). `grants` rows are enforced by `authorize()`. Transient's shared-by-default visibility becomes switchable to private-until-kept, keyed off `created_by`. |
+| v0.5 | `user`/principal comes from a validated per-client API token (OIDC optional), not from the caller's own parameter. `grants` rows are enforced by `authorize()`. Transient's shared-by-default visibility becomes switchable to private-until-kept, keyed off `created_by`. |
 
 **Hints, not authority:** `uid`, `gid` and `mode` are recorded per project
 (the handover's `projects` table) for a possible future permissions-mirroring
@@ -230,89 +211,25 @@ the system needs to know.
 
 ### v0.1 — Spin-off
 
-**Goal.** Move the already-independent RAG code and docs out of SoHoAI into
-the RAGNART repo and a new service, with no semantic change to search. From
-here on, all RAG work happens in the RAGNART repo, never in SoHoAI.
+**Status.** Done (§9). The RAG code, its operations and its docs live in the
+RAGNART repo and service; SoHoAI carries no RAG code.
 
-**Entry criteria.** This plan approved; SoHoAI confirmed at commit `5f4f1ed`
-or later with no further RAG-affecting changes since (check `git log`).
-
-**Work items.**
-- Plain-copy `rag_engine/` (renamed to the package `ragnart`), `utils/
-  rag_*.py`, `utils/qdrant_status.py`, `utils/rag_bench_queries.txt`,
-  `scripts/rag-ingest*`, `scripts/qdrant/`, `scripts/
-  sqlite-qdrant-snapshot.sh` into RAGNART as one "import from
-  SoHoAI@5f4f1ed" commit. No `git filter-repo`.
-- Carry `docs/RAG-strategy.md`, `docs/RAG-troubleshoot.md` and the
-  RAG-relevant entries of `docs/design-history.md` into RAGNART's `docs/`,
-  completing the operator's metadata frontmatter on arrival. These remain
-  the operator's own documents moving home, not new documents — ask before
-  any content edit beyond the frontmatter and the path corrections this
-  version requires.
-- Derive `pyproject.toml` from actual imports, not SoHoAI's flat dependency
-  list: docling, tiktoken, fastembed, numpy, qdrant-client, httpx, pyyaml,
-  fastapi, uvicorn, python-pptx (implicit).
-- Split `ragnart.yaml` out of `SoHoAI-config.yaml` (the `rag`, `users`,
-  `shared`, `claude_chats`, `opencode` blocks and `db_base_path`). Switch the
-  roughly ten `utils/` config-path-resolution sites (the `Path(__file__)
-  .resolve().parent.parent / "SoHoAI-config.yaml"` pattern) to read
-  `ragnart.yaml` from the RAGNART repo root.
-- Fix the hardcoded SoHoAI path in `rag-ingest.service:10` and
-  `rag-ingest-run.sh:17` (and the hardcoded `DB_PATH` at
-  `rag-ingest-run.sh:49`) to point at the RAGNART repo.
-- Drop `multi_query` and `utils/rag_mmr_bench.py` — already dead per SoHoAI
-  `docs/RAG-strategy.md` §8.3's no-go verdict (2026-04-22). Do not port them.
-- Write the new FastAPI service: `GET /v1/search` (the handler moved from
-  SoHoAI `main.py`) and `GET /health`, under systemd on Server 2, on a free
-  port chosen at kickoff (port 8000 belongs to llama-swap there).
-- Move the ingestion timer: disable SoHoAI's systemd timer, enable
-  RAGNART's. Never both active — the NFS `lockf` guard prevents concurrent
-  *runs*, but two active timers still means two schedules writing
-  retry/backoff state against one queue.
-- Repoint both `/rag` command copies (§3 item 9) at the new service URL.
-- SoHoAI-side changes, limited to exactly these three, each in a SoHoAI
-  session/commit under SoHoAI's own git discipline: (a) turn
-  `/v1/rag/search` in SoHoAI's `main.py` into a redirect to the new service
-  for a transition period; (b) mark SoHoAI's copies of the moved RAG docs as
-  superseded; (c) at the end of the transition, remove SoHoAI's RAG code
-  (the redirect, the leftover Qdrant client set-up, `rag_engine/` and the
-  RAG `utils/`/`scripts/`). Step (c) waits for this version's Definition of
-  done.
-
-**Data migration & rollback.** None — this version touches no data, only
-code location and process ownership. Rollback is re-enabling SoHoAI's timer
-and `/v1/rag/search` handler; SoHoAI's RAG code stays in place, untouched,
-until the Definition of done is met.
-
-**Definition of done.**
-- `utils/rag_smoke_test.py` (ported) passes against the new RAGNART service.
-- The 14 queries in `utils/rag_bench_queries.txt` return identical results
-  from the old SoHoAI endpoint and the new RAGNART endpoint.
-- The ingestion timer runs from RAGNART; SoHoAI's is disabled.
-- SoHoAI has zero `rag_engine` imports left.
-
-**Risks.** Dependency drift between SoHoAI's flat list and what RAGNART
-actually imports is flagged unclear in the research for this plan and needs
-a real import-graph check, not just the list above. Hardcoded paths may
-exist beyond the two already found. Doc-only mentions of the old endpoint
-exist in octmux and AYA project docs; not executable clients, but check them
-too.
-
-**Decisions to confirm at kickoff.** The free port for the new service;
-whether the carried follow-ups from SoHoAI `docs/design-history.md` (stale
-`ollama_url` Server-1 defaults, unused models in `schemas.py`) are cleaned
-up now or in a follow-up.
-
-**Dated note, 2026-11-13.** `docs/Changelog.md` (per Section 7) was not created;
-`docs/v0--Implementation-log.md` (AYA format) serves that purpose from v0.1 onward.
-The work-item list above named `numpy`; it was dropped after verifying that no direct
-import remains once `multi_query.py` and `rag_mmr_bench.py` are dropped. Port chosen: 8100.
-The old-vs-new bench check uses a tie-aware gate (operator-approved), because search is
-non-deterministic on the old endpoint alone; see `docs/v0--Implementation-log.md`, v0.1
-Deviation 6. The SoHoAI `/v1/rag/search` 307 stub is kept until 2026-11-16 (operator
-date); check `SoHoAI-gateway.log` for 307 hits before removing it.
-
-**Estimated sessions.** 1.
+**What exists.**
+- The `ragnart` package, `utils/` operator tools and `scripts/` (systemd
+  units, ingestion wrapper, snapshot script, Qdrant installer) in this repo;
+  configuration in `ragnart.yaml`; dependencies pinned in `pyproject.toml`.
+- `ragnart-search.service` on Server 2, port 8100: `GET /v1/search` and
+  `GET /health` (`ragnart/service.py`).
+- `ragnart-ingest.timer` → `ragnart-ingest.service` on Server 2, the only
+  ingestion schedule.
+- Both `/rag` command copies call the RAGNART service (§3 item 8).
+- `utils/rag_compare_endpoints.py`: tie-aware result comparison between two
+  search endpoints (`docs/RAG-strategy.md` §6.5).
+- Docs: `docs/RAG-strategy.md`, `docs/RAG-troubleshoot.md`,
+  `docs/design-history.md` and the session record
+  `docs/v0--Implementation-log.md`.
+- SoHoAI's `GET /v1/rag/search` is a 307 redirect stub to this service; its
+  removal is a v0.2 entry criterion.
 
 ### v0.2 — Nested
 
@@ -320,11 +237,9 @@ date); check `SoHoAI-gateway.log` for 307 hits before removing it.
 by payload-only backfill, with no vectors touched, and give search project
 scoping.
 
-**Entry criteria.** v0.1's Definition of done met (RAGNART's service and
-timer are live and are the only ones running). **Also:** SoHoAI's
-`/v1/rag/search` 307 stub removed (on or after 2026-11-16, after checking
-`SoHoAI-gateway.log` for 307 hits), per `docs/v0--Implementation-log.md`, v0.1
-Open items.
+**Entry criteria.** v0.1 done (§9). SoHoAI's `GET /v1/rag/search` 307 stub
+removed, on or after 2026-11-16, after checking `SoHoAI-gateway.log` for 307
+hits and repointing any caller found.
 
 **Work items.**
 - Add tables (`projects`, `project_links`, `source_links`, `grants`) and
@@ -333,11 +248,11 @@ Open items.
   list pattern.
 - Add Qdrant keyword payload indexes on `owner`, `project_id`, `source_id`
   (online and additive — `documents` keeps serving search while they build).
-- Write a backfill script modelled on SoHoAI's `rag_sparse_migrate.py`
-  precedent, but doing `set_payload` by `source_path` filter on the live
+- Write a backfill script modelled on `utils/rag_sparse_migrate.py`, but
+  doing `set_payload` by `source_path` filter on the live
   `documents` alias — no new collection, no alias swap. Dry-run first;
   resumable (checkpoint by last `source_path` processed); batched. It must
-  re-derive `project_id`/`source_id` the same way the scanner now does, and
+  re-derive `project_id`/`source_id` the same way the extended scanner does, and
   also backfill session attribution (Claude Code `cwd`, OpenCode
   `location.directory`) read fresh at parse time — this data is currently
   parse-time-only and is not persisted (the handover §Runtime tier: one
@@ -349,6 +264,20 @@ Open items.
   (`.ragnart/project.toml`), the plan-then-apply reconciliation (the
   handover §Keeping the tree in sync with the disk, steps 1–5), the mount
   guard, and the missing-sources-threshold abort.
+- Fix the known defects in sync and tooling:
+  (a) an unreachable or unmounted NFS root is skipped by the scanner, so
+  `StateDB.find_deleted()` (`ragnart/state.py`) sees every completed file
+  under it as gone and `utils/rag_sync_nfs.py` deletes their Qdrant points —
+  the mount guard and missing-sources threshold must cover this;
+  (b) `rag_sync_nfs.py --user florian` (the timer's only sync) scans only
+  that owner's roots but checks deletions against all queue rows, so every
+  other owner's rows and points, including the shared `la-familia` root, are
+  deleted on each run (no live impact while `/mnt/nfs/La-Familia` is empty);
+  (c) `utils/rag_status.py` and `utils/rag_reset.py` check real collection
+  names and do not resolve the `documents` alias;
+  (d) `GET /health` can block up to the Qdrant client timeout (60 s) when
+  Qdrant is down, and `GET /v1/search` answers 503 for the process lifetime
+  if Qdrant was down at service start.
 - Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the
   `project`/`include_children`/`include_links` parameters on `GET
   /v1/search`, and `GET /v1/projects`.
@@ -357,9 +286,8 @@ Open items.
 
 **Data migration & rollback.**
 1. Snapshot pair first: Qdrant snapshot of `documents_new` plus a
-   `rag_state.db` copy, written to `/mnt/nfs/__Backups/RAGNART--databases/`
-   (corrected path, §3 item 7), following SoHoAI `docs/RAG-strategy.md`
-   §11's pairing method.
+   `rag_state.db` copy in the data root of §3 item 7, taken on demand per
+   `docs/RAG-strategy.md` §9.5.
 2. Pause the ingestion timer (hold its NFS lock) for the backfill's
    duration — the backfill and an ingestion run must not touch the same
    rows concurrently.
@@ -369,8 +297,8 @@ Open items.
    batched and resumable.
 6. Resume the ingestion timer.
 
-Rollback: restore from the snapshot pair per SoHoAI
-`docs/RAG-strategy.md` §11.5 (full) or §11.6 (SQLite-only). Because the
+Rollback: restore from the snapshot pair per `docs/RAG-strategy.md` §9.3
+(full) or §9.4 (state-DB-only). Because the
 backfill never rewrites vectors, a SQLite-only rollback is expected to
 suffice; the extra payload fields and indexes left in Qdrant are inert to
 the old code and are left in place by design, not removed. A SQLite-only
@@ -379,7 +307,7 @@ restarts from zero rather than resuming (it is idempotent, so this costs
 time, not correctness).
 
 **Definition of done** (the handover §Build order Stage 3, plus the checks
-this plan's corrections make necessary).
+the baseline in §3 makes necessary).
 - Point count in `documents` is unchanged before/after the backfill.
 - No vectors are rewritten (verified on a sample of points: vectors read
   before and after are identical).
@@ -388,6 +316,7 @@ this plan's corrections make necessary).
 - Moving a project directory changes one `projects` row and zero Qdrant
   points.
 - The mount guard aborts the sync when a configured root is unmounted.
+- Defects (a)–(d) under Work items are fixed.
 
 **Risks.** Backfill runtime against ~2.99M points (§3 item 1) needs
 measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
@@ -422,7 +351,7 @@ to a project.
 - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
   `".ragnart/inbox/"`, `".opencode/"`, `".agents/"` to `rag.scanner
   .exclude_dir_names` (multi-component entries are supported per
-  `scanner.py:44-51`, but this is code-read-only and unverified at runtime —
+  `ragnart/scanner.py:44-51`, but this is code-read-only and unverified at runtime —
   verify it in this version).
 - Create the `transient` Qdrant collection with the same vector
   configuration as `documents` (bge-m3 dense plus `sparse_text` sparse).
@@ -574,24 +503,16 @@ does not pick one.
 
 ### Operations
 
-- **Dated note, 2026-11-13 (after v0.1 close):** the RAG data root moved from
-  `/mnt/nfs/__Backups/SoHoAI--databases/` to `/mnt/nfs/__Backups/RAGNART--databases/`
-  (`sqlite/`, `logs/`, `qdrant-snapshots/`, `rag-ingest.lock`); only SoHoAI's own
-  `archive/` and gateway log stay in the old directory. Snapshot retention is now one
-  pair per day, 7 kept on the NAS; Qdrant's snapshots_path is Server 1's local NVMe.
-  Paths below are updated to the new root. Details: `docs/RAG-strategy.md` §11.2a and
-  `docs/v0--Implementation-log.md`, v0.1 ops entry of 2026-11-13.
-- Snapshot script: `scripts/sqlite-qdrant-snapshot.sh` (moves to RAGNART in
-  v0.1), writing to `/mnt/nfs/__Backups/RAGNART--databases/
-  qdrant-snapshots/documents/` (corrected path, §3 item 7) — paired
-  `documents_new-*.snapshot` and `rag_state-*.db` files. The SQLite copy is
-  taken after the snapshot download, not atomically with it; a "matching"
-  pair is nearest-timestamp, not guaranteed-identical content, same as
-  today.
-- Recovery: SoHoAI `docs/RAG-strategy.md` §11's full (§11.5) and
-  SQLite-only (§11.6) rollback procedures move into RAGNART's docs in
-  v0.1 (copied, then SoHoAI's copy marked superseded, not deleted, until
-  v0.1's SoHoAI-side cleanup commit).
+- Data root: `/mnt/nfs/__Backups/RAGNART--databases/` (§3 item 7;
+  `docs/RAG-strategy.md` §1.3).
+- Snapshots: `scripts/sqlite-qdrant-snapshot.sh`, run by the ingestion
+  wrapper once per day, writes paired `documents_new-*.snapshot` and
+  `rag_state-*.db` files with the same timestamp to
+  `qdrant-snapshots/documents/`; 7 pairs are kept. Qdrant's own
+  `snapshots_path` is Server 1's local NVMe and holds a snapshot only while it
+  is being downloaded. Policy and pair consistency: `docs/RAG-strategy.md`
+  §9.1.
+- Recovery: `docs/RAG-strategy.md` §9.3 (full) and §9.4 (state-DB-only).
 - The collection name/alias (`documents` → `documents_new`) is unchanged
   across every version (§4).
 
@@ -599,35 +520,26 @@ does not pick one.
 
 - Each version's session updates RAGNART's docs before its commit, per the
   operator's global git-discipline rule.
-- A changelog document (`docs/Changelog.md`, created in v0.1 alongside the
-  carried-over RAG-strategy and RAG-troubleshoot docs) gets one dated entry
-  per version session, naming the commit(s) and the Definition-of-done
-  checks that passed.
-  **2026-11-13:** `docs/Changelog.md` not created — see the dated note under §6 v0.1; `docs/v0--Implementation-log.md` is the changelog from here on.
-- This document is itself updated at the end of each version: the
-  version's row in §9, and a dated note in §6 for anything that changed
-  during the work.
-- Carried-over docs (`RAG-strategy.md`, `RAG-troubleshoot.md`, the RAG
-  entries of `design-history.md`) get the operator's metadata frontmatter
-  completed on arrival in v0.1, and an `updated_by`/`updated_at` pair once
-  their content is edited for the new location (path corrections,
-  SoHoAI-specific framing removed). Ask before any edit beyond what v0.1's
-  work items require — these remain the operator's own documents even as
-  they change repos.
+- `docs/v0--Implementation-log.md` is the session record: one entry per
+  version session, naming the commit(s) and the Definition-of-done checks
+  that passed.
+- This document is updated at the end of each version: the version's row in
+  §9, and any affected text rewritten in place to the current plan.
+- Descriptive docs (this plan, `README.md`, `docs/RAG-strategy.md`,
+  `docs/RAG-troubleshoot.md`) describe the current state only; history lives
+  in git, the implementation log and `docs/design-history.md`.
+- `docs/RAG-strategy.md`, `docs/RAG-troubleshoot.md` and
+  `docs/design-history.md` are the operator's own documents: ask before any
+  content edit.
 
 ### Naming (adapted from the handover §Names)
 
-| Was (SoHoAI) | Becomes (RAGNART) | Changes in |
+| Handover term | RAGNART name | Introduced in |
 | --- | --- | --- |
-| `.sohoai/` (earlier SoHoAI handovers' marker name) | `.ragnart/` | v0.2 |
-| `rag_engine` package | `ragnart` package | v0.1 |
-| RAG blocks of `SoHoAI-config.yaml` | `ragnart.yaml` | v0.1 |
-| `GET /v1/rag/search` | `GET /v1/search` | v0.1 |
-| `workbench` collection (the handover's working name) | `transient` collection | v0.3 |
-| `documents` collection/alias | unchanged | — |
-| `rag_state.db` | unchanged | — |
-| `inbox/`, `sources/`, `notes/` | unchanged in name | introduced under `.ragnart/` in v0.3 |
-| Corpus tier / Session tier / Workbench tier (the handover's working names) | Archive / Runtime / Transient | v0.1 (naming only — Archive and Runtime exist already) |
+| `.sohoai/` (marker name in earlier handovers) | `.ragnart/` | v0.2 |
+| `workbench` collection | `transient` collection | v0.3 |
+| `inbox/`, `sources/`, `notes/` | same names, under `.ragnart/` | v0.3 |
+| Corpus tier / Session tier / Workbench tier | Archive / Runtime / Transient | Archive and Runtime exist; Transient in v0.3 |
 
 ## 8. Open decisions and parameters to confirm
 
@@ -636,7 +548,7 @@ does not pick one.
 | 1 | Transient expiry | 30 days | v0.3 kickoff |
 | 2 | Grace period before purging missing Archive sources | 24 hours | v0.2 kickoff |
 | 3 | Missing-sources threshold that aborts a sync | 10% | v0.2 kickoff |
-| 4 | RAGNART service port on Server 2 | any free port, not 8000 | v0.1 kickoff |
+| 4 | RAGNART service port on Server 2 | 8100 | settled |
 | 5 | Token vs OIDC detail (format, issuer, storage) | per-client tokens first, OIDC optional later | v0.5 kickoff |
 | 6 | Invalid/missing-token behaviour | not pre-decided — rejected (401) vs anonymous-no-grants | v0.5 kickoff |
 | 7 | Docker on Server 1 (for Kotaemon's container) | unverified — check before v0.4 kickoff | v0.4 kickoff |

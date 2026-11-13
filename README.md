@@ -42,9 +42,8 @@ three tiers of material with different lifetimes.
 search can be scoped to one project, optionally including its sub-projects
 and linked projects, or run across everything you are allowed to see.
 
-> **Status:** Archive and Runtime exist today, inherited from SoHoAI. Project
-> nesting, the Transient tier, a notebook UI and real authentication are
-> planned. See [Roadmap](#roadmap).
+> **Status:** Archive and Runtime exist today. Project nesting, the
+> Transient tier, a notebook UI and real authentication are planned. See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -79,10 +78,11 @@ reranker** (bge-reranker-v2-m3). Results can be filtered by owner and file
 type. Each hit carries its source path, scores and parent text.
 
 **Ownership.** Every chunk records an owner (a person, or a shared
-"family" space), and searches are filtered to what the caller may see. A
-logical access-control model (owners, projects and grants, checked in one
-place) is planned, so multi-tenancy does not depend on filesystem
-permissions.
+"family" space). A search with `user=<owner>` is limited to that owner plus
+the shared space; without `user` it covers everything. There is no
+authentication yet: the `user` value is trusted as given. A logical
+access-control model (owners, projects and grants, checked in one place) is
+planned, so multi-tenancy does not depend on filesystem permissions.
 
 ## Repository layout
 
@@ -90,8 +90,8 @@ permissions.
 | --- | --- |
 | `ragnart/` | The Python package: scanner, chunking/ingestion, embeddings, Qdrant collection, hybrid search, reranking, state DB, OpenCode client, and the FastAPI service (`ragnart/service.py`) |
 | `ragnart.yaml` | All configuration: model and service URLs, scanner include/exclude rules, rerank and hybrid parameters, users and shared spaces |
-| `utils/` | Operator tools: ingestion daemon, NFS sync, search CLI, status, smoke and benchmark scripts, endpoint comparison |
-| `scripts/` | systemd units (`ragnart-search.service`, `ragnart-ingest.{service,timer}`), the ingestion wrapper, Qdrant + SQLite snapshot script, install script |
+| `utils/` | Operator tools: ingestion daemon, NFS sync, search CLI, status, corpus maintenance (purge, reset, sparse-vector migration), smoke and benchmark scripts, endpoint comparison |
+| `scripts/` | systemd units (`ragnart-search.service`, `ragnart-ingest.{service,timer}`), the ingestion wrapper, Qdrant + SQLite snapshot script, logrotate config, install script; `scripts/qdrant/` holds Qdrant's config, unit and installer for Server 1 |
 | `docs/` | Design and operations docs (see below) |
 | `assets/` | Logo / avatar images |
 
@@ -113,13 +113,14 @@ curl 'http://localhost:8100/health'
 `file_types`, `score_threshold`, `rerank`.
 
 For a permanent install, `sudo scripts/install-units.sh` installs the
-search service and the ingestion timer as systemd units.
+search service and the ingestion timer as systemd units, plus the log
+rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh`.
 
 ## Roadmap
 
 | Version | Scope |
 | --- | --- |
-| **v0.1 — Spin-off** | Move the RAG code out of SoHoAI into this repo and its own service, with no change to search behaviour |
+| **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
 | **v0.2 — Nested** | Project tree in the state DB and Qdrant payload (payload-only backfill, no re-embedding); project-scoped search |
 | **v0.3 — Transient** | `ragnart` CLI (`init`, `capture`, `inbox`, `keep`, `drop`, `search`, …), shared assistant skill, real-time `transient` collection |
 | **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin, with citations per tier |
@@ -130,8 +131,10 @@ Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md).
 ## Documentation
 
 - [`docs/Implementation-plan.md`](docs/Implementation-plan.md): versioned plan (v0.1 to v0.5), decisions and invariants
-- [`docs/RAG-strategy.md`](docs/RAG-strategy.md): design of the RAG pipeline (chunking, hybrid search, reranking, ingestion service), inherited from SoHoAI
-- [`docs/RAG-troubleshoot.md`](docs/RAG-troubleshoot.md): incident log and fixes
+- [`docs/RAG-strategy.md`](docs/RAG-strategy.md): design and operation of the RAG pipeline (corpus, chunking, hybrid search, reranking, ingestion, backup and recovery)
+- [`docs/RAG-troubleshoot.md`](docs/RAG-troubleshoot.md): troubleshooting guide (symptom, check, fix)
+- [`docs/v0--Implementation-log.md`](docs/v0--Implementation-log.md): session log for the v0.x versions
+- [`docs/design-history.md`](docs/design-history.md): design decisions over time
 
 ## Not to be confused with
 

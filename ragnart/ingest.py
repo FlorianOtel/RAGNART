@@ -1,11 +1,11 @@
 """
 Document parsing, chunking, and Qdrant upsert for the RAG pipeline.
 
-Implements the 7-step atomic worker loop from RAG-strategy.md §4.4.
+Implements the 7-step atomic worker loop from RAG-strategy.md §5.4.
 Called by the ingestion daemon (utils/rag_ingest_daemon.py) and the
 FastAPI ingest endpoints in main.py.
 
-Chunking strategy (RAG-strategy.md §3.4):
+Chunking strategy (RAG-strategy.md §3.1):
   - Parent-child (PDF, DOCX, IPYNB, long MD): child ~250 tok embedded;
     parent ~1000 tok stored as context returned to the LLM.
   - Flat 512-tok (PPTX, YAML, CSV, short docs): parent == child.
@@ -100,7 +100,7 @@ def _is_sparse_ready(qdrant_client: QdrantClient) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Chunking parameters (RAG-strategy.md §3.4)
+# Chunking parameters (RAG-strategy.md §3.1)
 # ---------------------------------------------------------------------------
 
 _PARENT_CHUNK_SIZE    = 1000   # tokens — midpoint of 800–1200 range
@@ -683,7 +683,7 @@ async def ingest_file(
     """
     Atomically parse, chunk, embed, and upsert one document into Qdrant.
 
-    Implements the 7-step atomic worker loop from RAG-strategy.md §4.4:
+    Implements the 7-step atomic worker loop from RAG-strategy.md §5.4:
       0. Delete stale Qdrant points for this source_path (idempotency).
       1. Mark file as 'processing' in StateDB.
       2. Parse document → full text.

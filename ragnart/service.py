@@ -81,7 +81,7 @@ async def search(
     """Retrieve RAG document hits without invoking any LLM. Moved from
     SoHoAI's /v1/rag/search (main.py) on 2026-11-13; same params and
     response shape, minus the multi-query variant (dropped — see
-    docs/Implementation-plan.md §6 v0.1)."""
+    docs/Implementation-plan.md §2)."""
     if app.state.qdrant_client is None:
         raise HTTPException(status_code=503, detail="Qdrant client not available")
 

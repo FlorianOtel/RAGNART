@@ -2,6 +2,8 @@
 title: "RAGNART Design History"
 created_at: 2026-11-13--14-03
 created_by: Claude Code (Claude Opus 5.5, /brain pipeline)
+updated_by: Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite)
+updated_at: 2026-11-13--16-45
 context: >
   RAG-relevant entries carried over verbatim from SoHoAI's docs/design-history.md
   on spin-off (2026-11-13), plus RAGNART's own entries from v0.1 onward.
@@ -41,8 +43,8 @@ Commits: RAGNART `e4de8a3` (plain import of SoHoAI@5f4f1ed), `1d702fe` (adaptati
 
 ## 2026-11-04 — RAG: OpenCode 2.x ingestion, venv exclusions, orchestrator ingest endpoints removed
 
-Code: `e3e0a06`. Incident detail: `docs/RAG-troubleshoot.md` (2026-11-04 entry). Design:
-`docs/RAG-strategy.md` §1.2, §4.6, §10.4, §10.6.
+Code: `e3e0a06`. Troubleshooting: `docs/RAG-troubleshoot.md` §2.5 (files that should not be ingested), §2.7 (OpenCode sessions missing), §2.9 ("database disk image is malformed"). Design:
+`docs/RAG-strategy.md` §2.2, §2.5, §5.6.
 
 ### What changed
 
@@ -114,7 +116,7 @@ Initial run after activation: 30 opencode sessions discovered, 5 ingested as smo
 
 ### llama-server: single-slot 262144 ctx (commit `306a99e`)
 
-Qwen3.5-4B llama-server (and the llama-swap config that fronts it) had been running `--parallel 2 --ctx-size 262144`, giving two slots × 131072 ctx. KV cache slot session pinning is not yet implemented — a chat coming back into the conversation cache can land on whichever slot the scheduler picks, and miss its saved KV state. Stopgap: drop `--parallel 2` entirely, run a single slot at the full 262144 ctx. Proxy-advertised `max_tokens` / `max_input_tokens` / `context_window` bumped to 262144 to match what external clients (Cline, Claude Code) now see via `/proxy/v1/model/info`. Documented in CLAUDE.md's runbook command and RAG-troubleshoot.md's expected `ps aux` flags.
+Qwen3.5-4B llama-server (and the llama-swap config that fronts it) had been running `--parallel 2 --ctx-size 262144`, giving two slots × 131072 ctx. KV cache slot session pinning is not yet implemented — a chat coming back into the conversation cache can land on whichever slot the scheduler picks, and miss its saved KV state. Stopgap: drop `--parallel 2` entirely, run a single slot at the full 262144 ctx. Proxy-advertised `max_tokens` / `max_input_tokens` / `context_window` bumped to 262144 to match what external clients (Cline, Claude Code) now see via `/proxy/v1/model/info`. Documented in CLAUDE.md's runbook command and SoHoAI's RAG-troubleshoot.md's expected `ps aux` flags.
 
 ### Chat sessions render by title, not by UUID (commit `12df6a2`)
 
@@ -156,7 +158,7 @@ Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, y
 
 **Package**: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search, multi_query, tool_use)
 
-**Advanced RAG features (§8.1–§8.3)**:
+**Advanced RAG features (SoHoAI `docs/RAG-strategy.md` §8.1–§8.3)**:
 - **`rag_mode` enum** (`off` / `on` / `only`) — legacy boolean toggle removed
 - **Tool-use via system prompt** — LLM decides when to retrieve; no unconditional top-k injection
 - **Multi-query + MMR** — `rag_engine/multi_query.py`; **permanently disabled** (`rag.multi_query.enabled: false`). Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is sufficient for this corpus.

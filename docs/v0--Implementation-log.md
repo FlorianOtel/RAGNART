@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
-updated_at: 2026-11-13--16-15
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite)
+updated_at: 2026-11-13--16-45
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -72,7 +72,7 @@ after the close and sets the snapshot policy.
    Fixed: config installed locally as `/etc/qdrant/config.yaml` by `scripts/qdrant/install-qdrant.sh`
    (never from NFS, which may not be mounted when Qdrant starts). Restarted 15:54 CET: no config
    error, 2,988,227 points, green.
-3. **Snapshot location and retention** (`docs/RAG-strategy.md` §11.2a):
+3. **Snapshot location and retention** (`docs/RAG-strategy.md` §9.1):
    - `snapshots_path` is now `/var/lib/qdrant/snapshots` (Server 1 NVMe, transient). Before, it was
      the NAS, so every run wrote ~20 GiB to the NAS twice (Qdrant's archive, then the download).
    - One restore pair per day (snapshot when the newest NAS pair is older than 20 h; normally the

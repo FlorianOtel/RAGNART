@@ -2,7 +2,7 @@
 # Take a Qdrant snapshot of the `documents` collection plus a matching copy of
 # rag_state.db, and keep them on the NAS as a restore pair.
 #
-# Where things live (retention policy, 2026-11-13 -- docs/RAG-strategy.md Section 11):
+# Where things live (retention policy: docs/RAG-strategy.md §9.1):
 #   - Qdrant writes the snapshot to its LOCAL snapshots_path on Server 1
 #     (/var/lib/qdrant/snapshots, see scripts/qdrant/qdrant-config.yaml). That copy is
 #     transient: it is downloaded to the NAS and then deleted, so Server 1's NVMe holds
