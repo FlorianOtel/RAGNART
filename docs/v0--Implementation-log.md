@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
-updated_at: 2026-11-13--14-16
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
+updated_at: 2026-11-13--16-15
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,91 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-13--16-15 -- post-close ops: Qdrant config, snapshot retention, data root, Server 1 back on wired
+
+Intermediate session between v0.1 and v0.2 (operator-requested re-evaluation). Run directly by
+Claude Opus 5.5, not as a `/brain` pipeline. Not a change to v0.1's scope; it fixes defects found
+after the close and sets the snapshot policy.
+
+#### What was done
+
+| Commit | Repo | Subject |
+| --- | --- | --- |
+| `6c30d2a` | RAGNART | ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases |
+
+1. **Server 1 (`.93`) back on wired Ethernet.** Root cause of the snapshot slowdown, confirmed from
+   three sources:
+   - `.93` journal: on 2026-11-08 at 09:27:44 CET the Wi-Fi profile `inet5` was created, and at
+     09:28:14 NetworkManager made it the default route. `eno1` had no carrier from the ~09:31
+     reboot until 2026-11-13 15:13:32.
+   - AYA `docs/v2--Implementation-log.md`, entry 2026-11-08--13-30: "`.93` moved to Wi-Fi on the
+     operator's desk" (um690 became the Windows 11 VM host for AYA v2.4).
+   - Snapshot log: about 530 runs (May to 2026-11-08 07:11 CET) downloaded in 1-4 min; every run
+     from 2026-11-08 13:09 CET took 32-59 min. Three 07:00-slot runs exceeded the 3600 s curl
+     limit (11-09 twice, 11-13 once), leaving the ~103 GB of orphans cleaned in v0.1.
+   Before power-off: VM `um690-g1` shut down; `btusb` blacklist removed (backup
+   `/root/aya-btusb-blacklist.conf.2026-11-13` on `.93`, initramfs rebuilt); `Wired connection 1`
+   set to static `192.168.1.93/24`, `inet5` autoconnect off (profile backup
+   `/root/nm-system-connections.2026-11-13`). GRUB default verified: plain Debian 7.3.3, no vfio.
+   After boot: `eno1` 1000 Mb/s full duplex, 680M on `amdgpu`, BT up, 102 MB/s measured.
+2. **Qdrant was running on built-in defaults.** `qdrant.service` on `.93` still pointed at
+   `…/SoHoAI/scripts/qdrant/qdrant-config.yaml`, deleted by SoHoAI `95d5d0d`. At the 15:13 boot
+   Qdrant logged "Config file via --config-path is not found" and started on defaults; it worked
+   only because the default `./storage` under `WorkingDirectory=/var/lib/qdrant` is the same path.
+   Fixed: config installed locally as `/etc/qdrant/config.yaml` by `scripts/qdrant/install-qdrant.sh`
+   (never from NFS, which may not be mounted when Qdrant starts). Restarted 15:54 CET: no config
+   error, 2,988,227 points, green.
+3. **Snapshot location and retention** (`docs/RAG-strategy.md` §11.2a):
+   - `snapshots_path` is now `/var/lib/qdrant/snapshots` (Server 1 NVMe, transient). Before, it was
+     the NAS, so every run wrote ~20 GiB to the NAS twice (Qdrant's archive, then the download).
+   - One restore pair per day (snapshot when the newest NAS pair is older than 20 h; normally the
+     01:00 run), 7 kept (~150 GB). Ingestion stays 4x/day. Safety nets: stale Qdrant-local
+     snapshots and NAS `.tmp` deleted before each run, 60 GB NAS free-space guard, EXIT-trap
+     cleanup, unpaired `rag_state` copies pruned.
+4. **Clean transition.** Deleted: 109 GB of May 10-12 snapshots of the pre-sparse `documents`
+   collection on `.93`'s NVMe (unrestorable); on the NAS, 9 of 12 current snapshot pairs (kept the
+   newest per day: 11-11 18:07, 11-12 18:10, 11-13 12:10 UTC), 3 April/May `.checksum` files, 12
+   May `rag_state` copies, the 2026-11-04 `rag_state-pre-rerun` backup, empty `qdrant/`,
+   `qdrant-snapshots/documents_new`, `qdrant-snapshots/tmp`. NAS snapshot area 240 GB -> 61 GB.
+5. **Data root split.** `/mnt/nfs/__Backups/SoHoAI--databases/{sqlite,logs,qdrant-snapshots,rag-ingest.lock}`
+   moved (rename on the same NFS filesystem) to `/mnt/nfs/__Backups/RAGNART--databases/`.
+   `SoHoAI--databases` keeps only SoHoAI's own `archive/` (old chat/telemetry DBs) and
+   `SoHoAI-gateway.log` (written by `start-sohoai.sh`). All scripts, `ragnart.yaml`, utils defaults,
+   logrotate and docs repointed.
+6. **systemd / logrotate on Server 2.** `scripts/install-units.sh` (re-run as root): installs
+   `/etc/logrotate.d/ragnart-ingest` with `su florian florian` (the old file had failed every night
+   since 2026-05-06: "parent directory has insecure permissions"; log had grown to 228 MB, now
+   rotated to 9 MB `.gz`), removes `/etc/logrotate.d/rag-ingest` and SoHoAI's
+   `rag-ingest.service`/`.timer`.
+
+#### Evidence
+
+Verification run with `RAG_FORCE_SNAPSHOT=1`, 15:57:51-16:13:41 CET, exit 0, new data root:
+
+| Step | Before (Wi-Fi, snapshots_path on NAS) | 2026-11-13 16:09 CET |
+| --- | --- | --- |
+| Ingest | -- | 28 files, 0 failed |
+| Snapshot creation | 5-6 min | 44 s |
+| 20 GiB download to NAS | 32-59 min | 3 min 21 s |
+| Snapshot step total | ~40 min | 4 min 16 s |
+| `.93` `/var/lib/qdrant/snapshots` after | -- | 0 bytes; Qdrant lists no snapshots |
+| NAS pairs | 12 (240 GB) | 4/7 (data root 81 GB) |
+
+#### Decisions
+
+- Snapshots daily, 7 kept, instead of every run with 12 kept (operator: "balance availability with
+  space"). Recovery point at most ~24 h; ingestion is idempotent.
+- Data root split rather than a plain rename, so SoHoAI's gateway log path and archive stay valid.
+- Qdrant config is a local file on Server 1, installed from the repo; the NFS copy is the source only.
+
+#### Open items
+
+- 19:00 timer run should skip the snapshot (newest pair 16:13, younger than 20 h); first scheduled
+  daily snapshot on the 01:00 run of 2026-11-14.
+- `redis-server` package still installed (disabled) on `.93`; unused, can be removed.
+- Qdrant on `.93` vs `.95`: undecided; measure `.95` peak RAM first (Qdrant RSS is 15 GB).
+- RAGNART `/health` hangs when Qdrant is down (no short client timeout) -- v0.2.
 
 ### 2026-11-13--14-04 -- v0.1 close
 

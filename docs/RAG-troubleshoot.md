@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
-updated_at: 2026-11-13--14-16
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
+updated_at: 2026-11-13--16-15
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -825,7 +825,7 @@ if _printable < 0.85:
 
 **How to retry** if a file was incorrectly flagged (e.g., encoding was fixed):
 ```bash
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL
    WHERE skip_reason LIKE 'binary content:%' AND file_path = '/path/to/file';"
 ```
@@ -925,7 +925,7 @@ successful download, preventing partial files from appearing as valid snapshots.
 **Verification after the fix:**
 ```bash
 bash scripts/sqlite-qdrant-snapshot.sh --keep 12
-ls -lh /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
+ls -lh /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/
 # → should show a fresh .snapshot file with today's date and ~5GB size
 ```
 
@@ -962,7 +962,7 @@ no schema migrations, no PRAGMA changes. Safe to run concurrently with anything.
 
 1. Confirmed corruption:
    ```bash
-   sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+   sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
      "PRAGMA integrity_check;"
    # → Error: database disk image is malformed
    ```
@@ -981,9 +981,9 @@ no schema migrations, no PRAGMA changes. Safe to run concurrently with anything.
    ```bash
    sudo systemctl stop ragnart-ingest.timer
    cp ~/Gin-AI/tmp/SQLite-db-snapshots/rag_state.db \
-      /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
-   rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-wal
-   rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-shm
+      /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
+   rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-wal
+   rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-shm
    ```
 
 4. Verified and re-synced:
@@ -1029,7 +1029,7 @@ After each ingestion run, `ragnart-ingest-run.sh` (Server 2):
 1. Checkpoints the SQLite WAL with `PRAGMA wal_checkpoint(TRUNCATE)` — the main
    `rag_state.db` file becomes fully self-contained (no WAL file needed to restore).
 2. Creates a Qdrant snapshot via API — written directly to NFS at
-   `/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/`.
+   `/mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/`.
 
 Any NFS hourly snapshot taken AFTER an ingest run completes captures both files at
 the same ingestion state and is a valid rollback point. 12 Qdrant snapshots are
@@ -1051,7 +1051,7 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
 2. From the Synology snapshot browser (or NFS snapshot mount), identify the target
    snapshot at time T. Find the Qdrant `.snapshot` file created closest before T:
    ```bash
-   ls -lt /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/*.snapshot
+   ls -lt /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/*.snapshot
    ```
    The filename encodes the creation timestamp (e.g. `documents-...-2026-05-05-01-32-10.snapshot`).
 
@@ -1063,12 +1063,12 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
    # Recover from NFS snapshot
    curl -X PUT "http://192.168.1.93:6333/collections/documents/snapshots/recover" \
      -H "Content-Type: application/json" \
-     -d '{"location": "file:///mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
+     -d '{"location": "file:///mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
    ```
 
 4. Restore `rag_state.db` from the same NFS snapshot point.
    (Synology: access the snapshot volume, copy `rag_state.db` to
-   `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db`.
+   `/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db`.
    Only the main db file is needed — the WAL is empty after each ingest run.)
 
 5. Verify:
@@ -1082,7 +1082,7 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
    ```bash
    python utils/rag_sync_nfs.py --user florian
    python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
-     --log-file /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+     --log-file /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
    ```
 
 7. Restart ingestion timer (Server 2):
@@ -1178,7 +1178,7 @@ script is completely decoupled from it.
 
 #### Symptom
 
-`/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock` showed mtime `2026-05-06 10:53` despite
+`/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock` showed mtime `2026-05-06 10:53` despite
 the ingestion service running successfully every six hours.  The lock appeared stale.
 
 #### Root cause
@@ -1196,7 +1196,7 @@ leaving the mtime frozen at the initial creation date.
 
 Confirming the lock is free:
 ```bash
-flock --nonblock /mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock echo "lock-free" \
+flock --nonblock /mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock echo "lock-free" \
   || echo "lock-held"
 # → lock-free
 ```
@@ -1354,7 +1354,7 @@ payload fields in addition to the standard `source_path`.
 **Step 1 — check the ingestion queue**
 
 ```bash
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "SELECT file_path, status, retry_count
    FROM ingestion_queue
    WHERE file_path LIKE '%00c53ce0%';"
@@ -1411,18 +1411,18 @@ Points found — this session is indexed and searchable.
 
 ```bash
 # All claude session files and their status
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "SELECT status, COUNT(*) FROM ingestion_queue
    WHERE file_path LIKE '%/.claude/projects/%'
    GROUP BY status;"
 
 # Specific file by UUID substring
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "SELECT file_path, status, retry_count FROM ingestion_queue
    WHERE file_path LIKE '%<uuid>%';"
 
 # All pending or ignored sessions (not yet in Qdrant)
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "SELECT file_path, status, retry_count, skip_reason FROM ingestion_queue
    WHERE file_path LIKE '%/.claude/projects/%'
    AND status != 'completed';"
@@ -1557,7 +1557,7 @@ python utils/rag_ingest_daemon.py --workers 1 --batch 5 --log-file /tmp/rag-inge
 
 **File shows `ignored` (exhausted retries):**
 ```bash
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL
    WHERE file_path='<exact-path>';"
 python utils/rag_ingest_daemon.py --workers 1 --batch 2 --log-file /tmp/rag-ingestion.log

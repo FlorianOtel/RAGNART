@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion)
-updated_at: 2026-11-13--14-05
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
+updated_at: 2026-11-13--16-15
 context: >
   Produced by a /brain session on 2026-11-13, tasked with writing a versioned,
   staged implementation plan for RAGNART — SoHoAI's RAG spun off into its own
@@ -117,7 +117,7 @@ version below.
    `uid`/`gid`/`mode` — those three columns in the handover's `projects`
    table are recorded as hints only and are never consulted by `authorize()`.
 7. **Snapshot backup path.** The correct, confirmed path is
-   `/mnt/nfs/__Backups/SoHoAI--databases/` (`qdrant-snapshots/documents/`,
+   `/mnt/nfs/__Backups/RAGNART--databases/` (`qdrant-snapshots/documents/`,
    paired `documents_new-*.snapshot` files of roughly 21 GB each and
    `rag_state-*.db` copies of roughly 258 MB; written by `scripts/
    sqlite-qdrant-snapshot.sh`). The script's default is `KEEP=3`, but 24
@@ -357,7 +357,7 @@ Open items.
 
 **Data migration & rollback.**
 1. Snapshot pair first: Qdrant snapshot of `documents_new` plus a
-   `rag_state.db` copy, written to `/mnt/nfs/__Backups/SoHoAI--databases/`
+   `rag_state.db` copy, written to `/mnt/nfs/__Backups/RAGNART--databases/`
    (corrected path, §3 item 7), following SoHoAI `docs/RAG-strategy.md`
    §11's pairing method.
 2. Pause the ingestion timer (hold its NFS lock) for the backfill's
@@ -574,8 +574,15 @@ does not pick one.
 
 ### Operations
 
+- **Dated note, 2026-11-13 (after v0.1 close):** the RAG data root moved from
+  `/mnt/nfs/__Backups/SoHoAI--databases/` to `/mnt/nfs/__Backups/RAGNART--databases/`
+  (`sqlite/`, `logs/`, `qdrant-snapshots/`, `rag-ingest.lock`); only SoHoAI's own
+  `archive/` and gateway log stay in the old directory. Snapshot retention is now one
+  pair per day, 7 kept on the NAS; Qdrant's snapshots_path is Server 1's local NVMe.
+  Paths below are updated to the new root. Details: `docs/RAG-strategy.md` §11.2a and
+  `docs/v0--Implementation-log.md`, v0.1 ops entry of 2026-11-13.
 - Snapshot script: `scripts/sqlite-qdrant-snapshot.sh` (moves to RAGNART in
-  v0.1), writing to `/mnt/nfs/__Backups/SoHoAI--databases/
+  v0.1), writing to `/mnt/nfs/__Backups/RAGNART--databases/
   qdrant-snapshots/documents/` (corrected path, §3 item 7) — paired
   `documents_new-*.snapshot` and `rag_state-*.db` files. The SQLite copy is
   taken after the snapshot download, not atomically with it; a "matching"

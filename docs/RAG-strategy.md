@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes)
-updated_at: 2026-11-13--14-16
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases)
+updated_at: 2026-11-13--16-15
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -573,7 +573,7 @@ NFS-incompatibility issue from silent risk to an explicit startup refusal.
 different format from the RocksDB-based server storage (`collections/`). Existing data
 ingested under the Python embedded client cannot be read by the server binary — a full
 re-ingest is required when switching modes. The NFS directory
-`/mnt/nfs/__Backups/SoHoAI--databases/qdrant/` was cleared of old SQLite data after
+`/mnt/nfs/__Backups/RAGNART--databases/qdrant/` was cleared of old SQLite data after
 the migration and is intentionally left empty.
 
 #### Storage architecture
@@ -589,14 +589,14 @@ Server 1 (192.168.1.93)
 
 NAS (NFS-mounted)
 │
-├── /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
+├── /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/
 │     ├── documents/
 │     │     ├── documents-<id>-<timestamp>.snapshot      ← snapshot archive
 │     │     ├── documents-<id>-<timestamp>.snapshot.checksum
 │     │     └── ... (up to 3 kept)
 │     └── (future: images/, videos/ as Phase 4 collections are added)
 │
-└── /mnt/nfs/__Backups/SoHoAI--databases/qdrant/
+└── /mnt/nfs/__Backups/RAGNART--databases/qdrant/
       (intentionally empty — not used for anything)
 ```
 
@@ -622,17 +622,25 @@ The snapshot directory is configured in `scripts/qdrant/qdrant-config.yaml`:
 ```yaml
 storage:
   storage_path: /var/lib/qdrant/storage
-  snapshots_path: /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots
+  snapshots_path: /var/lib/qdrant/snapshots   # local NVMe, transient (2026-11-13)
 ```
 
+> **Changed 2026-11-13 (RAGNART):** `snapshots_path` is now Server 1's local NVMe and the
+> config is installed locally as `/etc/qdrant/config.yaml` (`scripts/qdrant/install-qdrant.sh`).
+> Before, Qdrant wrote each 20 GiB snapshot to the NAS and the script then downloaded it to
+> the NAS again (about 40 GB of NAS writes per run). See Section 11.2a for the current policy.
+
 #### Snapshot frequency and retention
+
+> **Superseded 2026-11-13:** the table below is historical. Current policy (one restore pair
+> per day, 7 kept on the NAS, no cron): Section 11.2a.
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Schedule | Daily at **03:00** (cron) | Low-activity window; ingestion daemon typically idle |
 | Retention | Last **3** snapshots kept | ~3 days of rollback; older ones deleted via API |
 | Script | `scripts/sqlite-qdrant-snapshot.sh` | Calls REST API, then prunes via API |
-| Log | `/mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
+| Log | `/mnt/nfs/__Backups/RAGNART--databases/logs/sqlite-qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
 
 **Maximum data loss exposure**: up to 24 hours of ingested documents if the local NVMe
 fails between snapshots. During an active ingestion run (~9 hours for the full NFS corpus),
@@ -671,12 +679,12 @@ If Server 1 is rebuilt or `/var/lib/qdrant/storage` is lost:
 sudo systemctl start qdrant
 
 # 2. Identify the latest snapshot on NFS
-ls -lt /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
+ls -lt /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/
 
 # 3. Restore via the API (Qdrant reads the file path directly)
 curl -X PUT "http://192.168.1.93:6333/collections/documents/snapshots/recover" \
   -H "Content-Type: application/json" \
-  -d '{"location": "file:///mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
+  -d '{"location": "file:///mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
 
 # 4. Verify
 curl -s http://192.168.1.93:6333/collections/documents | python3 -m json.tool
@@ -980,7 +988,7 @@ ragnart/
 
 ### 4.3 State Management (The Tracker)
 
-A dedicated SQLite database (`/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db`) guarantees a fail-safe process that can pause and resume seamlessly.
+A dedicated SQLite database (`/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db`) guarantees a fail-safe process that can pause and resume seamlessly.
 
 #### `ingestion_queue` table schema
 
@@ -1159,7 +1167,7 @@ If not running: `sudo systemctl start qdrant`
 #### Verify database directories exist on NAS
 
 ```bash
-ls /mnt/nfs/__Backups/SoHoAI--databases/
+ls /mnt/nfs/__Backups/RAGNART--databases/
 # Expected: qdrant-snapshots/  sqlite/  redis/
 ```
 
@@ -1427,12 +1435,12 @@ Remedy: lower `--batch` (e.g. `--batch 2`) and re-queue via `rag_sync_nfs.py`. B
 # Force-reset ignored files to pending (run before rag_sync_nfs.py)
 
 # Soft: only re-queue ignored files with no skip_reason (timeout failures — blank error_msg)
-# sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+# sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
 #   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL \
 #    WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
 
 # Brute-force: re-queue ALL ignored files regardless of skip_reason
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored'"
 
 python utils/rag_sync_nfs.py --user florian
@@ -1472,7 +1480,7 @@ any of the failed attempts. No Qdrant cleanup is needed before retrying.
 To retry specific files after fixing the underlying issue:
 
 ```bash
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE file_path='<path>'"
 python utils/rag_ingest_daemon.py --batch 2
 ```
@@ -2236,14 +2244,14 @@ Key design choices:
   wrapper held a lock and the daemon (a subprocess) tried to acquire the same lock.
 - **`RAG_SYNC_USERS` array**: one `rag_sync_nfs.py --user <u>` invocation per entry, run
   sequentially before the daemon. To add a second user, add one array entry.
-- **Log path**: `/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log` (NAS, alongside
+- **Log path**: `/mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log` (NAS, alongside
   other SoHoAI databases). `mkdir -p` on startup creates the `logs/` subdirectory on first run.
 - **Env overrides**: `RAG_WORKERS`, `RAG_BATCH`, `RAG_LOGFILE` — useful for one-off manual
   runs with different concurrency (e.g. `RAG_WORKERS=1 RAG_BATCH=5` for CPU-embed mode).
 
 ### 10.3 NFS distributed lock — `rag.ingest_lock`
 
-**Config** (`ragnart.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
+**Config** (`ragnart.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock"`
 
 The daemon (`utils/rag_ingest_daemon.py`) acquires an exclusive lock on this NFS file at
 startup, before any ingestion work begins. The lock prevents two daemon instances from
@@ -2311,8 +2319,8 @@ journalctl -u ragnart-ingest.service -f          # live output from last/current
 **Manual trigger (same code path as timer):**
 ```bash
 bash scripts/ragnart-ingest-run.sh
-tail -f /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
-python utils/rag_status.py --watch /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+tail -f /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
+python utils/rag_status.py --watch /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
 ```
 
 **Debug (stop timer, run scripts individually):**
@@ -2395,7 +2403,7 @@ After every ingestion run `scripts/ragnart-ingest-run.sh` executes two additiona
 
 **Step A — SQLite WAL checkpoint**
 ```bash
-sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "PRAGMA wal_checkpoint(TRUNCATE);"
 ```
 SQLite runs in WAL mode. Writes accumulate in `rag_state.db-wal`; readers merge the WAL
@@ -2409,7 +2417,7 @@ bash scripts/sqlite-qdrant-snapshot.sh --keep 12
 ```
 Creates a new snapshot via `POST http://192.168.1.93:6333/collections/documents/snapshots`.
 Qdrant's `snapshots_path` in `scripts/qdrant/qdrant-config.yaml` is
-`/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots`, so the `.snapshot` file lands
+`/mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots`, so the `.snapshot` file lands
 directly on NFS under `…/qdrant-snapshots/documents/`. The script then deletes old
 snapshots, keeping the 12 most recent (3 days × 4 runs/day).
 
@@ -2417,12 +2425,34 @@ snapshots, keeping the 12 most recent (3 days × 4 runs/day).
 `.snapshot` file on NFS reflect the same ingestion state. Any NFS point-in-time snapshot
 taken *after* a run completes captures both files in sync.
 
+### 11.2a Current snapshot and retention policy (2026-11-13, RAGNART)
+
+Supersedes the `--keep 12` / 03:00-cron description above and in Section 11.7.
+
+| | |
+|---|---|
+| Ingestion | `ragnart-ingest.timer`, 01/07/13/19:00, unchanged |
+| Snapshot frequency | **One restore pair per day.** `scripts/ragnart-ingest-run.sh` runs the snapshot step only when the newest pair on the NAS is older than 20 h (`RAG_SNAPSHOT_MIN_AGE_H`), so normally on the 01:00 run. `RAG_FORCE_SNAPSHOT=1` forces one. No cron job. |
+| NAS retention | **7 pairs** (`.snapshot` + matching `rag_state-<ts>.db`), about 150 GB, in `/mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/` |
+| Server 1 NVMe | `/var/lib/qdrant/snapshots` is transient: holds one snapshot (~21 GB) only while a run is downloading it; normally empty |
+| Recovery point | At most ~24 h old. Ingestion is idempotent, so the next run re-ingests anything newer than the restored pair |
+
+Safety nets in `scripts/sqlite-qdrant-snapshot.sh` against filling either disk:
+1. Before creating a snapshot, any snapshot Qdrant still holds for the collection is deleted via the API.
+2. Stale partial downloads (`*.tmp`) on the NAS are removed.
+3. The run aborts before creating anything if the NAS has less than 60 GB free.
+4. An EXIT trap deletes the Qdrant-local snapshot and the partial download on any failure.
+5. Rotation keeps exactly 7 pairs and deletes unpaired `rag_state-*.db` copies.
+
+The ingest log `logs/rag-ingest.log` is rotated daily (7 kept) by `/etc/logrotate.d/ragnart-ingest`
+on Server 2 (needs `su florian florian`: the NAS directory is group-writable).
+
 ### 11.3 Where everything lives under the backup directory
 
 All relevant files are under a single directory that the NFS server snapshots automatically:
 
 ```
-/mnt/nfs/__Backups/SoHoAI--databases/
+/mnt/nfs/__Backups/RAGNART--databases/
 ├── sqlite/
 │   ├── rag_state.db          ← ingestion queue (SQLite, WAL-checkpointed after each run)
 │   ├── rag_state.db-wal      ← should be empty / absent after a run; safe to ignore on restore
@@ -2452,7 +2482,7 @@ before) T.
 **Step 1 — Find the NFS snapshot at time T**
 
 The Synology NAS exposes past snapshots as read-only directories (or via the Snapshot
-Replication UI). Locate the snapshot volume for `/mnt/nfs/__Backups/SoHoAI--databases/`
+Replication UI). Locate the snapshot volume for `/mnt/nfs/__Backups/RAGNART--databases/`
 at time T.
 
 **Step 2 — Find the matching Qdrant snapshot**
@@ -2498,7 +2528,7 @@ sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
 ```
 Confirm no daemon is running (the lock file should be absent or unlocked):
 ```bash
-ls -la /mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock 2>/dev/null || echo "no lock file"
+ls -la /mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock 2>/dev/null || echo "no lock file"
 ```
 
 #### Step 2 — Stop Qdrant (Server 1)
@@ -2512,7 +2542,7 @@ sudo systemctl stop qdrant
 
 Use the Synology Snapshot Replication UI or the NAS CLI to locate the snapshot at
 (or just after) time T. Note the path to the snapshot's version of
-`/mnt/nfs/__Backups/SoHoAI--databases/`.
+`/mnt/nfs/__Backups/RAGNART--databases/`.
 
 Find the correct Qdrant snapshot and note its full filename:
 ```bash
@@ -2548,9 +2578,9 @@ Copy only the main db file from the NFS snapshot. The `-wal` file is not needed 
 WAL was truncated to zero after the last run:
 ```bash
 cp /path/to/nfs-snapshot-at-T/sqlite/rag_state.db \
-   /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
+   /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
 # Remove any stale WAL/SHM files that may be present
-rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-{wal,shm}
+rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-{wal,shm}
 ```
 
 #### Step 6 — Verify consistency
@@ -2577,7 +2607,7 @@ restored `rag_state.db`:
 ```bash
 python utils/rag_sync_nfs.py --user florian
 python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
-  --log-file /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+  --log-file /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
 ```
 
 #### Step 8 — Re-enable the ingestion service (Server 2)
@@ -2598,8 +2628,8 @@ sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
 
 # 2. Restore rag_state.db from NFS snapshot
 cp /path/to/nfs-snapshot-at-T/sqlite/rag_state.db \
-   /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
-rm -f /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db-{wal,shm}
+   /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
+rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-{wal,shm}
 
 # 3. Reconcile: rag_sync_nfs.py will re-queue any file in SQLite marked 'completed'
 #    that is absent from Qdrant, and remove SQLite rows for files no longer on NFS
@@ -2609,13 +2639,16 @@ python utils/rag_sync_nfs.py --user florian
 
 # 4. Re-ingest any gaps
 python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
-  --log-file /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+  --log-file /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
 
 # 5. Restart ingestion timer
 sudo systemctl start ragnart-ingest.timer
 ```
 
 ### 11.7 Portability — moving snapshot ownership to another server
+
+> **2026-11-13:** there is no cron entry any more; the daily snapshot runs inside
+> `ragnart-ingest.service` (Section 11.2a). Moving it = moving the timer only.
 
 All snapshot automation (`ragnart-ingest-run.sh` tail steps + 03:00 cron) currently runs on
 **Server 2** (192.168.1.95, NucBoxK11). The wrapper script is on NFS (shared), so only
@@ -2629,7 +2662,7 @@ crontab -l | grep -v qdrant-snapshot | crontab -
 
 # On the new server — enable the timer and add the cron
 sudo systemctl enable --now ragnart-ingest.timer
-(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /mnt/nfs/__Backups/RAGNART--databases/logs/sqlite-qdrant-snapshot.log 2>&1") | crontab -
 ```
 
 Ensure the new server can reach Qdrant at `http://192.168.1.93:6333` and has the NFS
@@ -2724,7 +2757,7 @@ python utils/rag_purge_corrupt.py --dry-run --user florian
 
 # Snapshot NFS fix
 bash scripts/sqlite-qdrant-snapshot.sh --keep 12
-# → creates snapshot + downloads to /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
+# → creates snapshot + downloads to /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/
 ```
 
 ---
