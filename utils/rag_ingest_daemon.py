@@ -40,9 +40,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from rag_engine.collection import ensure_collection, get_client
-from rag_engine.ingest import ingest_file
-from rag_engine.state import StateDB
+from ragnart.collection import ensure_collection, get_client
+from ragnart.ingest import ingest_file
+from ragnart.state import StateDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -152,8 +152,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Acquire exclusive NFS lock — prevents concurrent daemons on any machine.
-    # Lock path comes from SoHoAI-config.yaml rag.ingest_lock (NFSv4.1, local_lock=none).
-    _config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
+    # Lock path comes from ragnart.yaml rag.ingest_lock (NFSv4.1, local_lock=none).
+    _config_path = Path(__file__).resolve().parent.parent / "ragnart.yaml"
     with open(_config_path) as _f:
         _lock_cfg = yaml.safe_load(_f)
     _lock_path = _lock_cfg.get("rag", {}).get("ingest_lock", "/tmp/rag-ingest.lock")

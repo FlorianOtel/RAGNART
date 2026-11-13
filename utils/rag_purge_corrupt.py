@@ -32,8 +32,8 @@ import yaml  # noqa: E402
 
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-from rag_engine.collection import DOCUMENTS_COLLECTION, get_client
-from rag_engine.schema import (
+from ragnart.collection import DOCUMENTS_COLLECTION, get_client
+from ragnart.schema import (
     FIELD_SOURCE_PATH,
     FIELD_PARENT_TEXT,
     FIELD_OWNER,
@@ -202,7 +202,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load config
-    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
+    config_path = Path(__file__).resolve().parent.parent / "ragnart.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 

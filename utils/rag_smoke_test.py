@@ -1,7 +1,7 @@
 """
 rag_smoke_test.py — end-to-end RAG smoke test.
 
-Phase 1 — Retrieval: GET /v1/rag/search?q=...
+Phase 1 — Retrieval: GET /v1/search?q=...
 
 Exit 0 on pass, non-zero on failure.
 """
@@ -12,7 +12,7 @@ import sys
 import urllib.parse
 import urllib.request
 
-DEFAULT_SERVER = "http://192.168.1.93:8000"
+DEFAULT_SERVER = "http://192.168.1.95:8100"
 DEFAULT_TOP_K = 5
 DEFAULT_TIMEOUT = 30
 
@@ -23,7 +23,7 @@ def _get(url: str, timeout: int) -> dict:
 
 
 def phase1_retrieval(args) -> bool:
-    """GET /v1/rag/search and optionally assert --expect substring."""
+    """GET /v1/search and optionally assert --expect substring."""
     params: dict = {"q": args.query, "top_k": args.top_k}
     if args.user and not args.no_filter:
         params["user"] = args.user
@@ -32,9 +32,9 @@ def phase1_retrieval(args) -> bool:
         qs = urllib.parse.urlencode(params)
         for ft in args.file_type:
             qs += f"&file_types={urllib.parse.quote(ft)}"
-        url = f"{args.server}/v1/rag/search?{qs}"
+        url = f"{args.server}/v1/search?{qs}"
     else:
-        url = f"{args.server}/v1/rag/search?{urllib.parse.urlencode(params)}"
+        url = f"{args.server}/v1/search?{urllib.parse.urlencode(params)}"
 
     print(f"\n[Phase 1] GET {url}")
     try:
@@ -61,13 +61,13 @@ def phase1_retrieval(args) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SoHoAI RAG smoke test")
+    parser = argparse.ArgumentParser(description="RAGNART RAG smoke test")
     parser.add_argument("--query", required=True, help="Search query")
     parser.add_argument("--user", default=None, help="Owner filter (e.g. florian)")
     parser.add_argument("--no-filter", action="store_true", help="Skip user ownership filter")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="Max retrieval results")
     parser.add_argument("--file-type", action="append", metavar="TYPE", help="Filter by file type (repeatable)")
-    parser.add_argument("--server", default=DEFAULT_SERVER, help="SoHoAI server base URL")
+    parser.add_argument("--server", default=DEFAULT_SERVER, help="Search service base URL (RAGNART, default :8100)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds")
     parser.add_argument("--expect", default=None, help="Assert this substring appears in the retrieval results")
     parser.add_argument("--skip-retrieval", action="store_true", help="Skip Phase 1 (retrieval)")

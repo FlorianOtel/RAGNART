@@ -33,12 +33,33 @@ RESPONSE=$(curl -sf -X POST "${QDRANT_URL}/collections/${COLLECTION}/snapshots")
 NAME=$(python3 -c "import sys,json; print(json.load(sys.stdin)['result']['name'])" <<< "$RESPONSE")
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Created: ${NAME}"
 
+# Failure cleanup (RAGNART v0.1, 2026-11-13): if this run exits non-zero after the
+# Qdrant-local snapshot was created, delete that snapshot and any partial .tmp
+# download so nothing is orphaned on Qdrant or on NFS. On success the EXIT trap
+# receives rc=0 and does nothing, so the success path is unchanged.
+# Variables used here: QDRANT_URL, COLLECTION (set at the top), NAME (set above),
+# TEMP_FILE (set below; guarded because the trap can fire before it exists).
+cleanup_on_failure() {
+    local rc="$1"
+    if [[ "${rc}" -ne 0 ]]; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  ERROR: snapshot run failed (exit ${rc}) — cleaning up Qdrant-local snapshot and .tmp" >&2
+        if [[ -n "${NAME:-}" ]]; then
+            # The snapshot may already be deleted on the success-path step below; a 404 is fine.
+            curl -sf -X DELETE "${QDRANT_URL}/collections/${COLLECTION}/snapshots/${NAME}" >/dev/null 2>&1 || true
+        fi
+        if [[ -n "${TEMP_FILE:-}" ]]; then
+            rm -f "${TEMP_FILE}"
+        fi
+    fi
+}
+trap 'cleanup_on_failure $?' EXIT
+
 # Download snapshot to NFS
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Downloading to NFS..."
 TEMP_FILE="${SNAPSHOTS_NFS_DIR}/${NAME}.tmp"
 FINAL_FILE="${SNAPSHOTS_NFS_DIR}/${NAME}"
 
-curl -sf --max-time 3600 \
+curl -sf --max-time 7200 \
     "${QDRANT_URL}/collections/${COLLECTION}/snapshots/${NAME}" \
     -o "${TEMP_FILE}"
 

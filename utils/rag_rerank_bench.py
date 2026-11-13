@@ -41,12 +41,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rag_engine.collection import get_client
-from rag_engine.search import search_rag
+from ragnart.collection import get_client
+from ragnart.search import search_rag
 
 # ---------------------------------------------------------------------------
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "ragnart.yaml"
 
 
 # ---------------------------------------------------------------------------

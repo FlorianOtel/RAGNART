@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# SoHoAI RAG ingestion wrapper.
-# Run by systemd rag-ingest.service or directly for manual/debug use.
-# The daemon acquires the NFS lock (rag.ingest_lock in SoHoAI-config.yaml) internally;
+# RAGNART ingestion wrapper.
+# Run by systemd ragnart-ingest.service or directly for manual/debug use.
+# The daemon acquires the NFS lock (rag.ingest_lock in ragnart.yaml) internally;
 # if another daemon is already running anywhere, it exits with a clear message.
 #
 # Env overrides:
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 VENV="$HOME/Gin-AI/.Gin-AI-python-3.12/bin/activate"
-PROJECT="/mnt/nfs/Florian/Gin-AI/projects/SoHoAI"
+PROJECT="/mnt/nfs/Florian/Gin-AI/projects/RAGNART"
 LOGFILE="${RAG_LOGFILE:-/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log}"
 WORKERS="${RAG_WORKERS:-3}"
 BATCH="${RAG_BATCH:-20}"
@@ -38,7 +38,7 @@ for user in "${RAG_SYNC_USERS[@]}"; do
 done
 
 log "--- rag_ingest_daemon.py ---"
-# Daemon acquires the NFS lock (rag.ingest_lock in SoHoAI-config.yaml) internally.
+# Daemon acquires the NFS lock (rag.ingest_lock in ragnart.yaml) internally.
 # If another daemon is running anywhere, it prints a message and exits cleanly.
 # Do NOT tee here: --log-file writes directly to $LOGFILE; tee would double log lines.
 # stderr goes to journald via StandardError=journal in the service unit.

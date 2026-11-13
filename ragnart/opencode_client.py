@@ -1,5 +1,5 @@
 """
-rag_engine/opencode_client.py — minimal HTTP client for the OpenCode 2.x server.
+ragnart/opencode_client.py — minimal HTTP client for the OpenCode 2.x server.
 
 Used by scanner.scan_opencode_sessions() (session discovery) and
 ingest._parse_opencode_session() (session content).
@@ -21,7 +21,7 @@ import urllib.request
 
 # Default location of the OpenCode server's environment file on the ingest host.
 # It is the server's own source of truth, so a password rotation is followed
-# automatically. Override with opencode.password_env_file in SoHoAI-config.yaml.
+# automatically. Override with opencode.password_env_file in ragnart.yaml.
 DEFAULT_PASSWORD_ENV_FILE = "~/.config/opencode/opencode-server.env"
 
 # OpenCode 2.x Basic-auth user name (fixed by the server).
@@ -42,7 +42,7 @@ def load_password(password_env_file: str | None) -> str:
     except OSError as exc:
         raise RuntimeError(
             f"OpenCode password file not readable: {path} ({exc}); "
-            "set opencode.password_env_file in SoHoAI-config.yaml"
+            "set opencode.password_env_file in ragnart.yaml"
         ) from exc
 
     for line in lines:

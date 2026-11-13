@@ -1,5 +1,5 @@
 [Unit]
-Description=SoHoAI RAG ingestion (sync + ingest)
+Description=RAGNART ingestion (sync + ingest)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 User=florian
 Environment=HOME=/home/florian
-ExecStart=/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/rag-ingest-run.sh
+ExecStart=/mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/ragnart-ingest-run.sh
 StandardOutput=journal
 StandardError=journal
 # 2-hour hard cap — kills a stuck ingestion so the next timer slot fires cleanly.

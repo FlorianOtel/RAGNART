@@ -86,7 +86,7 @@ def ensure_payload_indexes(client: QdrantClient) -> None:
     """
     Ensure a keyword index exists on the source_path payload field.
 
-    Every ingest_file() call (rag_engine/ingest.py step 0) and every
+    Every ingest_file() call (ragnart/ingest.py step 0) and every
     rag_sync_nfs.py deleted-file cleanup deletes points via
     `Filter(must=[FieldCondition(key="source_path", match=MatchValue(...))])`.
     Without a payload index, Qdrant must linearly scan every point's payload

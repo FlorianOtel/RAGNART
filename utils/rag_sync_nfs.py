@@ -12,7 +12,7 @@ Handles all cases uniformly:
   - Ignored:     status = 'ignored', mtime unchanged → no-op (permanent skip).
   - Completed / pending / processing, mtime unchanged: no-op.
 
-Files removed from NFS (or newly matched by an exclusion filter in SoHoAI-config.yaml)
+Files removed from NFS (or newly matched by an exclusion filter in ragnart.yaml)
 are deleted from SQLite and their Qdrant points purged.
 
 Usage (run from project root):
@@ -34,10 +34,10 @@ import yaml  # noqa: E402  (after sys.path fix)
 
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-from rag_engine.collection import DOCUMENTS_COLLECTION, get_client
-from rag_engine.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
-from rag_engine.schema import FIELD_SOURCE_PATH
-from rag_engine.state import StateDB
+from ragnart.collection import DOCUMENTS_COLLECTION, get_client
+from ragnart.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
+from ragnart.schema import FIELD_SOURCE_PATH
+from ragnart.state import StateDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def main() -> None:
     parser.add_argument("--user", metavar="OWNER", help="Scan only this owner's roots (e.g. florian)")
     args = parser.parse_args()
 
-    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
+    with open(Path(__file__).resolve().parent.parent / "ragnart.yaml") as f:
         config = yaml.safe_load(f)
 
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")

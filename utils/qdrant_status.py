@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from rag_engine.collection import get_client  # noqa: E402
+from ragnart.collection import get_client  # noqa: E402
 
 
 def _fetch_status(client, collection: str) -> dict:
@@ -88,11 +88,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--collection", default=None,
-        help="Collection name (default: from SoHoAI-config.yaml rag.qdrant_collection)",
+        help="Collection name (default: from ragnart.yaml rag.qdrant_collection)",
     )
     args = parser.parse_args()
 
-    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
+    config_path = Path(__file__).resolve().parent.parent / "ragnart.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 

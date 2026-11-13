@@ -1,0 +1,13 @@
+# Python bytecode and virtualenvs
+__pycache__/
+*.py[oc]
+.venv/
+
+# Dependency lock (the shared venv is the source of truth, not a per-repo lock)
+uv.lock
+
+# NFS silly-rename leftovers
+.nfs*
+
+# NOTE: .claude/ is deliberately NOT ignored — orchestra session artefacts
+# under .claude/orchestra/ are tracked in this repo.

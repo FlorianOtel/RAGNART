@@ -1,7 +1,7 @@
 """
 RAG search — query → embed → Qdrant query_points → parent_text + provenance.
 
-search_rag() is the single function exported by rag_engine/__init__.py.
+search_rag() is the single function exported by ragnart/__init__.py.
 Ownership filtering is applied internally; the caller only provides
 query, user_id, and limit.
 """
@@ -85,7 +85,7 @@ async def search_rag(
           file_type       — pdf | md | ipynb | etc.
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
-    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.93:11434/api/embeddings")
+    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
 
     # -- 0b. Resolve effective rerank settings ----
     _rerank_section = rag_cfg.get("rerank", {})

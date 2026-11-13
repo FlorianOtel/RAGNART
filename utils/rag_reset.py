@@ -26,9 +26,9 @@ import yaml  # noqa: E402
 
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
-from rag_engine.schema import FIELD_OWNER
-from rag_engine.state import StateDB
+from ragnart.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
+from ragnart.schema import FIELD_OWNER
+from ragnart.state import StateDB
 
 
 def main() -> None:
@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args()
 
-    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
+    with open(Path(__file__).resolve().parent.parent / "ragnart.yaml") as f:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})

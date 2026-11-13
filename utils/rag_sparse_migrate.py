@@ -41,9 +41,9 @@ from qdrant_client.models import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rag_engine.collection import DOCUMENTS_COLLECTION, VECTOR_SIZE
-from rag_engine.embeddings import embed_sparse
-from rag_engine.schema import FIELD_TEXT, SPARSE_VECTOR_NAME
+from ragnart.collection import DOCUMENTS_COLLECTION, VECTOR_SIZE
+from ragnart.embeddings import embed_sparse
+from ragnart.schema import FIELD_TEXT, SPARSE_VECTOR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ DOCUMENTS_NEW_COLLECTION = "documents_new"
 
 
 def _load_config() -> dict:
-    """Load SoHoAI-config.yaml from project root."""
-    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
+    """Load ragnart.yaml from project root."""
+    config_path = Path(__file__).resolve().parent.parent / "ragnart.yaml"
     if not config_path.exists():
-        raise FileNotFoundError(f"SoHoAI-config.yaml not found at {config_path}")
+        raise FileNotFoundError(f"ragnart.yaml not found at {config_path}")
     with open(config_path) as f:
         return yaml.safe_load(f)
 
@@ -66,7 +66,7 @@ def _get_qdrant_url(cli_url: str | None, config: dict) -> str:
         return cli_url
     url = config.get("rag", {}).get("qdrant_url")
     if not url:
-        raise ValueError("qdrant_url not found in SoHoAI-config.yaml[rag] and not provided via --qdrant-url")
+        raise ValueError("qdrant_url not found in ragnart.yaml[rag] and not provided via --qdrant-url")
     return url
 
 
@@ -349,7 +349,7 @@ def main() -> None:
     )
     migrate_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from SoHoAI-config.yaml)",
+        help="Qdrant server URL (default from ragnart.yaml)",
     )
     migrate_parser.add_argument(
         "--force",
@@ -364,7 +364,7 @@ def main() -> None:
     )
     swap_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from SoHoAI-config.yaml)",
+        help="Qdrant server URL (default from ragnart.yaml)",
     )
     swap_parser.add_argument(
         "--confirm",
@@ -379,7 +379,7 @@ def main() -> None:
     )
     status_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from SoHoAI-config.yaml)",
+        help="Qdrant server URL (default from ragnart.yaml)",
     )
 
     args = parser.parse_args()

@@ -1,0 +1,144 @@
+# =============================================================================
+# RAGNART Configuration
+# =============================================================================
+# Split from the SoHoAI config on 2026-11-13 (RAGNART v0.1 spin-off).
+# Contains only the RAG-relevant blocks. No YAML anchors or aliases are used
+# in these blocks: every value is a literal (verified against the SoHoAI config
+# on 2026-11-13), so no anchor handling is needed when reading this file.
+
+# Change db_base_path to relocate all databases in one place.
+# Python derives: {db_base_path}/sqlite/rag_state.db.
+db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
+
+#### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
+rag:
+  embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 2 (see ollama_url)
+  # ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
+  ollama_url: "http://192.168.1.95:11434/api/embeddings"   # Ollama on Server 2 (explicit IP — not localhost)
+  opencode_api_url: "http://192.168.1.95:4096"  # OpenCode server — must match opencode.api_url
+  top_k: 5
+  # Parent-child chunking (see RAG-strategy.md §3.4):
+  #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
+  #   Flat 512-token for PPTX / short TXT / YAML / config files
+  qdrant_collection: "documents"
+  qdrant_url: "http://192.168.1.93:6333"         # Qdrant on Server 1 (local NVMe)
+  # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
+  # Snapshots (DR):        /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
+
+  # -- Ingestion lock (shared across servers via NFS) ---------------------------
+  # NFSv4.1 + local_lock=none forwards flock() to the NAS lock manager, making
+  # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
+  ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"
+
+  # -- Cross-encoder reranking (§13) -----------------------------------------
+  rerank:
+    enabled: true                             # on by default; override via ?rerank=false or --no-rerank
+    server_url: "http://192.168.1.95:8000/v1/rerank"
+    model: "bge-reranker-v2-m3"
+    fetch_multiplier: 6                       # Qdrant fetch = min(top_k * fetch_multiplier, fetch_cap)
+    fetch_cap: 30                             # hard cap on Qdrant fetch pool
+    timeout_seconds: 10.0                     # per-request HTTP timeout
+    # Served by llama-swap on Server 2 (port 8000), which routes /v1/rerank by the
+    # "model" field above -- so `model` must match the llama-swap model key exactly.
+    # Backing llama-server runs with -c 768 -b 768 -ub 768 --reranking --pooling rank,
+    # so the client does not truncate; the server handles typical queries + child chunks.
+    # Coexists with qwen3.5-9b-q4 on GPU; verified 9,810 MiB used / 1,965 MiB free (10-min soak).
+
+  # -- Hybrid sparse+dense retrieval (§14) -----------------------------------
+  hybrid:
+    enabled: true                             # default on; override per-call via hybrid=False
+    sparse_vector_name: "sparse_text"
+    dense_fetch: 30                           # candidates from dense prefetch branch
+    sparse_fetch: 30                          # candidates from sparse prefetch branch
+    rrf_k: 60                                 # RRF constant k (standard: 60)
+
+  # -- NFS scanner filters ------------------------------------------------------
+  scanner:
+    # File extensions to ingest (whitelist).
+    include_extensions:
+      - .pdf
+      - .pptx
+      - .docx
+      - .md
+      - .sh
+      - .txt
+      - .csv
+      - .yaml
+      - .yml
+      - .ipynb
+      - .html
+      - .jsonl # Claude chats 
+    # Directory names/paths that os.walk will not descend into.
+    # All entries MUST have a trailing slash. Single-component entries (e.g. "Library/")
+    # match any directory with that exact name at any depth. Multi-component entries
+    # (e.g. "Microsoft--flotel/Documents/") match only that exact path-segment sequence.
+    # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
+    exclude_dir_names:
+      - ".Gin-AI-python-3.12/"  # Python virtualenv
+      - ".Gin-AI-python-3.12.old/"  # pre-2026-11-01 venv (machine-local interpreter); ingested by
+                                    # mistake 2026-11-01 because the entry above does not match it
+      - ".uv-python/"           # uv-managed Python interpreters on NFS (the venv's base, since 2026-11-01)
+      - "site-packages/"        # any virtualenv's installed packages, whatever the venv is called
+      - ".cache/"               # tool caches (uv archives, etc.)
+      - "__pycache__/"
+      - ".git/"
+      - "node_modules/"
+      - ".claude/"
+      - "dot.claude-Linux/"     # ~/.claude is symlinked here (NFS-hosted) — real on-disk dirname
+                                # doesn't match ".claude/" above; without this the generic NFS
+                                # scanner sweeps up history.jsonl, native-sessions/*.jsonl,
+                                # shell-snapshots/*.sh, and duplicates of claude_chats.roots content
+      - ".vscode/"
+      - ".venv/"
+      - "Library/"              # macOS stuff
+      - "Applications/"         # macOS stuff
+      - "LLMs-cache/"           # HuggingFace model cache — READMEs/licenses, not RAG content
+      - "Downloads/"            # garbage
+      - "Microsoft--flotel/Documents/"  # IRM/DRM-encrypted old PPTs — unrecoverable
+    # Directory name suffixes to skip (matched with str.endswith).
+    exclude_dir_suffixes:
+      - .dist-info             # pip package metadata
+    # Substrings — any filename containing one of these is skipped.
+    exclude_file_patterns:
+      - "@synoeastream"        # Synology NAS streaming metadata
+      - "._"                   # macOS AppleDouble resource fork sidecars (e.g. ._foo.pptx) —
+                               # created automatically by macOS on non-HFS+ filesystems (NFS/Synology);
+                               # same extension as the real file but binary metadata, not parseable
+      - "~$"                   # Microsoft Office lock/temp files (e.g. ~$foo.pptx) —
+                               # created while a document is open; tiny binary lock stubs, not real docs
+
+# -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
+users:
+  florian.otel@gmail.com:
+    owner: "florian"
+    nfs_roots: ["/mnt/nfs/Florian"]
+  # eva.otel@gmail.com
+  # owner: "eva"
+  # nfs_roots: ["/mnt/nfs/Eva"]
+  # annika@example.com:
+  # owner: "annika"
+  # nfs_roots: ["/mnt/nfs/Annika"]
+  # laura@example.com:
+  # owner: "laura"
+  # nfs_roots: ["/mnt/nfs/Laura"]
+shared:
+  owner: "la-familia"
+  nfs_roots: ["/mnt/nfs/La-Familia"]
+
+# -- Claude Code session ingestion -----------------------------------------------
+claude_chats:
+  roots:
+    - path: /home/florian/.claude/projects
+      owner: florian
+
+# -- OpenCode session ingestion ---------------------------------------------------
+# Scanner walks GET /api/session (v2 paginated) which returns every session
+# opencode knows about, regardless of cwd-at-launch. session.directory is just
+# metadata, not classification — so there's no path-prefix filter here.
+opencode:
+  api_url: "http://192.168.1.95:4096"
+  owner: florian
+  # OpenCode 2.x requires HTTP Basic auth (user "opencode"). The password is read
+  # from OPENCODE_SERVER_PASSWORD in the server's own env file, on the ingest host
+  # (Server 2, where rag-ingest.timer runs and the OpenCode server lives).
+  password_env_file: "~/.config/opencode/opencode-server.env"

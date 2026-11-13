@@ -380,7 +380,7 @@ def _parse_opencode_session(
     path is the synthetic key "opencode://{session_id}".
     oc_api_url is the opencode API base URL (e.g. "http://192.168.1.95:4096").
     password_env_file names the file holding OPENCODE_SERVER_PASSWORD
-    (opencode.password_env_file; see rag_engine/opencode_client.py).
+    (opencode.password_env_file; see ragnart/opencode_client.py).
 
     Routes (OpenCode 2.x, Basic auth):
       GET /api/session/{id}          -> {"data": {title, time, location.directory, ...}}
@@ -707,7 +707,7 @@ async def ingest_file(
                           Controlled by --batch in rag_ingest_daemon.py (default 5).
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
-    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.93:11434/api/embeddings")
+    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
 
     file_name     = Path(file_path).name
     raw_file_type = Path(file_path).suffix.lstrip(".").lower()

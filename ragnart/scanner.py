@@ -6,7 +6,7 @@ Used by:
   (The orchestrator's POST /v1/rag/ingest/sync was removed 2026-11-04: the RAG
   state DB must only be opened from one host. See main.py's RAG SEARCH ENDPOINT note.)
 
-Exclusion rules are read from config["rag"]["scanner"] in SoHoAI-config.yaml.
+Exclusion rules are read from config["rag"]["scanner"] in ragnart.yaml.
 All four keys (include_extensions, exclude_dir_names, exclude_dir_suffixes,
 exclude_file_patterns) are required — missing config raises ValueError.
 
@@ -99,7 +99,7 @@ def scan_nfs_roots(
     scanner_cfg = config.get("rag", {}).get("scanner")
     if not scanner_cfg:
         raise ValueError(
-            "SoHoAI-config.yaml is missing the 'rag.scanner' section."
+            "ragnart.yaml is missing the 'rag.scanner' section."
             "Add include_extensions, exclude_dir_names, exclude_dir_suffixes, "
             "and exclude_file_patterns."
         )
@@ -108,7 +108,7 @@ def scan_nfs_roots(
     missing = [k for k in _REQUIRED if k not in scanner_cfg]
     if missing:
         raise ValueError(
-            f"SoHoAI-config.yaml rag.scanner is missing required key(s): {', '.join(missing)}"
+            f"ragnart.yaml rag.scanner is missing required key(s): {', '.join(missing)}"
         )
 
     include_exts = frozenset(scanner_cfg["include_extensions"])
@@ -134,7 +134,7 @@ def scan_nfs_roots(
     if not roots_to_scan:
         logger.warning(
             "No NFS roots to scan. "
-            "Fill in 'users' / 'shared' sections in SoHoAI-config.yaml."
+            "Fill in 'users' / 'shared' sections in ragnart.yaml."
         )
 
     scanned = 0
