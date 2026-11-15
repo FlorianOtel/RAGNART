@@ -23,7 +23,16 @@ FIELD_TAG = "tag"                   # e.g. "certifications", "cisco-backup", "fa
 FIELD_SESSION_ID = "session_id"     # UUID of the Claude Code session — indexed for Qdrant filter queries
 FIELD_PROJECT = "project"           # NFS document folder or claude_chat project; absent on opencode points (session.directory is cwd-at-launch metadata, not topic classification)
 FIELD_SESSION_TITLE = "session_title"  # claude_chat + opencode sessions; absent on NFS document points
+FIELD_PROJECT_ID = "project_id"     # owning RAGNART project; GLOBAL_PROJECT_ID until ragnart projects exist
+FIELD_SOURCE_TYPE = "source_type"   # kind of source the point came from (document, session, ...)
+FIELD_MODIFIED_AT = "modified_at"   # source modification time (datetime-indexed)
+FIELD_INGESTED_AT = "ingested_at"   # time this point was ingested (datetime-indexed)
+FIELD_CONTENT_HASH = "content_hash" # MD5 of the source content; change/duplicate detection, not security
 SPARSE_VECTOR_NAME = "sparse_text"   # named sparse vector space in the Qdrant collection
+
+# Reserved project id for items that do not belong to a user-defined project.
+# Every item carries it until ragnart projects are introduced.
+GLOBAL_PROJECT_ID = "global"
 
 
 # ---------------------------------------------------------------------------

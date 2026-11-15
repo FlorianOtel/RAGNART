@@ -38,12 +38,92 @@ CREATE TABLE IF NOT EXISTS ingestion_queue (
 );
 """
 
-# Schema migrations applied in __init__ after CREATE TABLE IF NOT EXISTS.
-_MIGRATIONS = [
-    # (1) Add skip_reason column introduced with the 'ignored' status.
-    "ALTER TABLE ingestion_queue ADD COLUMN skip_reason TEXT",
-    # (2) Raise max_retries from 3 to 5 for all existing rows that still have the old default.
-    "UPDATE ingestion_queue SET max_retries = 5 WHERE max_retries < 5",
+# Schema migrations, applied in __init__ after CREATE TABLE IF NOT EXISTS.
+#
+# The schema version lives in SQLite's own `PRAGMA user_version`. A database at
+# version N has every migration with version <= N applied. Migrations run in
+# ascending version order; each one is a list of SQL statements.
+#
+# Each statement runs on its own and any sqlite3.OperationalError is ignored.
+# A statement whose work is already in the database (an ADD COLUMN for a column
+# that exists, for example) is skipped, so a migration can be re-run safely after
+# a crash part-way through. The live DB has user_version 0 but already has
+# skip_reason, so version 1 must tolerate that.
+_MIGRATIONS: list[tuple[int, list[str]]] = [
+    (1, [
+        # Add skip_reason column introduced with the 'ignored' status.
+        "ALTER TABLE ingestion_queue ADD COLUMN skip_reason TEXT",
+        # Raise max_retries from 3 to 5 for all existing rows that still have the old default.
+        "UPDATE ingestion_queue SET max_retries = 5 WHERE max_retries < 5",
+    ]),
+    (2, [
+        # Per-item columns. project_id is always set: 'global' means the item is
+        # outside every ragnart project (design D2).
+        "ALTER TABLE ingestion_queue ADD COLUMN project_id TEXT NOT NULL DEFAULT 'global'",
+        "ALTER TABLE ingestion_queue ADD COLUMN source_type TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN file_type TEXT",
+        # Where the item's bytes are read (design D7). NULL for OpenCode rows, which are read via the API.
+        "ALTER TABLE ingestion_queue ADD COLUMN origin_path TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN size_bytes INTEGER",
+        "ALTER TABLE ingestion_queue ADD COLUMN content_hash TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN hashed_at TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN first_seen_at TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN pipeline_version TEXT",
+        "ALTER TABLE ingestion_queue ADD COLUMN chunk_count INTEGER",
+        "ALTER TABLE ingestion_queue ADD COLUMN missing_since TEXT",
+        # Session launch directory, recorded verbatim (design D4). NULL for files.
+        "ALTER TABLE ingestion_queue ADD COLUMN launch_dir TEXT",
+        # Rows that already completed take their first-seen time from completion time.
+        "UPDATE ingestion_queue SET first_seen_at = completed_at "
+        "WHERE first_seen_at IS NULL AND completed_at IS NOT NULL",
+        # Project tables. Empty until ragnart projects exist.
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id              TEXT PRIMARY KEY,
+            path            TEXT,
+            name            TEXT,
+            parent          TEXT,
+            owner           TEXT,
+            inherit_access  INTEGER NOT NULL DEFAULT 1,
+            mode            TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS project_tags (
+            project_id  TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            PRIMARY KEY (project_id, key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS project_links (
+            project_id         TEXT NOT NULL,
+            linked_project_id  TEXT NOT NULL,
+            PRIMARY KEY (project_id, linked_project_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS source_links (
+            project_id   TEXT NOT NULL,
+            source_path  TEXT NOT NULL,
+            PRIMARY KEY (project_id, source_path)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS grants (
+            project_id  TEXT NOT NULL,
+            principal   TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            granted_by  TEXT,
+            granted_at  TEXT,
+            PRIMARY KEY (project_id, principal)
+        )
+        """,
+        # The reserved 'global' project (design D2): no path, no parent, never a parent.
+        "INSERT OR IGNORE INTO projects (id, path, name, parent, owner, inherit_access, mode) "
+        "VALUES ('global', NULL, 'Global', NULL, NULL, 0, NULL)",
+    ]),
 ]
 
 
@@ -76,12 +156,29 @@ class StateDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
-        for migration in _MIGRATIONS:
-            try:
-                self._conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # ALTER TABLE fails if column already exists — safe to ignore
-        self._conn.commit()
+        self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """
+        Bring the database up to the newest version in _MIGRATIONS.
+
+        Reads PRAGMA user_version, runs every migration above it in order, and
+        records each applied version. A database already at the newest version
+        runs nothing.
+        """
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        for version, statements in _MIGRATIONS:
+            if version <= current:
+                continue
+            for statement in statements:
+                try:
+                    self._conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass  # ALTER TABLE fails if column already exists — safe to ignore
+            # user_version is set last, so a crash before this line re-runs the whole version.
+            self._conn.execute(f"PRAGMA user_version = {int(version)}")
+            self._conn.commit()
+            logger.info("Applied ingestion-queue schema migration %d", version)
 
     # ------------------------------------------------------------------
     # Startup
@@ -117,12 +214,22 @@ class StateDB:
     # Discovery
 
     def discover_or_update(
-        self, file_path: str, owner: str, last_modified: float
+        self,
+        file_path: str,
+        owner: str,
+        last_modified: float,
+        origin_path: str | None = None,
+        source_type: str | None = None,
+        file_type: str | None = None,
     ) -> None:
         """
         Register a newly discovered file or re-queue it for ingestion.
 
-        - New file:    inserted as 'pending'.
+        The identity fields (origin_path, source_type, file_type) and first_seen_at
+        are written only on insert: they are set once, at discovery. The update
+        branches below leave them alone.
+
+        - New file:    inserted as 'pending' with the identity fields and first_seen_at = now.
         - Modified:    disk mtime > stored mtime → reset to 'pending' (any status,
                        including 'ignored' — the file was replaced on disk).
         - Failed:      status = 'failed' (mtime unchanged) → reset to 'pending'
@@ -141,9 +248,10 @@ class StateDB:
         row = cur.fetchone()
         if row is None:
             self._conn.execute(
-                "INSERT INTO ingestion_queue (file_path, owner, last_modified, status) "
-                "VALUES (?, ?, ?, 'pending')",
-                (file_path, owner, last_modified),
+                "INSERT INTO ingestion_queue "
+                "(file_path, owner, last_modified, status, origin_path, source_type, file_type, first_seen_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
+                (file_path, owner, last_modified, origin_path, source_type, file_type, _now()),
             )
         elif last_modified > row["last_modified"]:
             # File changed on disk — re-queue regardless of current status (including ignored).
@@ -240,6 +348,19 @@ class StateDB:
         ).fetchone()
         return int(row["n"])
 
+    def count_origin_with_prefix(self, prefix: str) -> int:
+        """
+        Return how many queued rows have an origin_path starting with prefix (any status).
+
+        Read-only. The scanner uses it with "<root>/" for claude_chats roots: a claude-session
+        key is not a path, so its real location is only in origin_path.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM ingestion_queue WHERE substr(origin_path, 1, ?) = ?",
+            (len(prefix), prefix),
+        ).fetchone()
+        return int(row["n"])
+
     def purge_deleted(self, paths: list[str]) -> None:
         """
         Remove the given paths from SQLite. Call only after Qdrant cleanup is complete.
@@ -294,8 +415,8 @@ class StateDB:
         """
         Claim the oldest pending row: pending → processing, in one call.
 
-        Returns {"file_path": ..., "owner": ...} for the claimed row, or None when no
-        row is pending. The continuous worker pool in utils/rag_ingest_daemon.py calls
+        Returns {"file_path", "owner", "origin_path", "last_modified"} for the claimed
+        row, or None when no row is pending. The continuous worker pool in utils/rag_ingest_daemon.py calls
         this once each time a worker becomes free.
 
         Why no explicit SQL transaction is needed: the daemon's workers are asyncio
@@ -305,7 +426,7 @@ class StateDB:
         UPDATE keeps it from touching a row that has already left 'pending'.
         """
         row = self._conn.execute(
-            "SELECT file_path, owner FROM ingestion_queue "
+            "SELECT file_path, owner, origin_path, last_modified FROM ingestion_queue "
             "WHERE status = 'pending' ORDER BY rowid LIMIT 1"
         ).fetchone()
         if row is None:
@@ -339,14 +460,54 @@ class StateDB:
         )
         self._conn.commit()
 
-    def mark_completed(self, file_path: str) -> None:
-        """Transition processing → completed; record completion timestamp."""
+    def mark_completed(
+        self,
+        file_path: str,
+        chunk_count: int | None = None,
+        source_type: str | None = None,
+        file_type: str | None = None,
+        pipeline_version: str | None = None,
+        size_bytes: int | None = None,
+        content_hash: str | None = None,
+        hashed_at: str | None = None,
+        completed_at: str | None = None,
+        launch_dir: str | None = None,
+    ) -> None:
+        """
+        Transition processing → completed; record completion timestamp.
+
+        Every extra argument is optional. An argument that is None leaves its column
+        unchanged, so mark_completed(file_path) alone only sets the status, as before.
+        completed_at, when given, is stored as-is. Pass the same ISO string that went
+        into the Qdrant payload's ingested_at, so the two agree exactly.
+        """
+        # Columns to write when the caller supplied a value. The names are fixed
+        # literals here, never caller input, so building the SQL from them is safe.
+        optional_columns = {
+            "chunk_count": chunk_count,
+            "source_type": source_type,
+            "file_type": file_type,
+            "pipeline_version": pipeline_version,
+            "size_bytes": size_bytes,
+            "content_hash": content_hash,
+            "hashed_at": hashed_at,
+            "launch_dir": launch_dir,
+        }
+        set_clauses = [
+            "status = 'completed'",
+            "completed_at = ?",
+            "progress_detail = NULL",
+            "error_msg = NULL",
+        ]
+        params: list = [completed_at or _now()]
+        for column, value in optional_columns.items():
+            if value is not None:
+                set_clauses.append(f"{column} = ?")
+                params.append(value)
+        params.append(file_path)
         self._conn.execute(
-            "UPDATE ingestion_queue "
-            "SET status = 'completed', completed_at = ?, "
-            "    progress_detail = NULL, error_msg = NULL "
-            "WHERE file_path = ?",
-            (_now(), file_path),
+            f"UPDATE ingestion_queue SET {', '.join(set_clauses)} WHERE file_path = ?",
+            params,
         )
         self._conn.commit()
 

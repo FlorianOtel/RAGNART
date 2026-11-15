@@ -18,8 +18,9 @@ from SQLite and their Qdrant points purged.
 
 Deletion is guarded in two ways. Both skip the whole deletion phase, log ERROR and
 exit 1. The queueing done by the scan is kept.
-  - An NFS root could not be scanned this run (missing, or empty while the queue
-    still holds rows under it). Its rows would look gone, so nothing is deleted.
+  - A source root could not be scanned this run: an NFS root (missing, or empty
+    while the queue still holds rows under it) or a claude_chats root (missing).
+    Its rows would look gone, so nothing is deleted.
   - The completed rows that would be deleted exceed rag.sync.max_delete_fraction of
     all completed rows. Pass --allow-mass-delete to proceed anyway.
 
@@ -67,6 +68,10 @@ def _deletion_reason(path: str, include_exts: frozenset[str]) -> str:
     """
     if path.startswith("opencode://"):
         return "OpenCode session no longer returned by the API"
+    # A claude-session:// key is not a path, so os.path.exists() below would always
+    # report it missing. Its transcript was simply not found in any claude_chats root.
+    if path.startswith("claude-session://"):
+        return "Claude Code session no longer found on disk"
     if not os.path.exists(path):
         return "file missing on disk"
     if not is_includable(path, include_exts):
@@ -141,13 +146,15 @@ def sync(config: dict, state_db: StateDB, args: argparse.Namespace) -> int:
     deleted_paths: list[str] = []
     stale_paths: list[str] = []
 
-    # -- Guard 1: an NFS root could not be seen this run --------------------------
-    # Rows under such a root would look deleted. None of the deletion phase runs,
-    # and the scan's queueing above still stands.
-    skipped_roots = result_nfs["skipped_roots"]
+    # -- Guard 1: a source root could not be seen this run ------------------------
+    # Rows under such a root would look deleted. This covers NFS roots and claude_chats
+    # roots. A claude-session:// key is not a path, so an NFS prefix check cannot
+    # protect it; the claude root's own skipped_roots entry is what protects its rows.
+    # None of the deletion phase runs, and the scan's queueing above still stands.
+    skipped_roots = result_nfs["skipped_roots"] + result_chats.get("skipped_roots", [])
     if skipped_roots:
         logger.error(
-            "Deletion phase SKIPPED: NFS root(s) not scannable this run: %s. "
+            "Deletion phase SKIPPED: root(s) not scannable this run: %s. "
             "No rows or Qdrant points were deleted.",
             ", ".join(skipped_roots),
         )
@@ -208,7 +215,7 @@ def sync(config: dict, state_db: StateDB, args: argparse.Namespace) -> int:
     else:
         print("  Opencode API unreachable — preserved existing opencode points")
     if skipped_roots:
-        print(f"  NFS roots skipped     : {len(skipped_roots)} (deletion phase not run)")
+        print(f"  Roots skipped         : {len(skipped_roots)} (deletion phase not run)")
     print(f"  Stale rows removed    : {len(stale_paths)}")
     print()
     print("Queue status:")

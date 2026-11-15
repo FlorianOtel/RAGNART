@@ -13,7 +13,17 @@ import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, Modifier, PayloadSchemaType, SparseVectorParams, VectorParams
 
-from .schema import FIELD_SOURCE_PATH, SPARSE_VECTOR_NAME
+from .schema import (
+    FIELD_CONTENT_HASH,
+    FIELD_FILE_TYPE,
+    FIELD_INGESTED_AT,
+    FIELD_MODIFIED_AT,
+    FIELD_OWNER,
+    FIELD_PROJECT_ID,
+    FIELD_SOURCE_PATH,
+    FIELD_SOURCE_TYPE,
+    SPARSE_VECTOR_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +35,27 @@ DOCUMENTS_COLLECTION = "documents"
 VECTOR_SIZE = 1024          # bge-m3 output dimension (same as mxbai-embed-large)
 DISTANCE = Distance.COSINE
 
-# Module-level cache: once we've confirmed/created the source_path payload index
-# in this process, skip the extra get_collection() round-trip on every subsequent
-# ensure_collection() call (mirrors the _sparse_ready cache pattern in ingest.py).
-_payload_index_ready: bool | None = None
+# Payload fields that get a KEYWORD index (exact-match filters).
+_KEYWORD_INDEX_FIELDS = (
+    FIELD_SOURCE_PATH,
+    FIELD_PROJECT_ID,
+    FIELD_OWNER,
+    FIELD_SOURCE_TYPE,
+    FIELD_FILE_TYPE,
+    FIELD_CONTENT_HASH,
+)
+
+# Payload fields that get a DATETIME index (range filters).
+_DATETIME_INDEX_FIELDS = (
+    FIELD_MODIFIED_AT,
+    FIELD_INGESTED_AT,
+)
+
+# Per-process cache of payload fields already confirmed indexed. Tracked per
+# field (not one bool) so a collection that is only partly indexed still gets
+# the missing indexes created on the next call. Mirrors the _sparse_ready
+# cache pattern in ingest.py.
+_payload_indexes_ready: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +116,7 @@ def ensure_collection(client: QdrantClient) -> None:
     collection that was created without one; use rag_sparse_migrate.py to
     migrate the corpus to a new collection with the correct schema.
 
-    Also ensures the source_path payload index exists (see ensure_payload_indexes()),
+    Also ensures the payload indexes exist (see ensure_payload_indexes()),
     regardless of whether the collection was just created or already present.
     """
     real_collections = {c.name for c in client.get_collections().collections}
@@ -107,46 +134,56 @@ def ensure_collection(client: QdrantClient) -> None:
 
 def ensure_payload_indexes(client: QdrantClient) -> None:
     """
-    Ensure a keyword index exists on the source_path payload field.
+    Ensure every field in _KEYWORD_INDEX_FIELDS and _DATETIME_INDEX_FIELDS has a payload index.
 
-    Every ingest_file() call (ragnart/ingest.py step 0) and every
-    rag_sync_nfs.py deleted-file cleanup deletes points via
-    `Filter(must=[FieldCondition(key="source_path", match=MatchValue(...))])`.
+    Why: ingestion and sync delete points via
+    `Filter(must=[FieldCondition(key="source_path", match=MatchValue(...))])`,
+    and the new metadata fields are used for exact-match and range filters.
     Without a payload index, Qdrant must linearly scan every point's payload
-    in the collection to satisfy that filter. At the corpus sizes this
-    collection reaches (millions of points), that scan routinely exceeds the
-    QdrantClient timeout (60s — see get_client()) and ingestion fails with
-    "ResponseHandlingException: timed out" — see RAG-troubleshoot.md
+    to satisfy such a filter. At the corpus sizes this collection reaches
+    (millions of points), that scan routinely exceeds the QdrantClient
+    timeout (60s — see get_client()) and ingestion fails with
+    "ResponseHandlingException: timed out" — see `docs/RAG-troubleshoot.md`
     §2.8 (Qdrant timeouts during ingestion or sync).
 
-    Idempotent and cheap after the first call in a process: checks a
-    module-level cache before hitting Qdrant, then checks the collection's
-    live payload_schema before issuing create_payload_index (itself also
-    idempotent — Qdrant no-ops if the index already exists). Building the
-    index over an existing large collection happens in the background on
-    the Qdrant server; this call returns as soon as the index is registered.
+    Keyword fields are indexed with PayloadSchemaType.KEYWORD; datetime fields
+    with PayloadSchemaType.DATETIME.
+
+    Idempotent and cheap after the first call in a process: fields already in
+    the module-level cache are skipped with no Qdrant round-trip. Otherwise the
+    collection's live payload_schema is checked and only the missing fields
+    are registered. Building an index over an existing large collection happens
+    in the background on the Qdrant server; this call returns as soon as each
+    index is registered.
     """
-    global _payload_index_ready
-    if _payload_index_ready:
+    # Work out which (field, schema) pairs are not yet confirmed in this process.
+    wanted = [(field, PayloadSchemaType.KEYWORD) for field in _KEYWORD_INDEX_FIELDS]
+    wanted += [(field, PayloadSchemaType.DATETIME) for field in _DATETIME_INDEX_FIELDS]
+    missing = [(field, schema) for field, schema in wanted if field not in _payload_indexes_ready]
+    if not missing:
         return
+
     try:
         info = client.get_collection(DOCUMENTS_COLLECTION)
         existing = info.payload_schema or {}
     except Exception:
         return  # collection not created yet; nothing to index
-    if FIELD_SOURCE_PATH in existing:
-        _payload_index_ready = True
-        return
-    logger.info(
-        "Creating payload index on '%s' (one-time; Qdrant builds it in the background)",
-        FIELD_SOURCE_PATH,
-    )
-    client.create_payload_index(
-        collection_name=DOCUMENTS_COLLECTION,
-        field_name=FIELD_SOURCE_PATH,
-        field_schema=PayloadSchemaType.KEYWORD,
-    )
-    _payload_index_ready = True
+
+    for field, field_schema in missing:
+        if field in existing:
+            # Already indexed on the server (possibly by an earlier process).
+            _payload_indexes_ready.add(field)
+            continue
+        logger.info(
+            "Creating payload index on '%s' (one-time; Qdrant builds it in the background)",
+            field,
+        )
+        client.create_payload_index(
+            collection_name=DOCUMENTS_COLLECTION,
+            field_name=field,
+            field_schema=field_schema,
+        )
+        _payload_indexes_ready.add(field)
 
 
 def collection_has_sparse(client: QdrantClient) -> bool:

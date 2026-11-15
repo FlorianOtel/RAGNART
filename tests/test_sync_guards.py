@@ -138,6 +138,31 @@ def test_empty_root_with_rows_beneath_it_is_skipped(sync_module, state_db, qdran
     qdrant.delete.assert_not_called()
 
 
+def test_claude_root_unreachable_skips_whole_deletion_phase(sync_module, state_db, qdrant, tmp_path) -> None:
+    """
+    An unreachable claude_chats root must stop the deletion phase, even when the NFS
+    roots are fine. Otherwise the re-keyed claude-session:// row (not a path, so no
+    NFS prefix guard applies) would look deleted and its Qdrant points would be purged.
+    """
+    root = tmp_path / "nas"
+    _make_files(root, 2)
+    # max_delete_fraction=1.0 so only the skipped-root guard can stop the deletion.
+    config = _config(root, max_delete_fraction=1.0)
+    _first_sync_completed(sync_module, state_db, config, qdrant)
+
+    # A completed Claude Code session row whose transcript lives under a missing root.
+    session_key = "claude-session://47cfe354-39f7-45a0-993e-1df37c4fb88e"
+    state_db.discover_or_update(session_key, OWNER, 0.0, origin_path="/gone/x.jsonl")
+    state_db.mark_completed(session_key)
+    config["claude_chats"] = {"roots": [{"path": str(tmp_path / "no-such-claude-root"), "owner": OWNER}]}
+    before = _rows(state_db)
+
+    assert sync_module.sync(config, state_db, _args()) == sync_module.EXIT_DELETION_REFUSED
+    assert _rows(state_db) == before
+    assert session_key in _rows(state_db)
+    qdrant.delete.assert_not_called()
+
+
 def test_scan_reports_missing_root_in_skipped_roots(state_db, tmp_path) -> None:
     missing = tmp_path / "never-existed"
     result = scan_nfs_roots(state_db, _config(missing), user_filter=OWNER)

@@ -212,7 +212,14 @@ def scan_nfs_roots(
                     mtime = os.path.getmtime(filepath)
                 except OSError:
                     continue
-                state_db.discover_or_update(filepath, owner, mtime)
+                state_db.discover_or_update(
+                    filepath,
+                    owner,
+                    mtime,
+                    origin_path=filepath,
+                    source_type="file",
+                    file_type=Path(filepath).suffix.lstrip(".").lower(),
+                )
                 existing_paths.add(filepath)
                 scanned += 1
                 root_count += 1
@@ -236,6 +243,53 @@ def scan_nfs_roots(
     }
 
 
+def claude_dot_claude_dir(path: Path) -> Path:
+    """
+    Return the `.claude` directory that holds a Claude Code transcript.
+
+    Anchors on the `projects` directory instead of counting parent levels, so the same
+    answer comes back for a main session, a direct subagent transcript, and a
+    workflow-depth subagent transcript (`.../subagents/workflows/wf_X/agent-*.jsonl`).
+    The nearest `projects` component is the one directly under `.claude`: mangled
+    project directory names (e.g. `-mnt-nfs-...-projects-RAGNART`) never equal `projects`.
+    """
+    parts = path.parts
+    projects_indexes = [index for index, part in enumerate(parts) if part == "projects"]
+    if not projects_indexes:
+        raise ValueError(f"not a Claude Code transcript path (no 'projects' directory): {path}")
+    return Path(*parts[: projects_indexes[-1]])
+
+
+def claude_jsonl_key(path: Path) -> str | None:
+    """
+    Return the ingestion-queue key for a Claude Code transcript, or None to exclude it.
+
+    The key depends on the session the file belongs to, not on where the file sits:
+
+      main session        .../<uuid>.jsonl                                       -> claude-session://<uuid>
+      direct subagent     .../<uuid>/subagents/agent-<id>.jsonl                  -> claude-session://<uuid>/agent-<id>
+      workflow agent      .../<uuid>/subagents/workflows/wf_<w>/agent-<id>.jsonl -> claude-session://<uuid>/agent-<id>
+      workflow journal    .../<uuid>/subagents/workflows/wf_<w>/journal.jsonl    -> None
+
+    A workflow journal is an orchestration log, not a conversation, so it is never
+    indexed. None means the scanner must not discover the file at all.
+    """
+    # Workflow depth: .../<uuid>/subagents/workflows/wf_<w>/<file>.jsonl
+    if path.parent.parent.name == "workflows" and path.parent.parent.parent.name == "subagents":
+        if path.name == "journal.jsonl":
+            return None
+        session_uuid = path.parent.parent.parent.parent.name
+        return f"claude-session://{session_uuid}/{path.stem}"
+
+    # Direct subagent: .../<uuid>/subagents/<file>.jsonl
+    if path.parent.name == "subagents":
+        session_uuid = path.parent.parent.name
+        return f"claude-session://{session_uuid}/{path.stem}"
+
+    # Main session: .../<uuid>.jsonl
+    return f"claude-session://{path.stem}"
+
+
 def scan_claude_chats(
     state_db: StateDB,
     config: dict,
@@ -247,16 +301,30 @@ def scan_claude_chats(
     Reads config["claude_chats"]["roots"] (list of {path, owner} dicts).
     Skips gracefully if the key is absent.
 
+    Each transcript is queued under its claude_jsonl_key() (a claude-session:// key),
+    with origin_path set to the real .jsonl path that ingestion reads. Workflow
+    journals have no key and are not queued.
+
     Returns:
-        {'scanned': N, 'existing_paths': set[str]}
+        {
+          'scanned': N,                  # transcripts admitted to the queue this scan
+          'existing_paths': set[str],    # every admitted key, for find_deleted()
+          'skipped_roots': list[str],    # roots that could not be trusted this scan
+        }
+
+        A root is skipped when it is not a directory, or when it is a directory that
+        yielded zero transcripts while the queue still holds rows whose origin_path lies
+        under it. Callers must not delete rows for a skipped root, because its transcripts
+        were not seen.
     """
     roots_cfg = config.get("claude_chats", {}).get("roots", [])
     if not roots_cfg:
         logger.info("No claude_chats roots configured — skipping chat scan")
-        return {"scanned": 0, "existing_paths": set()}
+        return {"scanned": 0, "existing_paths": set(), "skipped_roots": []}
 
     scanned = 0
     existing_paths: set[str] = set()
+    skipped_roots: list[str] = []
     visited_real_files: set[str] = set()
 
     for entry in roots_cfg:
@@ -266,6 +334,7 @@ def scan_claude_chats(
             continue
         if not root or not os.path.isdir(root):
             logger.warning("claude_chats root not accessible, skipping: %s", root)
+            skipped_roots.append(root)
             continue
 
         root_count = 0
@@ -276,6 +345,12 @@ def scan_claude_chats(
                 if not filename.endswith(".jsonl"):
                     continue
                 filepath = os.path.join(dirpath, filename)
+                # The queue key is the session identity. None means the file is excluded
+                # (a workflow journal): skip it before the dedup, so it never reaches
+                # existing_paths and the next sync removes any row it had.
+                key = claude_jsonl_key(Path(filepath))
+                if key is None:
+                    continue
                 real_filepath = os.path.realpath(filepath)
                 if real_filepath in visited_real_files:
                     continue
@@ -284,14 +359,32 @@ def scan_claude_chats(
                     mtime = os.path.getmtime(filepath)
                 except OSError:
                     continue
-                state_db.discover_or_update(filepath, owner, mtime)
-                existing_paths.add(filepath)
+                state_db.discover_or_update(
+                    key,
+                    owner,
+                    mtime,
+                    origin_path=filepath,
+                    source_type="claude_session",
+                    file_type="claude_chat",
+                )
+                existing_paths.add(key)
                 scanned += 1
                 root_count += 1
 
         logger.info("  → %d session(s) found in %s", root_count, root)
 
-    return {"scanned": scanned, "existing_paths": existing_paths}
+        # An existing root that yielded no transcripts while the queue still holds rows
+        # whose origin_path lies under it is treated as unreachable, as scan_nfs_roots does
+        # for NFS roots. Its rows must not be deleted. The check is read-only.
+        if root_count == 0 and state_db.count_origin_with_prefix(os.path.join(root, "")) > 0:
+            logger.warning(
+                "claude_chats root %s yielded 0 transcripts but the queue has rows under it; "
+                "treating as unreachable",
+                root,
+            )
+            skipped_roots.append(root)
+
+    return {"scanned": scanned, "existing_paths": existing_paths, "skipped_roots": skipped_roots}
 
 
 def scan_opencode_sessions(
@@ -396,7 +489,13 @@ def scan_opencode_sessions(
             updated_ms = time_info.get("updated", 0)
             mtime = updated_ms / 1000.0
 
-            state_db.discover_or_update(path, owner, mtime)
+            state_db.discover_or_update(
+                path,
+                owner,
+                mtime,
+                source_type="opencode_session",
+                file_type="opencode",
+            )
             existing_paths.add(path)
             scanned += 1
 

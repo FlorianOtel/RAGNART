@@ -34,7 +34,7 @@ import tempfile
 import threading
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import tiktoken
@@ -59,20 +59,28 @@ from qdrant_client.models import (
 
 from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_sparse
 from .embeddings import embed_batch, embed_sparse
+from .hashing import hash_file
 from .opencode_client import get_json, load_password
+from .scanner import claude_dot_claude_dir
 from .schema import (
     FIELD_CHUNK_INDEX,
+    FIELD_CONTENT_HASH,
     FIELD_FILE_NAME,
     FIELD_FILE_TYPE,
+    FIELD_INGESTED_AT,
+    FIELD_MODIFIED_AT,
     FIELD_OWNER,
     FIELD_PAGE,
     FIELD_PARENT_TEXT,
     FIELD_PROJECT,
+    FIELD_PROJECT_ID,
     FIELD_SESSION_ID,
     FIELD_SESSION_TITLE,
     FIELD_SOURCE_PATH,
+    FIELD_SOURCE_TYPE,
     FIELD_TAG,
     FIELD_TEXT,
+    GLOBAL_PROJECT_ID,
     SPARSE_VECTOR_NAME,
 )
 from .state import StateDB
@@ -287,12 +295,16 @@ def _synthesize_title(path: Path, max_chars: int = 60) -> str:
     return path.stem
 
 
-def _parse_claude_chat(path: Path) -> tuple[str, dict]:
+def _parse_claude_chat(path: Path) -> tuple[str, dict, str | None]:
     """
     Extract user/assistant text turns from a Claude Code session JSONL.
 
-    Returns (text, metadata) where metadata contains session_id and project
-    for storage as Qdrant payload fields.
+    Returns (text, metadata, launch_dir):
+      - metadata contains session_id, project and session_title for storage as
+        Qdrant payload fields.
+      - launch_dir is the first non-empty `cwd` in the transcript, verbatim (never
+        normalised), or None. It goes to the SQLite `launch_dir` column only, never
+        into the Qdrant payload.
 
     Skips: meta entries, tool_use blocks, tool_result blocks, thinking blocks,
     XML-tagged command strings, and file-history-snapshot entries.
@@ -311,7 +323,7 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return "", {}
+        return "", {}, None
 
     for raw_line in lines:
         raw_line = raw_line.strip()
@@ -374,7 +386,7 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
                     turns.append(f"**Claude**: {text}")
 
     if not turns:
-        return "", {}
+        return "", {}, None
 
     project = Path(cwd).name if cwd else "unknown"
 
@@ -393,31 +405,40 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
     text = header + body
 
     # --- session_title derivation ---
-    is_subagent = path.parent.name == "subagents"
-    if is_subagent:
-        # path: .../projects/<mangled>/<uuid>/subagents/agent-xxx.jsonl
-        parent_jsonl = path.parent.parent.parent / (path.parent.parent.name + ".jsonl")
-        dot_claude_dir = path.parents[4]
-        title_map = _build_title_map(dot_claude_dir)
-        parent_title = title_map.get(str(parent_jsonl.resolve())) or _synthesize_title(parent_jsonl)
-        session_title = f"{parent_title} [subagent]"
+    if "projects" not in path.parts:
+        # Not in the Claude Code layout (e.g. a plain notes.jsonl on the NAS). There is no
+        # `.claude` directory or parent session to look up, so the synthesized title is the
+        # only title. This is what such a file got before the Claude Code re-key.
+        session_title = _synthesize_title(path)
     else:
-        # path: .../projects/<mangled>/<uuid>.jsonl
-        dot_claude_dir = path.parents[2]
-        title_map = _build_title_map(dot_claude_dir)
-        session_title = title_map.get(str(path.resolve())) or _synthesize_title(path)
+        # The .claude directory is found by anchoring on the `projects` component, so the
+        # same code handles main sessions, direct subagents and workflow-depth subagents.
+        dot_claude_dir = claude_dot_claude_dir(path)
+        if "subagents" in path.parts:
+            # Subagent path: .../projects/<mangled>/<uuid>/subagents/[workflows/wf_X/]agent-xxx.jsonl
+            # The parent session is <mangled>/<uuid>.jsonl, whatever the depth below <uuid>.
+            idx = path.parts.index("subagents")
+            session_uuid = path.parts[idx - 1]
+            parent_jsonl = Path(*path.parts[: idx - 1]) / f"{session_uuid}.jsonl"
+            title_map = _build_title_map(dot_claude_dir)
+            parent_title = title_map.get(str(parent_jsonl.resolve())) or _synthesize_title(parent_jsonl)
+            session_title = f"{parent_title} [subagent]"
+        else:
+            # Main session path: .../projects/<mangled>/<uuid>.jsonl
+            title_map = _build_title_map(dot_claude_dir)
+            session_title = title_map.get(str(path.resolve())) or _synthesize_title(path)
 
     metadata = {
         FIELD_SESSION_ID:    session_id,
         FIELD_PROJECT:       project,
         FIELD_SESSION_TITLE: session_title,
     }
-    return text, metadata
+    return text, metadata, cwd or None
 
 
 def _parse_opencode_session(
     path: str, oc_api_url: str, password_env_file: str | None = None
-) -> tuple[str, dict]:
+) -> tuple[str, dict, str | None]:
     """
     Fetch an OpenCode 2.x session via its HTTP API and extract user/assistant text turns.
 
@@ -432,20 +453,22 @@ def _parse_opencode_session(
         newest-first by default, so we ask for order=asc; cursor.next is set while
         a page is non-empty, so the walk stops at the first empty page.
 
-    Returns (text, metadata) with session_id and session_title. No `project`
+    Returns (text, metadata, launch_dir) with session_id and session_title. No `project`
     field — opencode sessions have no path-derived project (the launch
     directory is cwd-at-launch metadata, not topic classification). The
     directory is preserved inside the searchable header body as forensic context.
+    launch_dir is location.directory verbatim, or None when the session has none.
+    It goes to the SQLite `launch_dir` column only, never into the Qdrant payload.
 
     HTTP, auth and non-JSON errors are RAISED, so the item is marked failed and
-    retried; only a session with no user/assistant text returns ("", {}).
+    retried; only a session with no user/assistant text returns ("", {}, None).
     """
     # Parse session_id from synthetic path
     if not path.startswith("opencode://"):
-        return "", {}
+        return "", {}, None
     session_id = path[len("opencode://"):]
     if not session_id:
-        return "", {}
+        return "", {}, None
 
     password = load_password(password_env_file)
 
@@ -503,7 +526,7 @@ def _parse_opencode_session(
                 turns.append(f"**Assistant**: {combined_text}")
 
     if not turns:
-        return "", {}
+        return "", {}, None
 
     # Synthesise session_title if absent or empty
     if not session_title:
@@ -534,7 +557,7 @@ def _parse_opencode_session(
         FIELD_SESSION_ID:    session_id,
         FIELD_SESSION_TITLE: session_title,
     }
-    return text, metadata
+    return text, metadata, launched_from or None
 
 
 def _parse_pptx(path: Path) -> str:
@@ -625,7 +648,7 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
     if file_type == "ipynb":
         return _parse_ipynb(path)
     if file_type == "jsonl":
-        text, _ = _parse_claude_chat(path)
+        text, _, _ = _parse_claude_chat(path)
         return text
     if file_type not in _DOCLING_TYPES:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -652,13 +675,15 @@ def is_text_like_path(file_path: str) -> bool:
     """
     True when ingest reads the file directly as UTF-8 text.
 
-    Text-like files are not docling, ipynb, jsonl or opencode sources. Only these get
-    the size cap, the NUL sniff and the replacement-character check. Shared with
-    utils/rag_purge_rescan.py so both tools apply one definition.
+    Text-like files are not docling, ipynb, jsonl, opencode or claude-session sources.
+    Only these get the size cap, the NUL sniff and the replacement-character check.
+    Shared with utils/rag_purge_rescan.py so both tools apply one definition.
     """
     raw_file_type = Path(file_path).suffix.lstrip(".").lower()
     return (
         not file_path.startswith("opencode://")
+        # A claude-session key has no file suffix, so without this it would look text-like.
+        and not file_path.startswith("claude-session://")
         and raw_file_type not in _DOCLING_TYPES
         and raw_file_type not in {"ipynb", "jsonl"}
     )
@@ -748,6 +773,8 @@ async def ingest_file(
     qdrant_client: QdrantClient,
     tag: str = "",
     embed_concurrency: int = 5,
+    origin_path: str | None = None,
+    last_modified: float | None = None,
 ) -> None:
     """
     Atomically parse, chunk, embed, and upsert one document into Qdrant.
@@ -774,6 +801,11 @@ async def ingest_file(
         tag:              Optional tag derived by the NFS scanner (e.g. "certifications").
         embed_concurrency: Max parallel Ollama embedding requests per file.
                           Controlled by --batch in rag_ingest_daemon.py (default 5).
+        origin_path:      Where the bytes are read, from the queue row. Required for
+                          claude-session:// keys (their key is not a path). NAS files
+                          read file_path directly, so origin_path is not needed for them.
+        last_modified:    Source modification time (UNIX seconds) from the queue row.
+                          Written to the payload as modified_at.
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
@@ -829,12 +861,19 @@ async def ingest_file(
         if file_path.startswith("opencode://"):
             oc_api_url = rag_cfg.get("opencode_api_url", "http://localhost:4096")
             oc_password_env_file = rag_cfg.get("opencode_password_env_file")
-            text, chat_meta = await asyncio.to_thread(
+            text, chat_meta, launch_dir = await asyncio.to_thread(
                 _parse_opencode_session, file_path, oc_api_url, oc_password_env_file
             )
             file_type = "opencode"
-        elif raw_file_type == "jsonl":
-            text, chat_meta = await asyncio.to_thread(_parse_claude_chat, Path(file_path))
+        elif file_path.startswith("claude-session://"):
+            # The key is a session identity, not a path. The real .jsonl is origin_path.
+            # A missing origin_path means the row was never scanned with the new code.
+            # Fail the item rather than guess a path.
+            if not origin_path:
+                raise RuntimeError(f"claude-session key with no origin_path recorded: {file_path}")
+            text, chat_meta, launch_dir = await asyncio.to_thread(
+                _parse_claude_chat, Path(origin_path)
+            )
             file_type = "claude_chat"
         else:
             if is_text_like:
@@ -857,6 +896,7 @@ async def ingest_file(
             text = await asyncio.to_thread(_parse_to_text, file_path, raw_file_type)
             file_type = raw_file_type
             chat_meta = {}
+            launch_dir = None  # files have no launch directory
 
         # Replacement-character check for text-like files. It runs on the text already
         # decoded above, so the file is not read a second time. U+FFFD is what the
@@ -879,7 +919,8 @@ async def ingest_file(
 
         if not text.strip():
             logger.warning("Empty document, skipping: %s", file_path)
-            state_db.mark_completed(file_path)
+            # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
+            state_db.mark_completed(file_path, chunk_count=0, pipeline_version="p1")
             return
 
         # Skip documents whose parsed text is mostly binary/garbage characters.
@@ -917,7 +958,8 @@ async def ingest_file(
 
         if not pairs:
             logger.warning("No chunks produced, skipping: %s", file_path)
-            state_db.mark_completed(file_path)
+            # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
+            state_db.mark_completed(file_path, chunk_count=0, pipeline_version="p1")
             return
 
         # ------------------------------------------------------------------
@@ -935,6 +977,34 @@ async def ingest_file(
             concurrency=embed_concurrency,
         )
         state_db.set_progress(file_path, f"embedding {n}/{n}")
+
+        # ------------------------------------------------------------------
+        # Hash and timestamps, computed before Step 5 because every point's payload
+        # carries them. The same now_iso goes to the payload's ingested_at and to the
+        # SQLite completed_at, so the two agree exactly.
+        #
+        # OpenCode content lives only in OpenCode's own DB, so it has no file to hash.
+        # Its hash fields stay NULL.
+        # ------------------------------------------------------------------
+        now_iso = datetime.now(timezone.utc).isoformat()
+        is_opencode = file_path.startswith("opencode://")
+        if is_opencode:
+            source_type = "opencode_session"
+            hash_size = hash_md5 = hashed_at = None
+        else:
+            # origin_path is the real file for claude-session keys. For NAS files it
+            # equals file_path (or is absent on rows that predate origin_path).
+            source_type = (
+                "claude_session" if file_path.startswith("claude-session://") else "file"
+            )
+            hash_size, hash_md5 = await asyncio.to_thread(hash_file, origin_path or file_path)
+            hashed_at = now_iso
+        # modified_at is the queue row's last_modified, as an ISO 8601 UTC string.
+        modified_at = (
+            datetime.fromtimestamp(last_modified, tz=timezone.utc).isoformat()
+            if last_modified is not None
+            else None
+        )
 
         # ------------------------------------------------------------------
         # Step 5: build PointStructs
@@ -972,6 +1042,12 @@ async def ingest_file(
                         FIELD_PAGE:        0,   # page-level tracking: future enhancement
                         FIELD_CHUNK_INDEX: chunk_idx,
                         FIELD_TAG:         tag,
+                        # Identity and freshness fields, on every point.
+                        FIELD_PROJECT_ID:   GLOBAL_PROJECT_ID,
+                        FIELD_SOURCE_TYPE:  source_type,
+                        FIELD_MODIFIED_AT:  modified_at,
+                        FIELD_INGESTED_AT:  now_iso,
+                        FIELD_CONTENT_HASH: hash_md5,
                         **chat_meta,
                     },
                 )
@@ -999,9 +1075,20 @@ async def ingest_file(
             )
 
         # ------------------------------------------------------------------
-        # Step 7: mark completed
+        # Step 7: mark completed, with the same metadata written to the points
         # ------------------------------------------------------------------
-        state_db.mark_completed(file_path)
+        state_db.mark_completed(
+            file_path,
+            chunk_count=len(points),
+            source_type=source_type,
+            file_type=file_type,
+            pipeline_version="p1",
+            size_bytes=hash_size,
+            content_hash=hash_md5,
+            hashed_at=hashed_at,
+            completed_at=now_iso,
+            launch_dir=launch_dir,
+        )
         logger.info(
             "Ingested %s: %d points  owner=%s  tag=%s",
             file_name, len(points), owner, tag or "—",

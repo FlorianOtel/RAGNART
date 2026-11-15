@@ -103,6 +103,10 @@ async def run(
                     state_db=state_db,
                     qdrant_client=qdrant_client,
                     embed_concurrency=embed_concurrency,
+                    # Where the bytes are read (claude-session keys need it) and the
+                    # source mtime written to the payload as modified_at.
+                    origin_path=row["origin_path"],
+                    last_modified=row["last_modified"],
                 )
                 processed += 1
             except Exception:

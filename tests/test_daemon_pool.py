@@ -53,7 +53,12 @@ def _fake_ingest(delay_for, calls: list[str], finished: list[str] | None = None)
     reflects what the pool did.
     """
 
-    async def fake_ingest_file(*, file_path, owner, rag_cfg, state_db, qdrant_client, embed_concurrency):
+    async def fake_ingest_file(
+        *, file_path, owner, rag_cfg, state_db, qdrant_client, embed_concurrency,
+        origin_path=None, last_modified=None,
+    ):
+        # origin_path and last_modified are accepted because the real worker always
+        # passes them. The fake does not use them.
         calls.append(file_path)
         await asyncio.sleep(delay_for(file_path))
         state_db.mark_completed(file_path)
