@@ -36,7 +36,7 @@ three tiers of material with different lifetimes.
 | --- | --- | --- | --- |
 | **Archive** | Files on the NAS: PDF, DOCX, PPTX, Markdown, text, YAML, notebooks, HTML, shell scripts | Periodic incremental scan (systemd timer) | Long-lived; follows the files on disk |
 | **Runtime** | AI-assistant sessions: Claude Code chat logs (`.jsonl`) and OpenCode sessions (through its HTTP API) | The same periodic ingestion | Long-lived; one record per session |
-| **Transient** | Material in flight for the current project: pages, files and notes gathered into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Gathered through the `ragnart` CLI and the assistant skill | Ephemeral: expires unless you **add** it to the project (then **distill** moves it into the project's references, which the Archive indexes) or **rm** it |
+| **Transient** | Material in flight for the current project: pages the assistant fetched, captured into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Captured as you work, by the assistant skill | Ephemeral: expires after 30 days unless you **keep** it (it then becomes a project resource, which the Archive indexes) or **drop** it |
 
 **Nested** means every chunk belongs to a project in a directory tree. A
 search can be scoped to one project, optionally including its sub-projects
@@ -133,7 +133,7 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | --- | --- |
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
 | **v0.2 — Nested** | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
-| **v0.3 — Project mode** | `ragnart` CLI (`init`, `add`, `add --wait`, `rm`, `distill`, `inbox`, …), the `/ragnart` assistant skill with scope and grounding, project memory (`MEMORY.md`), the Transient cache |
+| **v0.3 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral |
 | **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
 | **v0.5 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
 

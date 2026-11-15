@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items)
-updated_at: 2026-11-15--08-55
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry)
+updated_at: 2026-11-15--18-30
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,63 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-15--18-30 -- design session: the project workflow
+
+Design discussion with the operator (Claude Fable 5.2), documentation only. Starting question:
+how an operator works with RAGNART to get the NotebookLM, librarian interaction, and how
+material moves between the tiers. `docs/RAGNART-design.md` defined the tiers, the inbox, distill
+and `MEMORY.md`, but not the workflow. No code was changed.
+
+#### What was done
+
+Commit: the docs commit that adds this entry ("docs: project workflow; log: workflow design
+session").
+
+- **`docs/RAGNART-design.md`**: §7.3 rewritten as "Project workflow"; §7.4 "Project context" and
+  §7.5 "Transient lifecycle" defined; the `init` invariant in §4.5; §8 and §9 clarified; the
+  inbox row and deviation H in §1.2; decisions D3 and D3b updated, D4d, D9 and D10 added; open
+  items in §13.3 replaced.
+- **`docs/Implementation-plan.md`**: v0.3 (goal, entry criteria, work items, definition of done,
+  risks, decisions to confirm), the Terms paragraph, and the Transient expiry row (settled).
+- **`README.md`**: the Transient tier row and the v0.3 roadmap row.
+
+#### Decisions
+
+| # | Decision |
+| --- | --- |
+| 1 | `ragnart init` behaves like `git init`. `.ragnart/` is the project; there is no mode to enter or leave. |
+| 2 | Gather, work, distill and ask are activities, not workflow states. The only session state is scope and grounding; gather is grounding `open`. |
+| 3 | The harness learns of a project through three parts: a global `/ragnart` skill, a session-start hook, and the status line. |
+| 4 | The `ragnart` CLI is plumbing behind plain-language requests. The command prints the action line. |
+| 5 | Capture is ambient, by the skill's policy, and best-effort. The CLI fetches the source itself. Recorded as deviation H from git. |
+| 6 | The inbox is not vector-indexed (D3 stands). It expires after 30 days; a keep, or a listing by collateral, persists an item; a drop is undoable. |
+| 7 | Material the operator adds skips the inbox and becomes a resource, in the global collection under `project_id`. A project-local vector store was rejected. |
+| 8 | Distill produces collateral on demand, indexed as derived material (`source_type = collateral`). |
+| 9 | `MEMORY.md` is removed with no replacement file. The catalogue is `ragnart ls-files` and `ls-files --others`. |
+| 10 | The `init` invariant: `init` never changes what is indexed. An indexed folder gets `crawl`, `open`, capture off; an empty one gets `curated`, `strict`, capture on. |
+| 11 | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` reaches the web as its outermost extent. |
+
+#### Deviations from the plan
+
+- **The v0.3 entry criterion "Transient lifecycle defined" is met by this session**, ahead of
+  v0.2, and removed from Plan Section 6 v0.3.
+- **v0.3's work items changed.** The `distill` and `inbox` commands and `MEMORY.md` are gone;
+  `capture`, `drop`, `note`, the session-start hook and the status line are added.
+- **Filled in while writing, without a separate discussion:** the command names `capture`, `drop`
+  and `note`; the `.ragnart/dropped/` folder; `ragnart gc` deleting expired and dropped items;
+  the `project.toml` keys `scope`, `grounding`, `capture` and `inbox_expiry_days`.
+
+#### Open items
+
+Recorded in `docs/RAGNART-design.md` §13.3:
+
+- The write path for project actions from hosts other than Server 2 (the API is read-only).
+- The OpenCode equivalent of the session-start hook (unverified).
+- Where a session's scope and grounding are stored, for the status line.
+- How a capture that is not Markdown records its origin.
+- Video transcripts: capture has no transcript fetcher.
+- Kotaemon as the view of a project's resources and inbox.
 
 ### 2026-11-14--10-00 to 2026-11-15--09-00 -- v0.2 fix-first items 0-4: corpus hygiene, .ragignore, sync guards, read-only CLI
 

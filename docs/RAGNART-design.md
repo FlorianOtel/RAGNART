@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5)
-updated_at: 2026-11-15--09-05
+updated_by: Claude Code (Claude Fable 5.2)
+updated_at: 2026-11-15--18-30
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -34,7 +34,8 @@ It has two jobs:
 
 Its origin is a self-hosted NotebookLM: a per-project set of sources that a conversation is
 grounded in. That idea is generalised here into projects whose context is available
-automatically, built up by gathering material and distilling it into references.
+automatically, built up by capturing material as the work goes, keeping what matters, and
+producing collateral from it (§7.3).
 
 **Principles.** Every design decision below follows from these.
 
@@ -64,7 +65,7 @@ a **Status** line. Summary:
 | State-database metadata and payload fields beyond today's (§4.3, §4.4), schema version (§4.1), per-item pipeline version | v0.2 |
 | Projects, `project.toml`, tags, grants, `resolve_scope()` / `authorize()` (§4.5, §6) | v0.2 (data model); authentication and grant management: v0.5 |
 | Scope and grounding in the API and the `/ragnart` skill and commands (§8) | API scope and project listing: v0.2; skill and commands: v0.3 |
-| Project mode, distill, `MEMORY.md`, `add --wait` (§7.3, §7.4) | v0.3, after the Transient lifecycle is defined (§13.3) |
+| Project workflow: `init`, capture, the inbox, keep and drop, collateral, `add --wait`, the `/ragnart` skill, the session-start hook and the status line (§7.3 to §7.5) | v0.3 |
 | Retrieval-quality knobs and calibration (§9) | `max_hits_per_source` and collapse: v0.2; other knobs and calibration: v0.3 |
 | Deletion rules (§10.2), reconciliation (§10.3) | Guards, owner scoping and synchronous Qdrant deletes: built. Tombstone and grace period, reconciliation: v0.2. Purge record: not yet scheduled (§13.2) |
 | OpenCode database backup (§10.5) | v0.2 |
@@ -80,7 +81,8 @@ each deviation are recorded here and in decision D7 (§14).
 
 | git concept | RAGNART | Note |
 |---|---|---|
-| Working tree | The NAS sources under the NFS roots | The authority. RAGNART does not modify them. The only files it writes there are `.ragnart/project.toml` (by `init`, planned) and lines appended to `.ragignore` files (by `rm`, planned, deviation B). |
+| Working tree | The NAS sources under the NFS roots | The authority. RAGNART does not modify them. It writes only inside `.ragnart/` directories (planned, §7.3) and appends lines to `.ragignore` files (by `rm`, planned, deviation B). |
+| Untracked files | A project's inbox, `.ragnart/inbox/` | On disk and not in the index (§7.1). |
 | Staging area | Queue rows with status `pending` | Queued for ingestion, not yet indexed. |
 | Committed content | The index: Qdrant points and `completed` queue rows | Derived from the NAS (§10.1). |
 | Repository (`.git`) | Project (`.ragnart/project.toml`) | Addressed by path (§4.5). `init` (planned) is `git init`. |
@@ -88,16 +90,16 @@ each deviation are recorded here and in decision D7 (§14).
 | `core.excludesFile` | `config/ragignore` | Global exclusion rules with the lowest precedence. There is no `.git/info/exclude` equivalent. |
 | System, global and local config | `ragnart.yaml`, then `project.toml`, then the request | Each level overrides the one before it (§9.2). |
 | `git status` | `ragnart status` (built) | Queue and Qdrant counts; `--ignored` lists ignored files with their reason. |
-| `git ls-files`, with `--others`, `--ignored`, `--stage` | `ragnart ls-files` (built), same flags | Without a flag, lists indexed files. `--stage` lists every queue row with its status. |
+| `git ls-files`, with `--others`, `--ignored`, `--stage` | `ragnart ls-files` (built), same flags | Without a flag, lists indexed files. `--stage` lists every queue row with its status. Planned: scoped to a project, the listing is the project's catalogue, and `--others` lists its inbox (§7.4). |
 | `git check-ignore -v` | `ragnart check-ignore -v` (built) | Prints the file, line and pattern that decide each path. |
-| `git add` | `ragnart add` and `ragnart add --wait` (planned) | `add` queues; `add --wait` blocks until the item is indexed (deviation E). |
+| `git add` | `ragnart add` and `ragnart add --wait` (planned) | `add` queues; `add --wait` blocks until the item is indexed (deviation E). On an inbox item, `add` is the operator's "keep" (§7.3). |
 | `git rm` | `ragnart rm` (planned) | Appends an anchored line to the nearest `.ragignore`; never deletes a file (deviation B). |
 | `git mv` | `ragnart mv` (planned) | Move detection by `content_hash` (§4.2); nothing is re-embedded. |
 | `git diff` | `ragnart diff` (planned) | The plan of the next sync, shown without applying it. |
 | `git fsck` | `ragnart fsck` (planned) | Reconciliation (§10.3). |
-| `git gc` | `ragnart gc` (planned) | Purges tombstones after the grace period (§10.2). |
+| `git gc` | `ragnart gc` (planned) | Purges tombstones after the grace period (§10.2), and removes expired and dropped inbox items (§7.5). |
 | Staging everything on each run (`git add -A`) | Static policy, run by the timer | Every 6 hours, all files that the inclusion and exclusion rules admit (§7.2). |
-| Staging chosen paths (`git add <path>`) | Curated policy: `add` and `distill` | Only what a project chooses (§7.2, §7.3). |
+| Staging chosen paths (`git add <path>`) | Curated policy: `add` | Only what a project chooses (§7.2, §7.3). |
 | `git commit`, `git log`, branches, remotes | None | Deviation F. The snapshot pairs (§10.4) are the nearest equivalent to tags and restore. |
 
 **Deviations from git.** Each deviation is named by a letter and states its reason.
@@ -110,7 +112,7 @@ each deviation are recorded here and in decision D7 (§14).
 - **B. `rm` appends a rule and never deletes a file.** `ragnart rm <path>` (planned) adds an
   anchored pattern to the nearest `.ragignore`. *Why:* the exclusion is durable, visible in a text
   file, and reversed by removing its line. The NAS is the authority, so RAGNART does not delete
-  files from it.
+  files from it. The one exception is files under a project's `.ragnart/` (§7.5).
 - **C. Symbolic links are followed.** The walk follows links, and patterns match the path as
   walked, never a resolved path. A file reached through several links is queued once, under the
   first path the walk meets. *Why:* `Gitlab--fotel` is reached through a link, and a rule should
@@ -131,6 +133,11 @@ each deviation are recorded here and in decision D7 (§14).
   error: the sync exits with a non-zero code and runs no deletion phase. *Why:* an exclusion that
   cannot be read must neither admit content it would exclude nor delete content it would keep.
   Continuing would do one or the other.
+- **H. Capture is ambient.** In a project with capture on, a page the agent fetches is written to
+  the inbox without a command from the operator, by the policy of the `/ragnart` skill (§7.3).
+  *Why:* git records nothing unless asked. Project work finds its material during a conversation,
+  and a command per item would interrupt it. Captured material stays out of the index until the
+  operator keeps it, so the index still changes only by a deliberate act.
 
 **`.ragignore` semantics.** The format and matching are those of `.gitignore`:
 
@@ -229,7 +236,7 @@ split into many chunks (Qdrant points).
 | NAS file | Full path, e.g. `/mnt/nfs/Florian/…/report.pdf` |
 | Claude Code session | `claude-session://<session uuid>` |
 | OpenCode session | `opencode://<session id>` |
-| Captured page, upload | Its path in the project's inbox; the URL is an attribute |
+| Captured page, operator-added file, note, collateral | Its path under the project's `.ragnart/`; the URL of a capture is an attribute |
 
 Three kinds of identifier exist, and only the natural key serves as identity:
 
@@ -262,7 +269,7 @@ One row per item in the state database. Changing a value here is cheap.
 | Field | Meaning |
 |---|---|
 | key | Natural key (§4.2), primary key |
-| `source_type` | `file`, `claude_session`, `opencode_session`, `web_capture`, `upload` |
+| `source_type` | `file`, `claude_session`, `opencode_session`, `web_capture`, `upload`, `collateral` |
 | `file_type` | Extension class: `pdf`, `md`, `txt`, … |
 | `project_id` | Project the item belongs to (§4.5) |
 | `owner` | Accountable person (metadata, §6) |
@@ -310,7 +317,10 @@ A **project** is a directory that contains `.ragnart/project.toml`:
 name = "Acme"                      # required, human-readable
 id   = "3f9c2e1a-6d1b-4c0e-9a57-2b8f0c4d7e11"   # written by `ragnart init`; never edited
 inherit_access = true              # optional, default true (§6.3)
-mode = "curated"                   # optional: curated (default) | crawl (§7.4)
+mode = "curated"                   # curated | crawl; written by `ragnart init` (§7.4)
+grounding = "strict"               # optional: default grounding in this project (§8.2)
+capture = true                     # optional: ambient capture into the inbox (§7.3)
+inbox_expiry_days = 30             # optional: lifetime of an inbox item (§7.5)
 kind = "customer"                  # optional tags: any key = value
 segment = "ISV"
 ```
@@ -323,7 +333,7 @@ segment = "ISV"
 - **Parent** is the nearest ancestor directory that is also a project. Each NFS root is a
   top-level project; unmarked directories belong to the enclosing project.
 - **Tags** are arbitrary `key = value` pairs (every key except the reserved `name`, `id`,
-  `inherit_access`, `mode`). They are stored as rows `(project_id, key, value)`. On each sync
+  `inherit_access`, `mode`, `scope`, `grounding`, `capture`, `inbox_expiry_days`). They are stored as rows `(project_id, key, value)`. On each sync
   (and on the `ragnart` command) the tag set read from `project.toml` replaces the stored set:
   changing `industry = "ISV"` to `segment = "ISV"` deletes one row and adds one, for the same
   `project_id`. A tag filter is resolved to a set of project ids in the database before the
@@ -332,6 +342,18 @@ segment = "ISV"
 Tables: `projects` (id, parent, path, name, owner, inherit_access, mode), `project_tags`,
 `project_links` (a project referencing another), `source_links` (one item referenced from
 another project; an alias symlink becomes such a link), `grants` (§6).
+
+**The `init` invariant: `ragnart init` never changes what is indexed.** It chooses the project's
+settings from the state of the folder, writes them to `project.toml`, and prints them:
+
+| Folder at `init` | `mode` | `grounding` | `capture` |
+|---|---|---|---|
+| Holds indexed content | `crawl` | `open` | `false` |
+| Holds no indexed content | `curated` | `strict` | `true` |
+
+A folder that is already indexed, such as a code repository, stays indexed in full and keeps
+ordinary session behaviour. A new folder becomes a knowledge project. The operator changes any of
+the three settings afterwards by editing `project.toml`.
 
 ## 5. Pipeline `p1`
 
@@ -515,85 +537,197 @@ grants shaped for persons and groups) is in place from v0.2 so nothing has to be
 
 | Tier | Lifecycle | Where | Vector-indexed | Leaves the tier by |
 |---|---|---|---|---|
-| **Transient** | Material in flight: gathered, not yet judged | Files in a project's `.ragnart/inbox/`, or an attached folder | **No.** The agent reads the files directly. | Distill (becomes an Archive reference), `rm`, or expiry |
-| **Archive** | Persistent | NFS roots (static crawl) and project references (curated) | Yes | The file is removed (after the grace period, §10.2) |
+| **Transient** | Material in flight: captured, not yet kept | Files in a project's `.ragnart/inbox/`, or an attached folder | **No.** The agent reads the files directly. | Keep (becomes a resource in the Archive), drop, or expiry after 30 days (§7.5) |
+| **Archive** | Persistent | NFS roots (static crawl); project resources and collateral (curated) | Yes | The file is removed (after the grace period, §10.2) |
 | **Runtime** | Persistent session record; a specific case of Archive | Claude Code and OpenCode sessions | Yes | — |
 
 There is **one persistent store** (the `documents` collection, an alias of `documents_new`)
 and **one pipeline**. The Transient tier is an ephemeral cache, not a store: material there is
-used while work is in progress and becomes persistent only by being curated.
+used while work is in progress and becomes persistent only by being kept.
 
 ### 7.2 Two ingestion policies
 
 | Policy | What enters | Trigger |
 |---|---|---|
 | **Static** | Every file under the NFS roots that `ragnart.yaml` includes and no rule of §1.2 excludes, plus every Claude Code and OpenCode session | `ragnart-ingest.timer`, every 6 hours |
-| **Curated** | A project's references (`sources/`, `notes/`) and its `MEMORY.md` | Distill, then the next ingestion run, or `add --wait` for that project |
+| **Curated** | A project's resources (`.ragnart/resources/`, and items linked into the project) and its collateral (`.ragnart/collateral/`) | An operator add, a keep or new collateral: `add --wait` for that item, or the next ingestion run |
 
 Archive curation is blunt: a file that exists is indexed; a file that is removed has its
 chunks removed. Nothing else decides.
 
-### 7.3 Project mode: gather → distill
+### 7.3 Project workflow
 
-Project mode is RAGNART's reason to exist. Work in a project has two phases:
+**Status.** Not yet built; v0.3.
 
-| | Gather | Distill |
+Project work is RAGNART's reason to exist. It follows the dynamics of working with git:
+`ragnart init` once, then ordinary sessions in which the operator's requests are understood as
+actions on the project.
+
+**A project is a marker on disk.** `ragnart init` creates `.ragnart/` (§4.5). A session is in a
+project because a `.ragnart/` directory is at or above its working directory, as a `.git` directory
+makes a repository. There is no mode to enter or leave. Removing `.ragnart/` removes the project's
+identity, inbox, resources and collateral, and the next sync removes their chunks from the index.
+
+```
+<project>/.ragnart/
+  project.toml     identity and settings (§4.5)
+  inbox/           Transient tier: captured material, not indexed (§7.5)
+  resources/       kept and operator-added material, and notes; indexed
+  collateral/      documents produced from the resources; indexed as derived material
+  dropped/         items set aside by a drop, until the grace period ends (§7.5)
+```
+
+**Four activities, no workflow states.** They interleave in any session and are not entered or
+left. The only session state is scope and grounding (§8).
+
+| Activity | What it is | Scope and grounding |
 |---|---|---|
-| Character | Wide, fast, no commitment | Narrow, deliberate |
-| Input | Links, documents, video transcripts, notes, search results | Everything gathered |
-| Lives in | The Transient tier | — |
-| Output | — | The project's **reference set** and its **project memory** |
+| Gather | A discussion in which material is found and captured | Grounding `open` (§8.1) |
+| Work | Ordinary session work on the material | Any |
+| Distill | A request that produces collateral | `project`, `strict` |
+| Ask | A question answered from the project | `project`, `strict`; widened only by the operator |
 
-**Distill** is the step from gather to the reference set, the deterministic counterpart of a session
-`/compact`. It is split in two:
+**Actions.** The operator speaks plain language. The agent, following the `/ragnart` skill (§7.4),
+translates a request into a `ragnart` command. The `ragnart` CLI is plumbing: the operator does
+not need to type it.
 
-- **Selection is deterministic.** Which items persist is decided by explicit rules (in
-  `project.toml`) and explicit `add` and `rm` decisions, recorded. The same inputs and rules give
-  the same persisted set.
-- **The summary is generated and contained.** The agent writes or updates the project memory;
-  it is a file, edited in place, whose entries point to the references they come from.
+| The operator says | Action | Command | Decided by |
+|---|---|---|---|
+| Nothing: the agent fetches a page while capture is on | The page is captured into the inbox | `ragnart capture <url>` | The skill's policy |
+| "add" a file or a URL | It becomes a resource directly, without passing through the inbox | `ragnart add --wait` | The operator |
+| "keep" an inbox item | It moves to `resources/` and is indexed | `ragnart add --wait` | The operator |
+| "drop" an item | It is set aside, and deleted after the grace period (§7.5) | `ragnart drop` | The operator |
+| "note" a remark | The remark is saved as a Markdown file in `resources/` | `ragnart note` | The operator |
+| A request for a summary, a presentation, a chart | Collateral is written to `collateral/` and registered | `ragnart add --wait` | The operator |
+| A question | A search at the current scope (§8) | The search API | The agent; read-only |
 
-Persisting means placing files: a selected item moves from `inbox/` to the project's references;
-the memory file is written. The Archive mechanics then index them like any other file.
+- **The command prints the action line; the model does not compose it.** For example:
+  `[ragnart · keep · 2 items → resources]`.
+- **A request that starts with an action verb is taken literally.** Any other wording is
+  interpreted, and the agent states its translation before acting, as it does for scope (§8.4).
+- **Every change to the index is an operator request.** Capture writes only to the inbox, which is
+  not indexed.
+- **Capture is best-effort.** It depends on the skill being followed. A page the agent fetched and
+  did not capture is still named in the session record.
+
+**Capture.** `ragnart capture <url>` fetches the page itself, so the inbox holds the source and not
+the agent's rendering of it.
+
+- Captured: pages, and PDF files behind a URL. Search-result lists are not captured.
+- A page is stored as Markdown with front matter: title, URL and fetch time.
+- A second capture of the same URL replaces the item and restarts its expiry.
+- A failed fetch is reported; it is never silent.
+
+**Operator add.** Material the operator adds is a deliberate act and skips the inbox.
+
+| Added | Result |
+|---|---|
+| A file outside the NFS roots | Copied into `resources/` |
+| A file already under an NFS root | Linked into the project (`source_links`, §4.5); not copied |
+| A URL | Captured into `resources/` |
+
+**Collateral.** Distill produces a document on demand from the project's resources: an executive
+summary, a presentation, a chart. The agent writes it at scope `project` and grounding `strict`.
+
+- Its front matter lists the resources it was made from.
+- It is indexed with `source_type = collateral`, so a result shows it as derived material and not
+  as a source. Its weight in results is a `type_weights` setting (§9.2).
+- An inbox item that it lists is kept.
+
+**The ask loop.** A question is asked at project scope. When the answer is "no good hits in this
+scope" (§8.3), the operator widens the scope or opens the grounding. What is found there can be
+added to the project: an Archive item as a link, a web page as a capture. The same question is then
+answered at project scope.
+
+Relations between resources are not recorded. Search relates them when a question is asked.
 
 ### 7.4 Project context
 
-Working in a project gives the same experience as a Claude Code session in a repository with
-its `CLAUDE.md`, docs and memory files: nothing has to be re-seeded, and the project's
-materials are seen in relation to one another.
+**Status.** Not yet built; v0.3.
+
+Working in a project gives the same experience as a Claude Code session in a git repository: the
+harness knows where it is, and nothing has to be re-seeded.
 
 | Layer | Content | Use |
 |---|---|---|
-| **Project memory** — `.ragnart/MEMORY.md` | An **index**: one line per reference or decision, with a pointer and a short hook, e.g. `- [Kickoff meeting](sources/2026-10-02-kickoff.md) — scope agreed; see decision D4` | Loaded automatically when working in the project; itself indexed and citable |
-| **Reference set** | The project's persisted references | Searched first (§8) |
+| **Resources** | `.ragnart/resources/` and the items linked into the project | Searched (§8) |
+| **Collateral** | `.ragnart/collateral/` | Searched; shown as derived material |
+| **Project sessions** | Claude Code and OpenCode sessions started in the project | Searched; weight set by `type_weights` (§9.2) |
 | **Working set** | The Transient tier: inbox and attached folders | Read directly by the agent |
+
+**The catalogue is a listing, not a file.** No index file is kept in the project: it would duplicate
+the state database and the inbox folder, and could disagree with them.
+
+- `ragnart ls-files`, scoped to the project, lists its resources and collateral.
+- `ragnart ls-files --others` lists its inbox, each item with its origin and expiry date.
+- The resource listing reads the state database, which only Server 2 opens (§10.3). From another
+  host it is served by the item-listing endpoint (§12). The inbox listing reads the folder.
+
+**How a session learns it is in a project.** Three parts, each mirroring how the harness knows git:
+
+| Part | Carries | Counterpart for git |
+|---|---|---|
+| The `/ragnart` skill, installed once for all projects | The action vocabulary (§7.3), the librarian rules (§8) and the capture policy. It is the same for every project and is refined over time. | The harness's built-in git instructions |
+| The session-start hook | Finds the nearest `.ragnart/` above the working directory and injects the project name, scope, grounding and a capped listing: counts and the most recent items. Outside a project it is silent. | "This is a git repository", and the status snapshot |
+| The status line | Project, scope, grounding and inbox count, at all times | The branch name |
+
+In Claude Code the hook runs on new, resumed and compacted sessions. The OpenCode equivalent is open
+(§13.3).
 
 - **Context is implicit by location** (the nearest `.ragnart/` above the working directory)
   and **explicit by path** from anywhere: "structure the docs the way
-  `~/Gin-AI/projects/AYA` does" loads AYA's memory and searches AYA's references.
-- **Context is alive.** Each session adds to it; distill runs whenever work is consolidated.
-- In a code repository the project's own `CLAUDE.md`, docs and git history are references;
-  RAGNART's memory lives under `.ragnart/` and never modifies tracked files.
+  `~/Gin-AI/projects/AYA` does" loads AYA's listing and searches AYA's resources.
+- **Context is alive.** Each session adds to it.
+- In a code repository the project's own `CLAUDE.md`, docs and git history are part of the folder;
+  RAGNART's files live under `.ragnart/` and it never modifies tracked files.
 
-**Ingestion mode per project** (`mode` in `project.toml`):
+**Project resources are not the harness's memory files.** Claude Code keeps its own memory files per
+working directory. RAGNART neither writes nor replaces them.
 
-| Mode | Indexed | Default for |
+| | Claude Code memory files | Project resources |
 |---|---|---|
-| `curated` | Only the project's references and `MEMORY.md`; everything else in the folder is excluded from the static crawl | Projects created by `ragnart init` |
-| `crawl` | The whole folder, as the static policy | Projects that should mirror a folder in full |
+| About | How to work in the project, and its state | What the material says |
+| Written by | The agent, on its own judgement | The operator's adds and keeps |
+| Reachable from | Claude Code, for that working directory | Any client; indexed and cited |
 
-Curated is the default because gathered material is noise until it is judged, and the session
-in which it was used is already archived and resumable in the Runtime tier.
+**Ingestion mode per project** (`mode` in `project.toml`, set by the `init` invariant of §4.5):
 
-Folders that must be searchable by meaning before curation are attached as reference material
-(which indexes them). Kotaemon uploads are deliberate acts and enter directly as references,
-followed by `add --wait`.
+| Mode | Indexed | Set by `init` for |
+|---|---|---|
+| `curated` | Only the project's resources and collateral; everything else in the folder is excluded from the static crawl | A folder that holds no indexed content |
+| `crawl` | The whole folder, as the static policy, with the project's resources and collateral | A folder that holds indexed content |
+
+In a curated project, captured material is noise until it is kept, and the session in which it was
+used is already archived and resumable in the Runtime tier.
+
+Folders that must be searchable by meaning before curation are attached as resources (which indexes
+them). Kotaemon uploads are operator adds: they enter directly as resources, followed by
+`add --wait`.
 
 ### 7.5 Transient lifecycle
 
-The detailed lifecycle of the Transient tier is defined in its own design step (§13.3), with
-the questions of a cache: admission, states and transitions, eviction, invalidation,
-write-back (distill), actors and access through the interfaces.
+**Status.** Not yet built; v0.3.
+
+The inbox is a cache of files. It is not vector-indexed, so capture, drop and expiry write nothing
+to Qdrant. The only write to the index is a keep.
+
+| Event | By the operator | Automatic |
+|---|---|---|
+| Enter | A file placed in `inbox/` | Capture (§7.3) |
+| Persist | "keep" | A piece of collateral lists the item as a source |
+| Leave | "drop" | Expiry, 30 days after capture (`inbox_expiry_days`) |
+
+- **Expiry is announced.** The inbox listing (§7.4) shows each item's expiry date.
+- **A drop is undoable.** A dropped item moves to `.ragnart/dropped/` and is deleted after the grace
+  period of §10.2. Until then a keep restores it.
+- **Dropping a resource** sets its file aside in the same way; its chunks leave the index through
+  the sync, under the deletion rules of §10.2. Dropping a linked item removes the link row and
+  leaves the file where it is.
+- **`ragnart gc` deletes** expired and dropped items. It runs in the ingestion run.
+- **RAGNART deletes files only under a project's `.ragnart/`**, never elsewhere on the NAS (§1.2,
+  deviation B).
+- **The inbox stays small.** Reading files directly works for a bounded working set, and expiry
+  keeps it bounded. A larger body of material is kept, which indexes it.
 
 ## 8. Retrieval: scope and grounding
 
@@ -611,7 +745,7 @@ without the other.
 
 | Value | Searches |
 |---|---|
-| `project` | The current project: its `MEMORY.md`, references and sub-projects, plus projects it links to |
+| `project` | The current project: its resources, collateral and sessions, its sub-projects, and the projects it links to. Inbox files are not searched: the agent reads them directly (§7.4) |
 | `<selection>` | Projects named explicitly: paths (`~/Gin-AI/projects/AYA`), subtrees (`~/Customers/`), tag filters (`kind=customer`, `segment=ISV`), in any combination |
 | `all` | Everything the principal is granted: the static crawl, all sessions, all accessible projects |
 | `none` | No retrieval |
@@ -620,8 +754,12 @@ without the other.
 
 | Value | Meaning |
 |---|---|
-| `strict` | Only retrieved material. Every statement cites its source. When the evidence is not there, the answer says so and stops. |
-| `open` | Retrieved material first, cited; beyond it the model's own knowledge. Cited statements come from RAGNART; uncited ones do not. |
+| `strict` | Only the material at the current scope: retrieved passages, and the inbox files of the current project, cited as inbox. Every statement cites its source. When the evidence is not there, the answer says so and stops. |
+| `open` | Retrieved material first, cited; beyond it the model's own knowledge and, as its outermost reach, the web. A statement is one of three kinds: cited from RAGNART; cited from a fetched page, which is captured (§7.3); or uncited, from the model. |
+
+`strict` governs every informational answer in the session, not only those for which the agent
+chose to search. Under `strict`, a statement of fact without a citation is a fault. Actions, such
+as editing a file or running a command, are not answers.
 
 ### 8.2 Defaults
 
@@ -631,6 +769,10 @@ Smallest first: the librarian is always on duty.
 |---|---|---|
 | Inside a project | `project` | `strict` |
 | Outside any project | `all` | `strict` |
+
+The defaults are tunable at three levels, each overriding the one before it, as the knobs of §9.2
+are: `ragnart.yaml`; the project's `project.toml` (`scope`, `grounding`), where `init` writes
+`grounding` by its invariant (§4.5); and the session or the single request (§8.4).
 
 ### 8.3 Visibility
 
@@ -650,6 +792,9 @@ No good hits in this scope. You may widen it (/ragnart scope …) or open the gr
 
 The response does not suggest where else to look.
 
+Between answers, the harness status line shows the project, scope, grounding and inbox count at all
+times (§7.4).
+
 ### 8.4 Changing scope and grounding
 
 Changes are made **only by the operator**, and always shown.
@@ -666,12 +811,14 @@ The agent never widens or narrows the scope, or opens the grounding, on its own 
 Narrowing works the same way as widening (`/ragnart scope project` returns to the current
 project).
 
+Capturing a page into the inbox (§7.3) changes neither the scope nor the grounding.
+
 ### 8.5 Examples
 
 | Situation | Status line and behaviour |
 |---|---|
 | In `~/Gin-AI/projects/RAGNART`: "what is our snapshot retention?" | `scope project … · grounding strict`; answer quotes `docs/RAG-strategy.md` with citations |
-| In RAGNART: "structure the docs the way AYA does" | Agent states "scope: `~/Gin-AI/projects/AYA`"; loads AYA's `MEMORY.md`, searches AYA |
+| In RAGNART: "structure the docs the way AYA does" | Agent states "scope: `~/Gin-AI/projects/AYA`"; loads AYA's listing, searches AYA |
 | Working on customer A: "which other customers use vendor ABC?" | Agent states "scope: `~/Customers/` except `~/Customers/A`"; results grouped by customer, each with its source |
 | "PDF files about Qdrant modified in the last month" | Filters `file_type=pdf`, `modified_at ≥ <date>` at the current scope |
 | "OpenCode sessions last week about snapshots" | Filters `source_type=opencode_session`, `modified_at ≥ <date>` |
@@ -730,13 +877,16 @@ RAGNART is therefore **predictable** rather than fixed:
 - **Pollution is visible.** A corpus health report lists sources that appear in the results of
   many unrelated queries, items with abnormal chunk counts, and low-quality text.
 
+These properties hold for search. They do not hold for inbox files, which the agent reads directly
+and which are not ranked (§7.5).
+
 ### 9.2 Knobs
 
 | Knob | Controls |
 |---|---|
-| `min_relevance` | Rerank score below which a hit is not a "good hit" |
+| `min_relevance` | Rerank score below which a hit is not a "good hit". It decides the "no good hits" stop (§8.3), which is what leads the operator to widen the scope (§7.3) |
 | `max_hits_per_source` | Per-source cap in one result list |
-| `type_weights` | Multipliers or exclusions by `file_type` / `source_type` |
+| `type_weights` | Multipliers or exclusions by `file_type` / `source_type`, including `collateral` and the session types |
 | `dense_fetch`, `sparse_fetch`, `fetch_cap` | Candidates brought to the reranker |
 | `rerank` | Reranking on or off |
 
@@ -802,9 +952,9 @@ the lock (§13.2). Reconciliation is part of v0.2; notifications are not yet sch
 
 - **Single writer.** The ingestion daemon changes the index only while it holds the ingestion lock
   (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`); a second daemon exits. `add --wait`,
-  `distill`, `add` and `rm` take the lock or hand their work to the ingestion run. `rag_state.db` is
+  `add`, `rm` and `gc` take the lock or hand their work to the ingestion run. `rag_state.db` is
   opened from Server 2 only.
-- **Idempotency.** Every operation (ingest a file, sync, backfill, distill, `add --wait`) can be
+- **Idempotency.** Every operation (ingest a file, sync, backfill, `add --wait`, `gc`) can be
   re-run safely after a crash.
 - **Failed sync.** A sync that refuses deletion or crashes does not stop the ingestion run. The
   daemon, the WAL checkpoint and the snapshot step still run. The run then exits with the sync's exit
@@ -852,10 +1002,11 @@ placement of Qdrant is decided after the cleanup, from measured memory use.
 
 | Interface | Role |
 |---|---|
-| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. Planned: project listing and resolution, item listing for metadata queries, grant management |
-| `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.3): `init`, `add`, `add --wait`, `rm`, `mv`, `diff`, `fsck`, `gc`, `distill`, `inbox`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
-| `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.3); today the `/rag` command. Scope and grounding (§8), librarian behaviour, project context loading, `distill` |
-| Kotaemon | Browser UI: project picker as scope, uploads as references, answers by its own model through the SoHoAI gateway |
+| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. Planned: project listing and resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
+| `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.3): `init`, `capture`, `add`, `add --wait`, `drop`, `note`, `rm`, `mv`, `diff`, `fsck`, `gc`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. In project work the CLI is plumbing, called by the agent (§7.3). Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
+| `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.3); today the `/rag` command. Scope and grounding (§8), librarian behaviour, the action vocabulary and the capture policy (§7.3) |
+| Session-start hook and status line (Claude Code, OpenCode) | Planned (v0.3). Project detection, and the project's state in every session (§7.4) |
+| Kotaemon | Browser UI: project picker as scope, uploads as resources, answers by its own model through the SoHoAI gateway |
 
 API versioning, the division of work between CLI, skill and API, and Kotaemon's fit are open
 (§13).
@@ -881,9 +1032,16 @@ reason. Mirrored trees are settled: `AWS--fotel` and `Gitlab--fotel` are both in
 
 ### 13.3 Undefined parts of the design
 
-- **Transient lifecycle** ("cache dynamics"): admission, states and transitions, eviction,
-  invalidation, distill rules, actors, interface-level access. To be defined before v0.3.
-- **Interfaces**: API versioning, CLI / skill / API division, Kotaemon fit.
+- **Project actions from hosts other than Server 2.** An add or a keep changes the state database,
+  which only Server 2 opens, and the API is read-only. The write path is not defined.
+- **Session-start hook in OpenCode.** The Claude Code hook is defined (§7.4); its OpenCode
+  equivalent is not verified.
+- **Where a session's scope and grounding are stored**, so that the status line can read them.
+- **Origin of a capture that is not Markdown.** A captured page carries its URL in its front
+  matter; where a captured PDF in the inbox records its URL is not defined.
+- **Video transcripts.** Capture has no transcript fetcher.
+- **Interfaces**: API versioning, CLI / skill / API division, Kotaemon fit, including Kotaemon as
+  the view of a project's resources and inbox.
 - **Sharing and ownership transfer**: mechanism in §6.4, not built.
 - **Authentication**: OAuth with group claims, when a second user exists.
 - **Notifications**: channel and events.
@@ -916,9 +1074,10 @@ reason. Mirrored trees are settled: `AWS--fotel` and `Gitlab--fotel` are both in
 | D1c | Payload carries filterable metadata; identical copies collapse; metadata and time filters; metadata-only queries from the state DB | Operator needs "PDF modified last month", "OpenCode sessions last week"; duplicates are noise | Indexes on type, time, hash; listing endpoint |
 | D2 | Everything is a project; grants to persons and groups; inheritance with opt-out; grants in the DB; roles `read`, `admin`; owner = metadata | One access concept instead of three; filesystem permissions unusable; NAS cannot hold access rules | `project_id` on every chunk; auth added later without backfill |
 | D2b | Projects addressed by path; `name` required; immutable `id` in `project.toml`; free tags, DB-only | KISS; moves must not touch Qdrant; tags change often | Tag edits are row updates |
-| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies; `curated` default | Gathered material is noise until judged; sessions already archive the work | No transient collection; distill places files; `add --wait` |
-| D3b | Project memory = indexed, citable `MEMORY.md` index; context implicit by location, explicit by path | The AYA-in-Claude-Code experience: no re-seeding | Skill loads the memory on entry |
+| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies; `curated` default | Captured material is noise until kept; sessions already archive the work | No transient collection; a keep places a file and indexes it; `add --wait` |
+| D3b | Project context = an on-demand listing of resources, collateral and inbox, with no index file; context implicit by location, explicit by path | No re-seeding. A file would duplicate the state database and the inbox folder, and could disagree with them | The session-start hook injects the listing |
 | D4 | Scope × grounding, orthogonal; defaults `project+strict` / `all+strict`; changes only by the operator, always shown; natural-language scope translated aloud | Librarian answers; no silent widening | Status line; `/ragnart` commands; required `scope` in the API |
+| D4d | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` reaches the model's knowledge and, outermost, the web | A code repository and a knowledge project need different defaults; an answer given without a search must not escape `strict` | `scope` and `grounding` in `project.toml`; three kinds of statement under `open` (§8.1) |
 | D4b | Retrieval-only | Librarian answers; clients already have models | No model gateway; client enforces strict grounding |
 | D4c | Predictable, not rigid; knobs at three levels; calibration with a labelled set; no auto-tuning | Corpus pollution is a permanent hazard; tuning needs primitives | `max_hits_per_source`, `type_weights`, `min_relevance`, `ragnart calibrate` |
 | D5 | NAS is the authority; reconciliation repairs and fails loudly; deletion rules; single writer | Mirror SoHoAI's robustness; NAS backups cover disasters | Guards in the sync; scheduled reconciliation |
@@ -927,3 +1086,5 @@ reason. Mirrored trees are settled: `AWS--fotel` and `Gitlab--fotel` are both in
 | D6 | Mirrored trees (`AWS--fotel`, `Gitlab--fotel`) are both indexed. The duplicated `_AWS` subtree is absent from the NAS | The remaining contents of the two trees differ | No deduplication rule in the scanner. A file reached through several links is queued once (§1.2, deviation C) |
 | D7 | RAGNART mirrors git in ingestion, exclusion and lifecycle. It uses git's command names where the mapping is exact, and its own terms elsewhere (§1.2). Deviations A to G are recorded in §1.2 with their reasons | Git already answers the questions this system asks: what is on disk, what is excluded and why, what would change, what is indexed. Its names are widely known, so one vocabulary serves the CLI and the docs | CLI verbs follow §12. `.ragignore` follows gitignore syntax and precedence. Each deviation carries its reason |
 | D8 | A pipeline version changes only on a major event: incompatibility with stored items, or a significant change of behaviour. Bug fixes and improvements stay in the current version (§4.1) | A version is a signal to the operator and to the calibration gate (§9.3). A new version per fix would make the signal meaningless and send every fix through the gate | Items affected by a fix are re-checked or re-ingested, with the version unchanged. A real new version re-embeds only the items still on the old version |
+| D9 | Project work follows the dynamics of git. `.ragnart/` is the project; a global `/ragnart` skill, a session-start hook and the status line make the harness aware of it; the `ragnart` CLI is plumbing behind plain-language requests. Capture is ambient and goes to an unindexed inbox that expires after 30 days; a keep or an operator add is the only way into the index; distill produces collateral, indexed as derived material (§7.3 to §7.5) | Gathering happens inside a conversation, so a command per item would interrupt it. Transient material must not cause writes or deletes in the shared index | Deviation H (§1.2). No workflow states beyond scope and grounding. `capture`, `drop` and `note` in the CLI; no `distill` or `inbox` command; no `MEMORY.md` |
+| D10 | The `init` invariant: `ragnart init` never changes what is indexed. A folder with indexed content gets `crawl`, `open` and capture off; a folder without gets `curated`, `strict` and capture on (§4.5) | A `curated` default would remove an existing folder's content from the index at `init` | `init` reads the index state of the folder, and prints the settings it writes |

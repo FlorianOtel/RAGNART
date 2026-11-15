@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6)
-updated_at: 2026-11-15--09-05
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5)
+updated_at: 2026-11-15--18-30
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -64,7 +64,7 @@ commit message and in the implementation log.
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
 | Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
 | Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator |
-| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, distill) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
+| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, session-start hook, capture, collateral) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
@@ -205,7 +205,7 @@ touch a project.
 | --- | --- |
 | v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
 | v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. One principal, granted every top-level project; the result equals today's owner filter. |
-| v0.3 | Project-mode actions (add, rm, distill, add --wait) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
+| v0.3 | Project-mode actions (capture, add, add --wait, drop, note, rm, gc) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
 | v0.4 | Kotaemon's login is mapped to a principal; still no authentication. |
 | v0.5 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
 
@@ -476,70 +476,87 @@ scoping work are each large enough to warrant a session).
 
 ### v0.3 — Project mode
 
-**Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3,
-§7.4, §8): the `ragnart` CLI, the `/ragnart` skill and commands with scope and
-grounding, the project memory, distill, and `add --wait`. The Transient tier is
-an ephemeral cache of files; nothing in this version creates a second vector
-index.
+**Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3 to
+§7.5, §8): the `ragnart` CLI as plumbing, the `/ragnart` skill with the action
+vocabulary, scope and grounding, the session-start hook and the status line,
+ambient capture into the inbox, keep and drop, collateral, and `add --wait`.
+The Transient tier is an ephemeral cache of files; nothing in this version
+creates a second vector index.
 
-**Entry criteria.** v0.2's Definition of done met. The Transient lifecycle
-("cache dynamics": admission, states, transitions, eviction, invalidation,
-distill rules, actors) is defined and recorded in `docs/RAGNART-design.md`
-§7.5 (design §13.3).
+**Entry criteria.** v0.2's Definition of done met.
 
 **Work items.**
 - `ragnart` CLI, built on the git mapping (`docs/RAGNART-design.md` §1.2):
-  `init` (writes `.ragnart/project.toml` with `name`, `id`,
-  `mode = "curated"`), `add`, `add --wait`, `rm` (appends a pattern to the
-  nearest `.ragignore`; never deletes a file), `mv`, `diff`, `fsck`, `gc`,
-  `distill`, and `where`, `inbox`, `expect`, `calibrate`, `grant`, `revoke`,
+  `init`, `add`, `add --wait`, `rm` (appends a pattern to the nearest
+  `.ragignore`; never deletes a file), `mv`, `diff`, `fsck`, `gc`, and
+  `capture`, `drop`, `note`, `where`, `expect`, `calibrate`, `grant`, `revoke`,
   `transfer`, which have no git equivalent. Plus the metadata listing (`ls`
   with type and time filters, answered from the state database).
   `status`, `ls-files` and `check-ignore` are not v0.3 work: they were
-  delivered with v0.2 item 0.
-- `.ragnart/inbox/` as the Transient cache: files only, project-scoped, with
-  the expiry and admission rules defined at kickoff.
-- Distill: deterministic selection (rules in `project.toml` and explicit
-  `add`/`rm`, recorded) and file placement into the project's references; the
-  agent updates `.ragnart/MEMORY.md` (an index of pointers and hooks, design
-  §7.4). Distill and `add --wait` take the ingestion lock.
+  delivered with v0.2 item 0. `ls-files` gains the project-scoped listing and
+  the inbox listing under `--others` (design §7.4).
+- `init` by its invariant (design §4.5): it never changes what is indexed. It
+  writes `.ragnart/project.toml` with `name`, `id`, and the `mode`, `grounding`
+  and `capture` it chose from the state of the folder, and prints them.
+- `.ragnart/inbox/` as the Transient cache (design §7.5): files only, not
+  indexed, 30-day expiry (`inbox_expiry_days`), `drop` with a grace period,
+  deletion by `gc` in the ingestion run.
+- Capture (design §7.3): `ragnart capture <url>` fetches the page itself and
+  writes Markdown with front matter to the inbox.
+- Operator add, keep and note (design §7.3): files placed in
+  `.ragnart/resources/`, or a link row for a file already under an NFS root,
+  then `add --wait`, which takes the ingestion lock.
+- Collateral (design §7.3): written to `.ragnart/collateral/`, indexed with
+  `source_type = collateral`; the inbox items it lists are kept.
 - Curated ingestion mode: the static crawl skips `curated` projects except
-  their references and `MEMORY.md`; `crawl` projects are indexed in full.
-- `/ragnart` skill and commands for Claude Code and OpenCode: scope and
-  grounding knobs, defaults `project + strict` inside a project and
-  `all + strict` outside, the status line, the "no good hits in this scope"
-  stop, one-off `ask`, verbose translation of natural-language scope, loading
-  the project's `MEMORY.md` on entry (design §8). `/rag` becomes an alias
-  (design §8.9).
+  their resources and collateral; `crawl` projects are indexed in full.
+- `/ragnart` skill for Claude Code and OpenCode: the action vocabulary and the
+  capture policy (design §7.3), scope and grounding knobs with defaults at
+  three levels (design §8.2), the status line, the "no good hits in this scope"
+  stop, one-off `ask`, verbose translation of natural-language requests.
+  `/rag` becomes an alias (design §8.9).
+- Session-start hook and harness status line (design §7.4): project detection,
+  and the project name, scope, grounding and a capped listing in every session.
 - `scope` becomes required on `GET /v1/search` once both clients use
   `/ragnart` (§4).
 - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
-  `.ragnart/inbox/`, `.opencode/` and `.agents/` to `config/ragignore` (or to a
-  `.ragignore`), so the NAS crawl excludes them (`docs/RAGNART-design.md` §1.2).
+  `.ragnart/inbox/`, `.ragnart/dropped/`, `.opencode/` and `.agents/` to
+  `config/ragignore` (or to a `.ragignore`), so the NAS crawl excludes them
+  (`docs/RAGNART-design.md` §1.2).
 - Retrieval calibration (design §9.2, §9.3): `min_relevance`, `type_weights`
-  and the fetch sizes as knobs at three levels; the labelled set with
-  `/ragnart expect`; `ragnart calibrate`.
+  (including `collateral` and the session types) and the fetch sizes as knobs
+  at three levels; the labelled set with `/ragnart expect`; `ragnart calibrate`.
 
 **Data migration & rollback.** None to `documents`. The cache is plain files;
-references enter through the normal ingestion pipeline.
+resources and collateral enter through the normal ingestion pipeline.
 
 **Definition of done.**
-- In a test project created with `ragnart init`: gather (add pages and files),
-  `rm` some, distill; after `add --wait` the distilled references and
-  `MEMORY.md` are returned by a `project + strict` search with citations, and
-  items removed with `rm` are excluded from the index after the next sync while
-  their files stay on disk.
+- `ragnart init` in an empty folder writes `curated`, `strict` and capture on;
+  in a folder with indexed content it writes `crawl`, `open` and capture off,
+  and the index is unchanged in both cases.
+- In a test project: pages fetched by the agent appear in the inbox listing
+  with an expiry date and are not in the index; after "keep" and an operator
+  "add", those items are returned by a `project + strict` search with
+  citations; a dropped item is restored by a keep within the grace period and
+  deleted by `gc` after it.
+- A piece of collateral is returned as derived material, and the inbox items
+  it lists are kept.
 - The same flow works in Claude Code and OpenCode.
 - Every answer shows the status line; scope changes happen only through the
   commands or a stated natural-language translation.
-- A `curated` project's non-reference files are not in the index.
+- A `curated` project's files outside its resources and collateral are not in
+  the index.
 
-**Risks.** Capture and curation depend on the skill being followed; nothing
-enforces it. Distill's generated hooks need review by the operator. Whether
-OpenCode loads skills from `~/.claude/skills` is unverified (§8).
+**Risks.** Capture and the action vocabulary depend on the skill being
+followed; nothing enforces it. Whether OpenCode loads skills from
+`~/.claude/skills`, and whether it has an equivalent of the session-start
+hook, is unverified (§8).
 
-**Decisions to confirm at kickoff.** The Transient lifecycle rules; expiry
-period; default distill rules for a new project.
+**Decisions to confirm at kickoff.** The open items of
+`docs/RAGNART-design.md` §13.3 that this version depends on: the write path
+for project actions from hosts other than Server 2; where a session's scope
+and grounding are stored; how a capture that is not Markdown records its
+origin.
 
 **Estimated sessions.** 1–2.
 
@@ -562,7 +579,7 @@ done any time. The plugin needs v0.2's `scope` parameter and
   each citation, librarian (strict) prompt by default (design §8.8). Registers
   through `KH_INDEX_TYPES`/`KH_INDICES` in `flowsettings.py`, modelled on
   Kotaemon's bundled GraphRAG index (`libs/ktem/ktem/index/file/graph`).
-- Uploads become references of the selected project (a deliberate act),
+- Uploads become resources of the selected project (an operator add),
   followed by `add --wait` (design §7.4).
 - Map the Kotaemon login to a principal and pass it on every call (§5, v0.4
   row). RAGNART still trusts the passed value until v0.5.
@@ -683,10 +700,10 @@ first); whether an invalid/missing token means "rejected" (HTTP 401) or
 ### Terms
 
 The vocabulary is defined in `docs/RAGNART-design.md`: tiers (§7.1),
-ingestion policies (§7.2), project mode and distill (§7.3), scope and
+ingestion policies (§7.2), the project workflow (§7.3), scope and
 grounding (§8.1). The project marker directory is `.ragnart/`; inside it,
-`inbox/` is the Transient cache and `sources/`, `notes/` and `MEMORY.md` are
-the project's references.
+`inbox/` is the Transient cache, `resources/` holds the project's kept and
+added material, and `collateral/` holds the documents produced from it.
 
 ### Future work (unscheduled)
 
@@ -732,7 +749,7 @@ improvements stay `p1`.
 
 | # | Item | Suggested default | Confirm at |
 | --- | --- | --- | --- |
-| 1 | Transient expiry | 30 days | v0.3 kickoff |
+| 1 | Transient expiry | 30 days | settled |
 | 2 | Grace period before purging missing Archive sources | 24 hours | v0.2 kickoff |
 | 3 | Missing-sources threshold that aborts a sync | 10% | v0.2 kickoff |
 | 4 | RAGNART service port on Server 2 | 8100 | settled |
