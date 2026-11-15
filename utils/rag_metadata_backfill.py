@@ -41,6 +41,12 @@ reads it back; correctness never depends on it.
 A per-row failure (file vanished, read error, Qdrant or OpenCode error) is logged with
 its key and reason and counted. That row keeps `pipeline_version` NULL, so a re-run
 retries it. The script exits non-zero if any row failed.
+
+Collisions: one session uuid can exist as two transcript files (copies in two project
+directories). Its old-key row can then find a row already under the same claude-session://
+key. That is resolved, not failed (see _resolve_collision()): the newer file wins, every
+Qdrant point under the key is deleted, and the key's row is re-queued as pending so the
+daemon re-ingests the winner.
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -317,10 +323,107 @@ def _migrate_nas(row, qdrant_client, state_db, now_iso) -> None:
     )
 
 
-def _migrate_claude(row, qdrant_client, state_db, now_iso) -> None:
-    """Claude Code transcript: hash and read its cwd, re-key in Qdrant and SQLite."""
+def _existing_row(state_db: StateDB, key: str) -> dict | None:
+    """The queue row stored under `key` (only file_path and origin_path), or None."""
+    row = state_db._conn.execute(
+        "SELECT file_path, origin_path FROM ingestion_queue WHERE file_path = ?",
+        (key,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _pick_winner(old_key: str, existing_origin: str | None) -> tuple[str, str | None]:
+    """
+    Return (winner, loser) between the old row's transcript and the existing row's origin.
+
+    The newer file by mtime wins. An exact mtime tie goes to the lexicographically greatest
+    path, the same rule scan_claude_chats uses. The two rules must agree: otherwise the next
+    scan would see a different origin_path than the one stored here, and re-queue the row.
+    A missing file always loses. If both are missing, nothing can be read, so this raises.
+    """
+    old_exists = os.path.isfile(old_key)
+    existing_exists = existing_origin is not None and os.path.isfile(existing_origin)
+    if not old_exists and not existing_exists:
+        raise FileNotFoundError(
+            f"both collision copies are missing: {old_key} and {existing_origin}"
+        )
+    if not existing_exists:
+        return old_key, existing_origin
+    if not old_exists:
+        return existing_origin, old_key
+    # Both exist: the greatest (mtime, path) pair is the winner.
+    ranked = sorted([old_key, existing_origin], key=lambda path: (os.path.getmtime(path), path))
+    return ranked[-1], ranked[0]
+
+
+def _resolve_collision(old_key: str, new_key: str, existing: dict, qdrant_client, state_db) -> None:
+    """
+    Resolve a row whose old key collides with an existing row under the new key.
+
+    Both rows describe the same session. The winner is the newer copy (see _pick_winner).
+    The loser's copy is a duplicate location and is not indexed.
+
+    Steps, in this order:
+      1. Delete every Qdrant point under new_key, and any under old_key. The winner is
+         re-ingested from scratch, so no point from either copy may survive. A point
+         that an earlier attempt already moved to new_key is removed here too.
+      2. One SQLite transaction: delete the old row, and reset the new-key row to 'pending'
+         with origin_path = winner and last_modified = winner's mtime.
+
+    Crash safety: the Qdrant deletes come first, then the single SQLite commit. A crash
+    before the commit leaves both rows as they were. A re-run finds the old row again,
+    repeats this function, and its delete matches nothing already gone. Nothing is lost,
+    and the result is the same.
+    """
+    winner, loser = _pick_winner(old_key, existing["origin_path"])
+    winner_mtime = os.path.getmtime(winner)
+
+    for key in (new_key, old_key):
+        qdrant_client.delete(
+            collection_name=DOCUMENTS_COLLECTION,
+            points_selector=FilterSelector(filter=_source_filter(key)),
+            wait=True,
+        )
+
+    # One transaction for both statements. sqlite3 opens it implicitly on the first DELETE,
+    # and the commit makes both changes durable together. A failure rolls both back.
+    conn = state_db._conn
+    try:
+        conn.execute("DELETE FROM ingestion_queue WHERE file_path = ?", (old_key,))
+        conn.execute(
+            "UPDATE ingestion_queue SET origin_path = ?, last_modified = ?, status = 'pending', "
+            "pipeline_version = NULL, chunk_count = NULL, started_at = NULL, completed_at = NULL, "
+            "error_msg = NULL, retry_count = 0 WHERE file_path = ?",
+            (winner, winner_mtime, new_key),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    logger.info(
+        "Collision resolved for %s (old key %s): winner=%s loser=%s",
+        new_key, old_key, winner, loser,
+    )
+
+
+def _migrate_claude(row, qdrant_client, state_db, now_iso) -> bool:
+    """
+    Claude Code transcript: hash and read its cwd, re-key in Qdrant and SQLite.
+
+    Returns True when the row collided with an existing row under its new key and was
+    resolved by _resolve_collision(). Returns False for an ordinary re-key.
+    """
     old_key = row["file_path"]
     new_key = claude_jsonl_key(Path(old_key))
+
+    # A row already under the new key means the same session was queued from another copy.
+    # Resolve it before any Qdrant write for this row, so the re-key below cannot fail on it.
+    existing = _existing_row(state_db, new_key)
+    if existing is not None:
+        _resolve_collision(old_key, new_key, existing, qdrant_client, state_db)
+        return True
+
     # Read before the rename. A vanished transcript raises here, before any Qdrant write.
     size_bytes, content_hash, launch_dir = _hash_and_first_cwd(old_key)
     # The filter uses the OLD key, because the points still carry it. The payload
@@ -338,11 +441,8 @@ def _migrate_claude(row, qdrant_client, state_db, now_iso) -> None:
     # already run in an earlier attempt.
     chunk_count = _count_points(qdrant_client, new_key)
     # One UPDATE moves the row to its new key and writes the metadata. The old .jsonl
-    # path is kept in origin_path, where the bytes are read.
-    # Residual assumption: the new key cannot already exist as a row, because the backfill
-    # holds the single-writer lock and the ingest timer stays off until it completes. If a
-    # row with the new key did exist, this UPDATE raises IntegrityError; the row is then
-    # logged as failed and left for manual resolution.
+    # path is kept in origin_path, where the bytes are read. The existence check above
+    # guarantees no row sits under new_key, so this UPDATE cannot collide.
     _commit_row(
         state_db,
         "UPDATE ingestion_queue SET file_path = ?, origin_path = ?, source_type = ?, "
@@ -351,6 +451,7 @@ def _migrate_claude(row, qdrant_client, state_db, now_iso) -> None:
         (new_key, old_key, SOURCE_TYPE_CLAUDE, FILE_TYPE_CLAUDE, size_bytes, content_hash,
          now_iso, launch_dir, chunk_count, PIPELINE_VERSION, old_key),
     )
+    return False
 
 
 def process_one(
@@ -361,15 +462,18 @@ def process_one(
     now_iso: str,
     oc_api_url: str | None = None,
     oc_password: str | None = None,
-) -> None:
+) -> bool:
     """
     Migrate one row of the given kind. Raises on any failure; the caller records it.
 
     A journal row returns at once and writes nothing. A completed row must have
     completed_at, because it is copied verbatim into ingested_at.
+
+    Returns True only when a claude row collided with an existing row and was resolved
+    (see _resolve_collision()). Every other outcome returns False.
     """
     if kind == KIND_JOURNAL_SKIP:
-        return
+        return False
     if row["completed_at"] is None:
         raise ValueError("completed row has no completed_at; cannot set ingested_at")
 
@@ -377,12 +481,13 @@ def process_one(
         if oc_api_url is None or oc_password is None:
             raise ValueError("OpenCode row needs oc_api_url and oc_password")
         _migrate_opencode(row, qdrant_client, state_db, oc_api_url, oc_password)
-    elif kind == KIND_NAS:
+        return False
+    if kind == KIND_NAS:
         _migrate_nas(row, qdrant_client, state_db, now_iso)
-    elif kind == KIND_CLAUDE:
-        _migrate_claude(row, qdrant_client, state_db, now_iso)
-    else:
-        raise ValueError(f"unknown row kind {kind!r}")
+        return False
+    if kind == KIND_CLAUDE:
+        return _migrate_claude(row, qdrant_client, state_db, now_iso)
+    raise ValueError(f"unknown row kind {kind!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +559,7 @@ def run_backfill(
     kinds: Counter = Counter(kind for _, kind in classified)
     processed = 0
     skipped_journal = 0
+    collisions = 0
     errors: list[tuple[str, str]] = []
 
     for done, (row, kind) in enumerate(classified, start=1):
@@ -461,7 +567,8 @@ def run_backfill(
             skipped_journal += 1
         else:
             try:
-                process_one(row, kind, qdrant_client, state_db, now_iso, oc_api_url, oc_password)
+                if process_one(row, kind, qdrant_client, state_db, now_iso, oc_api_url, oc_password):
+                    collisions += 1
                 processed += 1
             except Exception as exc:  # per-row: log, count, continue; the row stays NULL
                 reason = f"{type(exc).__name__}: {exc}"
@@ -477,6 +584,7 @@ def run_backfill(
         "kinds": kinds,
         "processed": processed,
         "skipped_journal": skipped_journal,
+        "collisions": collisions,
         "errors": errors,
     }
 
@@ -510,6 +618,7 @@ def print_apply_summary(summary: dict) -> None:
     print(f"  candidates:        {summary['total']}")
     print(f"  processed:         {summary['processed']}")
     print(f"  skipped (journal): {summary['skipped_journal']}")
+    print(f"  collisions resolved: {summary['collisions']}")
     print(f"  errors:            {len(summary['errors'])}")
     for path, reason in summary["errors"]:
         print(f"    {path} — {reason}")

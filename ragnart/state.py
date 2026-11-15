@@ -230,6 +230,11 @@ class StateDB:
         branches below leave them alone.
 
         - New file:    inserted as 'pending' with the identity fields and first_seen_at = now.
+        - Winner moved: a given origin_path that differs from the stored one (a different
+                       copy of the same claude-session key now wins the scan) → origin_path
+                       is updated and the row reset to 'pending', with last_modified set to
+                       the given mtime. A stored NULL origin_path is not a change, and a
+                       None origin_path is never a change.
         - Modified:    disk mtime > stored mtime → reset to 'pending' (any status,
                        including 'ignored' — the file was replaced on disk).
         - Failed:      status = 'failed' (mtime unchanged) → reset to 'pending'
@@ -242,16 +247,36 @@ class StateDB:
         - Everything else (pending / processing / completed, mtime unchanged): no-op.
         """
         cur = self._conn.execute(
-            "SELECT last_modified, status FROM ingestion_queue WHERE file_path = ?",
+            "SELECT last_modified, status, origin_path FROM ingestion_queue WHERE file_path = ?",
             (file_path,),
         )
         row = cur.fetchone()
+        # The winning copy of a key changed when a non-NULL origin differs from the stored
+        # non-NULL origin. A NULL on either side is not a change (a pre-backfill NAS row
+        # has NULL origin_path, and must not be re-queued just for having it filled in).
+        origin_changed = (
+            row is not None
+            and origin_path is not None
+            and row["origin_path"] is not None
+            and row["origin_path"] != origin_path
+        )
         if row is None:
             self._conn.execute(
                 "INSERT INTO ingestion_queue "
                 "(file_path, owner, last_modified, status, origin_path, source_type, file_type, first_seen_at) "
                 "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
                 (file_path, owner, last_modified, origin_path, source_type, file_type, _now()),
+            )
+        elif origin_changed:
+            # A different copy of the same key now wins. Its own mtime is stored, and the row
+            # is re-queued so the winning file is ingested.
+            self._conn.execute(
+                "UPDATE ingestion_queue "
+                "SET status = 'pending', origin_path = ?, last_modified = ?, "
+                "    error_msg = NULL, retry_count = 0, skip_reason = NULL, "
+                "    started_at = NULL, completed_at = NULL, progress_detail = NULL "
+                "WHERE file_path = ?",
+                (origin_path, last_modified, file_path),
             )
         elif last_modified > row["last_modified"]:
             # File changed on disk — re-queue regardless of current status (including ignored).

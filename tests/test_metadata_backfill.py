@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from qdrant_client.models import FilterSelector
 
 from ragnart.state import StateDB
 
@@ -419,3 +421,171 @@ def test_checkpoint_line_written_every_hundred_rows(backfill, state_db, config, 
     lines = checkpoint.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert lines[0].split("\t")[1] == "100/100"
+
+
+# ---------------------------------------------------------------------------
+# Collisions: two copies of one session uuid, one new-key row already present
+# ---------------------------------------------------------------------------
+
+NEW_KEY = f"claude-session://{SESSION_UUID}"
+
+
+def add_new_key_row(state_db: StateDB, origin: str, mtime: float) -> None:
+    """A row already under the new key, as an earlier copy of the session left it: completed and migrated."""
+    state_db.discover_or_update(
+        NEW_KEY, OWNER, mtime, origin_path=origin, source_type="claude_session", file_type="claude_chat",
+    )
+    state_db.mark_completed(NEW_KEY, chunk_count=2, completed_at=COMPLETED_AT, pipeline_version="p1")
+
+
+def write_copy(claude_root: Path, project_dir: str, mtime: float, text: str = '{"type": "user"}\n') -> str:
+    """Write a second copy of the session under another project directory, with a fixed mtime."""
+    path = claude_root / project_dir / f"{SESSION_UUID}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return str(path)
+
+
+def deleted_keys(qdrant) -> list[str]:
+    """The source_path value of each delete call, in call order. Also checks wait=True on each."""
+    keys = []
+    for call in qdrant.delete.call_args_list:
+        assert call.kwargs["wait"] is True
+        assert isinstance(call.kwargs["points_selector"], FilterSelector)
+        keys.append(call.kwargs["points_selector"].filter.must[0].match.value)
+    return keys
+
+
+def test_collision_newer_old_copy_wins(backfill, state_db, qdrant, config, claude_root):
+    old = write_claude_transcript(claude_root)
+    os.utime(old, (2000.0, 2000.0))
+    other = write_copy(claude_root, "-mnt-y", 1000.0)
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, other, 1000.0)
+
+    summary = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert summary["errors"] == []
+    assert summary["collisions"] == 1
+    # Points under new_key (both copies' points) and any under old_key are deleted, before the SQLite commit.
+    assert deleted_keys(qdrant) == [NEW_KEY, str(old)]
+    qdrant.set_payload.assert_not_called()
+    # The old row is gone; the new-key row is pending with the newer file as origin.
+    assert row_of(state_db, str(old)) is None
+    row = row_of(state_db, NEW_KEY)
+    assert row["status"] == "pending"
+    assert row["origin_path"] == str(old)
+    assert row["last_modified"] == 2000.0
+    assert row["pipeline_version"] is None
+    assert row["chunk_count"] is None
+    assert row["completed_at"] is None
+    assert row["retry_count"] == 0
+
+
+def test_collision_newer_existing_copy_wins(backfill, state_db, qdrant, config, claude_root):
+    old = write_claude_transcript(claude_root)
+    os.utime(old, (1000.0, 1000.0))
+    other = write_copy(claude_root, "-mnt-y", 3000.0)
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, other, 3000.0)
+
+    summary = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert summary["collisions"] == 1
+    row = row_of(state_db, NEW_KEY)
+    assert row["status"] == "pending"
+    assert row["origin_path"] == other
+    assert row["last_modified"] == 3000.0
+
+
+def test_collision_identical_copies_with_equal_mtime_pick_greatest_path(backfill, state_db, qdrant, config, claude_root):
+    # Same bytes, same mtime: the tie rule is the greatest path, the same rule the scanner uses.
+    old = write_claude_transcript(claude_root)
+    os.utime(old, (1500.0, 1500.0))
+    other = write_copy(claude_root, "-mnt-y", 1500.0, text=Path(old).read_text(encoding="utf-8"))
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, other, 1500.0)
+
+    summary = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert summary["errors"] == []
+    assert summary["collisions"] == 1
+    assert row_of(state_db, NEW_KEY)["origin_path"] == max(str(old), other)
+    assert row_of(state_db, str(old)) is None
+
+
+def test_collision_with_missing_existing_origin_old_copy_wins(backfill, state_db, qdrant, config, claude_root):
+    old = write_claude_transcript(claude_root)
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, str(claude_root / "-mnt-y" / "gone.jsonl"), 9999.0)
+
+    backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert row_of(state_db, NEW_KEY)["origin_path"] == str(old)
+
+
+def test_collision_with_missing_old_copy_existing_wins(backfill, state_db, qdrant, config, claude_root):
+    # The old transcript has vanished, so nothing is read from it. The existing copy wins.
+    old_missing = str(claude_root / "-mnt-x" / f"{SESSION_UUID}.jsonl")
+    other = write_copy(claude_root, "-mnt-y", 1000.0)
+    add_completed(state_db, old_missing)
+    add_new_key_row(state_db, other, 1000.0)
+
+    summary = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert summary["errors"] == []
+    assert summary["collisions"] == 1
+    assert row_of(state_db, old_missing) is None
+    assert row_of(state_db, NEW_KEY)["origin_path"] == other
+
+
+def test_collision_with_both_copies_missing_fails_the_row_and_writes_nothing(
+    backfill, state_db, qdrant, config, claude_root
+):
+    old_missing = str(claude_root / "-mnt-x" / f"{SESSION_UUID}.jsonl")
+    add_completed(state_db, old_missing)
+    add_new_key_row(state_db, str(claude_root / "-mnt-y" / "gone.jsonl"), 1000.0)
+    before = row_of(state_db, NEW_KEY)
+
+    summary = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert summary["collisions"] == 0
+    assert len(summary["errors"]) == 1
+    qdrant.delete.assert_not_called()
+    assert row_of(state_db, old_missing)["pipeline_version"] is None
+    assert row_of(state_db, NEW_KEY) == before
+
+
+def test_collision_rerun_is_a_no_op(backfill, state_db, qdrant, config, claude_root):
+    old = write_claude_transcript(claude_root)
+    os.utime(old, (2000.0, 2000.0))
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, write_copy(claude_root, "-mnt-y", 1000.0), 1000.0)
+    backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+    after_first = row_of(state_db, NEW_KEY)
+    deletes_after_first = qdrant.delete.call_count
+
+    second = backfill.run_backfill(config, state_db, qdrant, None, False, 50)
+
+    assert second["total"] == 0
+    assert second["collisions"] == 0
+    assert row_of(state_db, NEW_KEY) == after_first
+    assert qdrant.delete.call_count == deletes_after_first
+
+
+def test_collision_repeated_from_the_old_row_repeats_harmlessly(backfill, state_db, qdrant, config, claude_root):
+    # A crash before the SQLite commit leaves the old row in place. Repeating the same
+    # row must land on the same final state, because the deletes then match nothing.
+    old = write_claude_transcript(claude_root)
+    os.utime(old, (2000.0, 2000.0))
+    add_completed(state_db, str(old))
+    add_new_key_row(state_db, write_copy(claude_root, "-mnt-y", 1000.0), 1000.0)
+    old_row = row_of(state_db, str(old))
+
+    assert backfill.process_one(old_row, "claude", qdrant, state_db, NOW_ISO) is True
+    after_first = row_of(state_db, NEW_KEY)
+    assert backfill.process_one(old_row, "claude", qdrant, state_db, NOW_ISO) is True
+
+    assert row_of(state_db, NEW_KEY) == after_first
+    assert row_of(state_db, str(old)) is None

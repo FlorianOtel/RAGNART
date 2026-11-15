@@ -305,9 +305,15 @@ def scan_claude_chats(
     with origin_path set to the real .jsonl path that ingestion reads. Workflow
     journals have no key and are not queued.
 
+    One session can exist as several transcript files (the same uuid in two project
+    directories, from copies made when a session moves). Within this scan, all copies
+    of one key compete: the newest copy (largest mtime) wins, and a tie goes to the
+    lexicographically greatest path. Each key is written once, from its winning copy,
+    so origin_path always follows the winner. The other copies are not queued.
+
     Returns:
         {
-          'scanned': N,                  # transcripts admitted to the queue this scan
+          'scanned': N,                  # session keys admitted to the queue this scan
           'existing_paths': set[str],    # every admitted key, for find_deleted()
           'skipped_roots': list[str],    # roots that could not be trusted this scan
         }
@@ -322,10 +328,15 @@ def scan_claude_chats(
         logger.info("No claude_chats roots configured — skipping chat scan")
         return {"scanned": 0, "existing_paths": set(), "skipped_roots": []}
 
-    scanned = 0
-    existing_paths: set[str] = set()
     skipped_roots: list[str] = []
     visited_real_files: set[str] = set()
+
+    # Pass 1: walk every root and keep the best copy of each key. Nothing is written
+    # yet, because two copies of one key may sit under different roots.
+    # best_by_key maps key -> (mtime, filepath, owner) of the current winner.
+    best_by_key: dict[str, tuple[float, str, str]] = {}
+    # (root, transcripts seen under it) for the empty-root check in pass 2.
+    walked_roots: list[tuple[str, int]] = []
 
     for entry in roots_cfg:
         root = entry.get("path", "")
@@ -359,23 +370,35 @@ def scan_claude_chats(
                     mtime = os.path.getmtime(filepath)
                 except OSError:
                     continue
-                state_db.discover_or_update(
-                    key,
-                    owner,
-                    mtime,
-                    origin_path=filepath,
-                    source_type="claude_session",
-                    file_type="claude_chat",
-                )
-                existing_paths.add(key)
-                scanned += 1
                 root_count += 1
 
-        logger.info("  → %d session(s) found in %s", root_count, root)
+                # Newest mtime wins. Comparing (mtime, path) tuples breaks an exact tie by
+                # the greatest path, so the choice is deterministic.
+                best = best_by_key.get(key)
+                if best is None or (mtime, filepath) > (best[0], best[1]):
+                    best_by_key[key] = (mtime, filepath, owner)
 
-        # An existing root that yielded no transcripts while the queue still holds rows
-        # whose origin_path lies under it is treated as unreachable, as scan_nfs_roots does
-        # for NFS roots. Its rows must not be deleted. The check is read-only.
+        logger.info("  → %d transcript(s) found in %s", root_count, root)
+        walked_roots.append((root, root_count))
+
+    # Pass 2: one write per key, from its winning copy.
+    existing_paths: set[str] = set()
+    for key, (mtime, filepath, owner) in best_by_key.items():
+        state_db.discover_or_update(
+            key,
+            owner,
+            mtime,
+            origin_path=filepath,
+            source_type="claude_session",
+            file_type="claude_chat",
+        )
+        existing_paths.add(key)
+
+    # Pass 3: the empty-root check. It runs after the writes, so it sees the queue as this
+    # scan leaves it. A root that yielded no transcripts while the queue still holds rows
+    # whose origin_path lies under it is treated as unreachable, as scan_nfs_roots does
+    # for NFS roots. Its rows must not be deleted. The check is read-only.
+    for root, root_count in walked_roots:
         if root_count == 0 and state_db.count_origin_with_prefix(os.path.join(root, "")) > 0:
             logger.warning(
                 "claude_chats root %s yielded 0 transcripts but the queue has rows under it; "
@@ -384,7 +407,11 @@ def scan_claude_chats(
             )
             skipped_roots.append(root)
 
-    return {"scanned": scanned, "existing_paths": existing_paths, "skipped_roots": skipped_roots}
+    return {
+        "scanned": len(best_by_key),
+        "existing_paths": existing_paths,
+        "skipped_roots": skipped_roots,
+    }
 
 
 def scan_opencode_sessions(
