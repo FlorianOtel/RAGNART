@@ -52,7 +52,23 @@ rag:
     sparse_fetch: 30                          # candidates from sparse prefetch branch
     rrf_k: 60                                 # RRF constant k (standard: 60)
 
+  # -- Ingestion admission (p1 admission rules, see docs/RAGNART-design.md §5) ---
+  # Applied by ragnart/ingest.py to every queued item before any embedding work.
+  # An item that breaks a rule is marked 'ignored' with the reason as skip_reason.
+  admission:
+    max_text_file_size_bytes: 5000000       # text-like files above this size are rejected before reading
+    max_chunks_per_item: 5000               # any item producing more chunks than this is rejected before embedding
+    fffd_ratio_threshold: 0.005             # text-like files whose decoded text has more U+FFFD replacement chars than this are rejected
+
+  # -- Sync safety (utils/rag_sync_nfs.py) ----------------------------------------
+  sync:
+    # Deletion is refused when it would remove more than this fraction of all
+    # completed rows in one run. Override for one run with --allow-mass-delete.
+    max_delete_fraction: 0.10
+
   # -- NFS scanner filters ------------------------------------------------------
+  # Inclusion rules only. Exclusions live in config/ragignore (global) and in
+  # per-directory .ragignore files under the crawled roots (see ragnart/ragignore.py).
   scanner:
     # File extensions to ingest (whitelist).
     include_extensions:
@@ -62,50 +78,12 @@ rag:
       - .md
       - .sh
       - .txt
-      - .csv
+      # - .csv               # disabled: bulk data exports (362k of 378k CSV points were dumps). Re-enable per need.
       - .yaml
       - .yml
       - .ipynb
       - .html
-      - .jsonl # Claude chats 
-    # Directory names/paths that os.walk will not descend into.
-    # All entries MUST have a trailing slash. Single-component entries (e.g. "Library/")
-    # match any directory with that exact name at any depth. Multi-component entries
-    # (e.g. "Microsoft--flotel/Documents/") match only that exact path-segment sequence.
-    # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
-    exclude_dir_names:
-      - ".Gin-AI-python-3.12/"  # Python virtualenv
-      - ".Gin-AI-python-3.12.old/"  # pre-2026-11-01 venv (machine-local interpreter); ingested by
-                                    # mistake 2026-11-01 because the entry above does not match it
-      - ".uv-python/"           # uv-managed Python interpreters on NFS (the venv's base, since 2026-11-01)
-      - "site-packages/"        # any virtualenv's installed packages, whatever the venv is called
-      - ".cache/"               # tool caches (uv archives, etc.)
-      - "__pycache__/"
-      - ".git/"
-      - "node_modules/"
-      - ".claude/"
-      - "dot.claude-Linux/"     # ~/.claude is symlinked here (NFS-hosted) — real on-disk dirname
-                                # doesn't match ".claude/" above; without this the generic NFS
-                                # scanner sweeps up history.jsonl, native-sessions/*.jsonl,
-                                # shell-snapshots/*.sh, and duplicates of claude_chats.roots content
-      - ".vscode/"
-      - ".venv/"
-      - "Library/"              # macOS stuff
-      - "Applications/"         # macOS stuff
-      - "LLMs-cache/"           # HuggingFace model cache — READMEs/licenses, not RAG content
-      - "Downloads/"            # garbage
-      - "Microsoft--flotel/Documents/"  # IRM/DRM-encrypted old PPTs — unrecoverable
-    # Directory name suffixes to skip (matched with str.endswith).
-    exclude_dir_suffixes:
-      - .dist-info             # pip package metadata
-    # Substrings — any filename containing one of these is skipped.
-    exclude_file_patterns:
-      - "@synoeastream"        # Synology NAS streaming metadata
-      - "._"                   # macOS AppleDouble resource fork sidecars (e.g. ._foo.pptx) —
-                               # created automatically by macOS on non-HFS+ filesystems (NFS/Synology);
-                               # same extension as the real file but binary metadata, not parseable
-      - "~$"                   # Microsoft Office lock/temp files (e.g. ~$foo.pptx) —
-                               # created while a document is open; tiny binary lock stubs, not real docs
+      - .jsonl # Claude chats
 
 # -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
 users:

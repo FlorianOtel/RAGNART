@@ -17,3 +17,26 @@ dependencies = [
     "tiktoken==0.12.0",
     "uvicorn==0.42.0",
 ]
+
+# Test-only dependencies. Install with: pip install -e ".[test]"
+[project.optional-dependencies]
+test = [
+    "pytest==9.0.3",
+]
+
+# Console entry point for the read-only CLI (ragnart/cli.py). Resolves once the package
+# is installed; `python -m ragnart` works from the checkout without an install.
+[project.scripts]
+ragnart = "ragnart.cli:main"
+
+# Build backend. Without an explicit package list, setuptools' flat-layout discovery
+# finds the top-level `assets`, `config` and `ragnart` directories and refuses to build.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+# Only the `ragnart` package is shipped. `config/ragignore` is deliberately not packaged:
+# ragnart/ragignore.py resolves it at runtime as <repo>/config/ragignore, relative to
+# its own __file__, which an editable install points back at the checkout.
+[tool.setuptools]
+packages = ["ragnart"]

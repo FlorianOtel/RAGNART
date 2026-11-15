@@ -54,9 +54,24 @@ def _now() -> str:
 class StateDB:
     """Ingestion queue CRUD for the RAG pipeline."""
 
-    def __init__(self, db_path: str) -> None:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str, read_only: bool = False) -> None:
+        """
+        Open the queue database.
+
+        With ``read_only=True`` the file is opened through a ``mode=ro`` URI and
+        nothing is written: no directory is created, WAL mode is not set, and the
+        schema and migrations do not run. The read-only CLI uses this. A write on
+        a read-only StateDB raises sqlite3.OperationalError. A missing file raises
+        sqlite3.OperationalError too; it is never created.
+        """
         self._db_path = db_path
+        if read_only:
+            # as_uri() percent-encodes characters that are special in a URI.
+            uri = Path(db_path).absolute().as_uri() + "?mode=ro"
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            return
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -153,9 +168,19 @@ class StateDB:
         # ignored (mtime unchanged), pending, processing, completed → no-op
         self._conn.commit()
 
-    def find_deleted(self, existing_paths: set[str]) -> tuple[list[str], list[str]]:
+    def find_deleted(
+        self,
+        existing_paths: set[str],
+        owners: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
         """
         Identify files no longer present in the scan without modifying SQLite.
+
+        Args:
+            existing_paths: every path the scan saw.
+            owners: if given, only rows owned by one of these owners are considered.
+                    A sync run for one user must not treat another user's rows as
+                    deleted. None considers every row.
 
         Returns:
             (completed_gone, all_gone):
@@ -166,9 +191,20 @@ class StateDB:
         Call purge_deleted(all_gone) after Qdrant cleanup so that a crash/kill between
         the two calls leaves SQLite intact — the next sync retries automatically.
         """
-        cur = self._conn.execute(
-            "SELECT file_path, status FROM ingestion_queue"
-        )
+        if owners is None:
+            cur = self._conn.execute(
+                "SELECT file_path, status FROM ingestion_queue"
+            )
+        elif not owners:
+            # No owners means no rows are in scope, so nothing can be gone.
+            return [], []
+        else:
+            # One placeholder per owner keeps the values parameterised.
+            placeholders = ",".join("?" * len(owners))
+            cur = self._conn.execute(
+                f"SELECT file_path, status FROM ingestion_queue WHERE owner IN ({placeholders})",
+                tuple(owners),
+            )
         all_rows = [(row["file_path"], row["status"]) for row in cur.fetchall()]
         gone = [(p, s) for p, s in all_rows if p not in existing_paths]
         if not gone:
@@ -190,6 +226,19 @@ class StateDB:
             (len(prefix), prefix),
         )
         return {row["file_path"] for row in cur.fetchall()}
+
+    def count_with_prefix(self, prefix: str) -> int:
+        """
+        Return how many queued rows have a file_path starting with prefix (any status).
+
+        Read-only. The scanner uses it with "<root>/" to tell whether the queue still
+        holds rows under an NFS root that now yields no files.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM ingestion_queue WHERE substr(file_path, 1, ?) = ?",
+            (len(prefix), prefix),
+        ).fetchone()
+        return int(row["n"])
 
     def purge_deleted(self, paths: list[str]) -> None:
         """
@@ -346,6 +395,25 @@ class StateDB:
         self._conn.commit()
         logger.info("Marked as ignored: %s — %s", file_path, reason)
 
+    def reset_to_pending(self, file_path: str) -> None:
+        """
+        Requeue one row for a fresh ingestion attempt.
+
+        Sets status to 'pending' with retry_count 0, and clears the error, skip reason
+        and timing fields, as discover_or_update() does when a file changes on disk.
+        Used by utils/rag_purge_rescan.py. The caller removes the row's Qdrant points
+        first, so no stale points survive the requeue.
+        """
+        self._conn.execute(
+            "UPDATE ingestion_queue "
+            "SET status = 'pending', retry_count = 0, skip_reason = NULL, error_msg = NULL, "
+            "    started_at = NULL, completed_at = NULL, progress_detail = NULL "
+            "WHERE file_path = ?",
+            (file_path,),
+        )
+        self._conn.commit()
+        logger.info("Requeued for re-parse: %s", file_path)
+
     # ------------------------------------------------------------------
     # Reporting
 
@@ -377,6 +445,24 @@ class StateDB:
             cur = self._conn.execute(
                 "SELECT file_path, owner, retry_count, error_msg "
                 "FROM ingestion_queue WHERE status = 'failed' ORDER BY file_path"
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_rows(self, status: str | None = None) -> list[dict]:
+        """
+        Return file_path and status for every queue row, sorted by file_path.
+
+        With ``status`` set, only rows in that status are returned.
+        """
+        if status:
+            cur = self._conn.execute(
+                "SELECT file_path, status FROM ingestion_queue "
+                "WHERE status = ? ORDER BY file_path",
+                (status,),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT file_path, status FROM ingestion_queue ORDER BY file_path"
             )
         return [dict(row) for row in cur.fetchall()]
 

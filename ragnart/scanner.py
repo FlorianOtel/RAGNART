@@ -6,16 +6,13 @@ Used by:
   (The orchestrator's POST /v1/rag/ingest/sync was removed 2026-11-04: the RAG
   state DB must only be opened from one host. See main.py's RAG SEARCH ENDPOINT note.)
 
-Exclusion rules are read from config["rag"]["scanner"] in ragnart.yaml.
-All four keys (include_extensions, exclude_dir_names, exclude_dir_suffixes,
-exclude_file_patterns) are required — missing config raises ValueError.
+Inclusion rules come from config["rag"]["scanner"]["include_extensions"] in
+ragnart.yaml. Exclusion rules come from config/ragignore (global) and from
+per-directory .ragignore files; both are applied by ragnart/ragignore.py.
 
-exclude_dir_names convention: every entry must have a trailing slash.
-Single-component entries (e.g. "Library/") match any directory named exactly
-"Library" at any depth. Multi-component entries (e.g. "Microsoft--flotel/Documents/")
-match any directory whose full path ends with that exact path segment sequence.
-Matching is done against the full child path, so "Library/" will NOT match
-"PublicLibrary/" — the leading "/" in the suffix check enforces an exact boundary.
+ragnart.yaml must not carry the removed exclude_dir_names, exclude_dir_suffixes
+or exclude_file_patterns keys. A config that still has one of them raises
+ValueError, so a stale exclusion is never silently ignored.
 """
 
 from __future__ import annotations
@@ -26,53 +23,102 @@ import urllib.error
 from pathlib import Path
 
 from .opencode_client import get_json, load_password
+from .ragignore import RagIgnoreMatcher
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
 
 
+# The ragnart.yaml keys that exclusions used to live in. Exclusions now live in
+# config/ragignore and per-directory .ragignore files. A config that still sets
+# one of these keys is refused.
+_REMOVED_EXCLUDE_KEYS = ("exclude_dir_names", "exclude_dir_suffixes", "exclude_file_patterns")
+
+
 # ---------------------------------------------------------------------------
-# Filter helpers — accept sets built from config
+# Inclusion helper
 # ---------------------------------------------------------------------------
 
-def _is_excluded_dir(
-    dirpath: str,
-    dirname: str,
-    skip_patterns: tuple[str, ...],
-    skip_suffixes: tuple[str, ...],
-) -> bool:
-    full_child = os.path.join(dirpath, dirname)
-    for pattern in skip_patterns:
-        # Strip trailing slash, prepend "/" to enforce exact path-boundary match.
-        # "Library/" matches ".../Library" but not ".../PublicLibrary".
-        # "Microsoft--flotel/Documents/" matches ".../Microsoft--flotel/Documents".
-        p = pattern.rstrip("/")
-        if full_child.endswith("/" + p):
-            return True
-    for suffix in skip_suffixes:
-        if dirname.endswith(suffix):
-            return True
-    return False
+def is_includable(path: str, include_exts: frozenset[str]) -> bool:
+    """
+    True if the file's extension is on the include whitelist (case-insensitive).
+
+    This is the inclusion half of the scanner's rules only. Exclusion rules
+    (config/ragignore and .ragignore files) are not applied here. Callers that
+    need them use RagIgnoreMatcher as well.
+    """
+    return Path(path).suffix.lower() in include_exts
 
 
-def _should_include(
-    path: Path,
-    include_exts: frozenset[str],
-    exclude_patterns: tuple[str, ...],
-) -> bool:
-    if path.suffix.lower() not in include_exts:
-        return False
-    for pattern in exclude_patterns:
-        if pattern in path.name:
-            return False
-    return True
+def include_extensions_from_config(config: dict) -> frozenset[str]:
+    """
+    Return rag.scanner.include_extensions as a frozenset.
+
+    Raises ValueError when rag.scanner is missing, when it still sets a removed
+    exclusion key, or when include_extensions is missing. Shared by scan_nfs_roots
+    and the read-only CLI, so both refuse the same configs.
+    """
+    scanner_cfg = config.get("rag", {}).get("scanner")
+    if not scanner_cfg:
+        raise ValueError(
+            "ragnart.yaml is missing the 'rag.scanner' section. "
+            "Add include_extensions."
+        )
+
+    # Exclusion keys moved to config/ragignore. A stale key would be silently
+    # ignored, so refuse to run until it is removed.
+    stale = [k for k in _REMOVED_EXCLUDE_KEYS if k in scanner_cfg]
+    if stale:
+        raise ValueError(
+            f"ragnart.yaml rag.scanner still sets removed exclusion key(s): {', '.join(stale)}. "
+            "Exclusions now live in config/ragignore and per-directory .ragignore files. "
+            "Remove these keys from ragnart.yaml."
+        )
+
+    _REQUIRED = ("include_extensions",)
+    missing = [k for k in _REQUIRED if k not in scanner_cfg]
+    if missing:
+        raise ValueError(
+            f"ragnart.yaml rag.scanner is missing required key(s): {', '.join(missing)}"
+        )
+
+    return frozenset(scanner_cfg["include_extensions"])
+
+
+def nfs_roots_from_config(
+    config: dict,
+    user_filter: str | None = None,
+) -> list[tuple[str, str]]:
+    """
+    Return (nfs_root_path, owner) pairs from the 'users' and 'shared' config sections.
+
+    The order is the config order: per-user roots first, then shared roots.
+    If user_filter is set, only that owner's roots are returned and shared roots
+    are left out.
+    """
+    roots_to_scan: list[tuple[str, str]] = []  # (nfs_root_path, owner)
+
+    for _email, cfg in config.get("users", {}).items():
+        owner = cfg["owner"]
+        if user_filter and owner != user_filter:
+            continue
+        for root in cfg.get("nfs_roots", []):
+            roots_to_scan.append((root, owner))
+
+    # Shared roots are included unless we're filtering to a specific user
+    if not user_filter:
+        shared = config.get("shared", {})
+        for root in shared.get("nfs_roots", []):
+            roots_to_scan.append((root, shared["owner"]))
+
+    return roots_to_scan
 
 
 def scan_nfs_roots(
     state_db: StateDB,
     config: dict,
     user_filter: str | None = None,
-) -> dict[str, int]:
+) -> dict:
     """
     Walk all configured NFS roots and update the ingestion queue.
 
@@ -93,43 +139,21 @@ def scan_nfs_roots(
         user_filter: If set (e.g. "florian"), only scan that owner's NFS roots.
 
     Returns:
-        {'scanned': N, 'deleted': N}
+        {
+          'scanned': N,                  # files admitted to the queue this scan
+          'existing_paths': set[str],    # every admitted path, for find_deleted()
+          'skipped_roots': list[str],    # roots that could not be trusted this scan
+        }
+
+        A root is skipped when it is not a directory, or when it is a directory that
+        yielded zero files while the queue still holds rows under it. An unmounted
+        NFS mount point looks like the second case. Callers must not delete rows
+        for a skipped root, because its files were not seen.
     """
-    # -- Build filter sets from config (required — no silent fallback) ---------
-    scanner_cfg = config.get("rag", {}).get("scanner")
-    if not scanner_cfg:
-        raise ValueError(
-            "ragnart.yaml is missing the 'rag.scanner' section."
-            "Add include_extensions, exclude_dir_names, exclude_dir_suffixes, "
-            "and exclude_file_patterns."
-        )
+    # Inclusion rules and the removed-key check (fail loud, no silent fallback).
+    include_exts = include_extensions_from_config(config)
 
-    _REQUIRED = ("include_extensions", "exclude_dir_names", "exclude_dir_suffixes", "exclude_file_patterns")
-    missing = [k for k in _REQUIRED if k not in scanner_cfg]
-    if missing:
-        raise ValueError(
-            f"ragnart.yaml rag.scanner is missing required key(s): {', '.join(missing)}"
-        )
-
-    include_exts = frozenset(scanner_cfg["include_extensions"])
-    skip_patterns = tuple(scanner_cfg["exclude_dir_names"])
-    skip_suffixes = tuple(scanner_cfg["exclude_dir_suffixes"])
-    exclude_patterns = tuple(scanner_cfg["exclude_file_patterns"])
-
-    roots_to_scan: list[tuple[str, str]] = []  # (nfs_root_path, owner)
-
-    for _email, cfg in config.get("users", {}).items():
-        owner = cfg["owner"]
-        if user_filter and owner != user_filter:
-            continue
-        for root in cfg.get("nfs_roots", []):
-            roots_to_scan.append((root, owner))
-
-    # Shared roots are included unless we're filtering to a specific user
-    if not user_filter:
-        shared = config.get("shared", {})
-        for root in shared.get("nfs_roots", []):
-            roots_to_scan.append((root, shared["owner"]))
+    roots_to_scan = nfs_roots_from_config(config, user_filter)
 
     if not roots_to_scan:
         logger.warning(
@@ -139,13 +163,19 @@ def scan_nfs_roots(
 
     scanned = 0
     existing_paths: set[str] = set()
+    skipped_roots: list[str] = []
     visited_real_dirs: set[str] = set()   # global — prevents re-walking the same real dir via different symlinks
     visited_real_files: set[str] = set()  # global — prevents ingesting the same real file via different symlink paths
 
     for root, owner in roots_to_scan:
         if not os.path.isdir(root):
             logger.warning("NFS root not accessible, skipping: %s", root)
+            skipped_roots.append(root)
             continue
+
+        # One matcher per root. Its global rules and per-directory .ragignore files
+        # are all interpreted relative to this root.
+        matcher = RagIgnoreMatcher(root)
 
         root_count = 0
         logger.info("Scanning %s  (owner=%s)", root, owner)
@@ -159,33 +189,50 @@ def scan_nfs_roots(
                 continue
             visited_real_dirs.add(real_dirpath)
 
-            # Prune excluded subtrees in-place — prevents os.walk from descending
+            # Prune excluded subtrees in-place — prevents os.walk from descending.
+            # Because an excluded directory is never entered, a .ragignore inside it
+            # is never read, so nothing under it can be re-included.
             dirnames[:] = [
                 d for d in dirnames
-                if not _is_excluded_dir(dirpath, d, skip_patterns, skip_suffixes)
+                if not matcher.is_dir_excluded(dirpath, d)
             ]
 
             for filename in filenames:
                 filepath = os.path.join(dirpath, filename)
-                if _should_include(Path(filepath), include_exts, exclude_patterns):
-                    real_filepath = os.path.realpath(filepath)
-                    if real_filepath in visited_real_files:
-                        continue
-                    visited_real_files.add(real_filepath)
-                    try:
-                        mtime = os.path.getmtime(filepath)
-                    except OSError:
-                        continue
-                    state_db.discover_or_update(filepath, owner, mtime)
-                    existing_paths.add(filepath)
-                    scanned += 1
-                    root_count += 1
+                # Inclusion first (cheap whitelist), then the exclusion rules.
+                if not is_includable(filepath, include_exts):
+                    continue
+                if matcher.is_path_excluded(filepath):
+                    continue
+                real_filepath = os.path.realpath(filepath)
+                if real_filepath in visited_real_files:
+                    continue
+                visited_real_files.add(real_filepath)
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+                state_db.discover_or_update(filepath, owner, mtime)
+                existing_paths.add(filepath)
+                scanned += 1
+                root_count += 1
 
         logger.info("  → %d file(s) found in %s", root_count, root)
+
+        # An empty directory while the queue still holds rows under it is treated as
+        # unmounted: a mount point that failed to mount is an empty directory too.
+        # The check is read-only.
+        if root_count == 0 and state_db.count_with_prefix(os.path.join(root, "")) > 0:
+            logger.warning(
+                "NFS root %s yielded 0 files but the queue has rows under it; treating as unmounted",
+                root,
+            )
+            skipped_roots.append(root)
 
     return {
         "scanned": scanned,
         "existing_paths": existing_paths,
+        "skipped_roots": skipped_roots,
     }
 
 

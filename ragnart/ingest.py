@@ -15,7 +15,10 @@ Parsing:
   - PPTX fallback: OLE2 detection → LibreOffice conversion → python-pptx when docling fails.
   - IPYNB: dedicated cell extractor (JSON parse → markdown + code cells).
   - Text formats (TXT, MD, YAML, CSV): direct UTF-8 read.
-  - docling failures fall back to python-pptx (PPTX) or raw UTF-8 read (others).
+  - docling failures: PPTX falls back to python-pptx; PDF and DOCX raise.
+    There is no raw-byte fallback for docling types.
+  - Admission (text-like files and all chunked items): size cap, NUL sniff,
+    replacement-character ratio and chunk cap. Caps come from rag_cfg["admission"].
 """
 
 from __future__ import annotations
@@ -35,7 +38,15 @@ from datetime import datetime
 from pathlib import Path
 
 import tiktoken
-from docling.document_converter import DocumentConverter
+from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import ConvertPipelineOptions, ThreadedPdfPipelineOptions
+from docling.document_converter import (
+    DocumentConverter,
+    PdfFormatOption,
+    PowerpointFormatOption,
+    WordFormatOption,
+)
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
@@ -65,6 +76,7 @@ from .schema import (
     SPARSE_VECTOR_NAME,
 )
 from .state import StateDB
+from .textquality import GATE_THRESHOLD, printable_ratio, sniff_binary_text
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +146,41 @@ _enc = tiktoken.get_encoding("cl100k_base")
 _thread_local = threading.local()
 
 
+def _build_converter() -> DocumentConverter:
+    """
+    Build a DocumentConverter with an explicit CPU accelerator for every docling type we use.
+
+    Docling picks its inference device automatically when none is given (DOCLING_DEVICE or
+    "auto", which would use CUDA if it were visible). This host is CPU-only, and the choice
+    should be written in code rather than inherited from the environment, so it is set here.
+
+    Where the accelerator is actually used (docling 2.89.0):
+      - PDF: StandardPdfPipeline runs layout, table and OCR models on the accelerator.
+        This is the only pipeline that loads ML models, so it is the one that matters.
+      - DOCX and PPTX: SimplePipeline builds the document from the declarative backend
+        and loads no models by default. The CPU setting is passed anyway, so every docling
+        type we handle reports the same explicit device, and it costs nothing.
+
+    Thread count is left at docling's default. Only the device is pinned here.
+    """
+    cpu_accelerator = AcceleratorOptions(device=AcceleratorDevice.CPU)
+
+    pdf_options = ThreadedPdfPipelineOptions(accelerator_options=cpu_accelerator)
+    docx_options = ConvertPipelineOptions(accelerator_options=cpu_accelerator)
+    pptx_options = ConvertPipelineOptions(accelerator_options=cpu_accelerator)
+
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+            InputFormat.DOCX: WordFormatOption(pipeline_options=docx_options),
+            InputFormat.PPTX: PowerpointFormatOption(pipeline_options=pptx_options),
+        }
+    )
+
+
 def _get_converter() -> DocumentConverter:
     if not hasattr(_thread_local, "converter"):
-        _thread_local.converter = DocumentConverter()
+        _thread_local.converter = _build_converter()
     return _thread_local.converter
 
 
@@ -598,11 +642,36 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
             # No raw-read fallback for binary PPTX: if _parse_pptx raises, let it
             # propagate so ingest_file() marks the file failed rather than embedding garbage.
             return _parse_pptx(path)
-        logger.warning(
-            "docling failed for %s (%s) — falling back to raw read: %s",
-            path.name, file_type, exc,
-        )
-        return path.read_text(encoding="utf-8", errors="replace")
+        # No raw-read fallback for PDF or DOCX. A raw UTF-8 read of a binary file
+        # produces garbage text that then gets embedded. Raise instead, so ingest_file()
+        # marks the item failed; the retry path then ends it as ignored.
+        raise RuntimeError(f"docling failed: {exc}") from exc
+
+
+def is_text_like_path(file_path: str) -> bool:
+    """
+    True when ingest reads the file directly as UTF-8 text.
+
+    Text-like files are not docling, ipynb, jsonl or opencode sources. Only these get
+    the size cap, the NUL sniff and the replacement-character check. Shared with
+    utils/rag_purge_rescan.py so both tools apply one definition.
+    """
+    raw_file_type = Path(file_path).suffix.lstrip(".").lower()
+    return (
+        not file_path.startswith("opencode://")
+        and raw_file_type not in _DOCLING_TYPES
+        and raw_file_type not in {"ipynb", "jsonl"}
+    )
+
+
+def fffd_ratio(text: str) -> float:
+    """
+    Fraction of U+FFFD (replacement) characters in the decoded text.
+
+    The UTF-8 decoder emits U+FFFD for undecodable bytes, so a high ratio means binary.
+    Shared with utils/rag_purge_rescan.py so both tools apply one definition.
+    """
+    return text.count("\ufffd") / max(len(text), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -709,8 +778,17 @@ async def ingest_file(
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
 
+    # Admission caps (ragnart.yaml rag.admission). Code defaults apply when a key is absent.
+    admission_cfg = rag_cfg.get("admission", {})
+    max_text_bytes = admission_cfg.get("max_text_file_size_bytes", 5_000_000)
+    fffd_threshold = admission_cfg.get("fffd_ratio_threshold", 0.005)
+    max_chunks = admission_cfg.get("max_chunks_per_item", 5000)
+
     file_name     = Path(file_path).name
     raw_file_type = Path(file_path).suffix.lstrip(".").lower()
+
+    # Only text-like files get the size cap, the NUL sniff and the replacement-character check.
+    is_text_like = is_text_like_path(file_path)
 
     try:
         # ------------------------------------------------------------------
@@ -759,9 +837,38 @@ async def ingest_file(
             text, chat_meta = await asyncio.to_thread(_parse_claude_chat, Path(file_path))
             file_type = "claude_chat"
         else:
+            if is_text_like:
+                # Size cap is checked from the filesystem before the file is read at all.
+                size_bytes = Path(file_path).stat().st_size
+                if size_bytes > max_text_bytes:
+                    logger.warning("Skipping %s — %d bytes exceeds cap", file_path, size_bytes)
+                    state_db.mark_ignored(
+                        file_path,
+                        f"too large: {size_bytes} bytes > {max_text_bytes} byte cap",
+                    )
+                    return
+                # NUL sniff on the raw bytes, before any parsing. Binary files almost
+                # always have a NUL near the start; text files never do.
+                nul_reason = sniff_binary_text(Path(file_path))
+                if nul_reason is not None:
+                    logger.warning("Skipping %s — %s", file_path, nul_reason)
+                    state_db.mark_ignored(file_path, nul_reason)
+                    return
             text = await asyncio.to_thread(_parse_to_text, file_path, raw_file_type)
             file_type = raw_file_type
             chat_meta = {}
+
+        # Replacement-character check for text-like files. It runs on the text already
+        # decoded above, so the file is not read a second time. U+FFFD is what the
+        # UTF-8 decoder emits for undecodable bytes, so a high ratio means the file is binary.
+        if is_text_like:
+            replacement_ratio = fffd_ratio(text)
+            if replacement_ratio > fffd_threshold:
+                logger.warning(
+                    "Skipping %s — %.1f%% replacement chars", file_path, replacement_ratio * 100,
+                )
+                state_db.mark_ignored(file_path, f"binary: {replacement_ratio:.1%} replacement chars")
+                return
 
         # For chat sessions, the raw file_name is a meaningless identifier
         # (UUID-named .jsonl for Claude Code, ses_<id> for opencode). Replace it
@@ -778,8 +885,10 @@ async def ingest_file(
         # Skip documents whose parsed text is mostly binary/garbage characters.
         # Corrupt scanned PDFs and binary-encoded files produce noise vectors
         # that crowd out legitimate search results.
-        _printable = sum(1 for c in text if c.isprintable()) / max(len(text), 1)
-        if _printable < 0.85:
+        # The ratio rule (and its threshold) lives in ragnart/textquality.py so that
+        # ingest and the purge tool cannot drift apart.
+        _printable = printable_ratio(text)
+        if _printable < GATE_THRESHOLD:
             logger.warning(
                 "Skipping %s — parsed text is %.0f%% printable (binary/corrupt content)",
                 file_path, _printable * 100,
@@ -792,6 +901,14 @@ async def ingest_file(
         # ------------------------------------------------------------------
         pairs, strategy = _select_chunks(text, file_type)
         n = len(pairs)
+
+        # Chunk cap applies to every file type. It is checked here, before embedding,
+        # so an item that would produce thousands of vectors costs no embedding time.
+        if n > max_chunks:
+            logger.warning("Skipping %s — %d chunks exceeds cap %d", file_name, n, max_chunks)
+            state_db.mark_ignored(file_path, f"too large: {n} chunks > {max_chunks} chunk cap")
+            return
+
         state_db.set_progress(file_path, f"chunking ({n} chunks)")
         logger.info(
             "Chunked %s → %d chunks  strategy=%s  file_type=%s",

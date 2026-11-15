@@ -40,9 +40,24 @@ log "=== RAG ingestion starting  workers=$WORKERS  batch=$BATCH ==="
 source "$VENV"
 cd "$PROJECT"
 
+# A failing sync (refused deletion, or a crash) must not stop the ingest daemon from
+# running. Its exit code is recorded here and returned at the very end, so systemd
+# still marks the unit failed. SYNC_RC stays 0 while every sync succeeds, and keeps
+# the first non-zero code otherwise.
+SYNC_RC=0
+
 for user in "${RAG_SYNC_USERS[@]}"; do
     log "--- rag_sync_nfs.py --user $user ---"
-    python utils/rag_sync_nfs.py --user "$user" 2>&1 | tee -a "$LOGFILE"
+    # `|| rc=$?` stops set -e from aborting on a failing sync. pipefail makes the
+    # pipeline's status the sync's own exit code, not the exit code of tee.
+    rc=0
+    python utils/rag_sync_nfs.py --user "$user" 2>&1 | tee -a "$LOGFILE" || rc=$?
+    if (( rc != 0 )); then
+        log "WARN: sync exited $rc — deletions not applied; see log above"
+        if (( SYNC_RC == 0 )); then
+            SYNC_RC=$rc
+        fi
+    fi
 done
 
 log "--- rag_ingest_daemon.py ---"
@@ -74,3 +89,7 @@ else
 fi
 
 log "=== RAG ingestion complete ==="
+
+# Return the sync's failure code, if any, so systemd marks the unit failed. The daemon
+# and the checkpoint and snapshot steps above have already run by this point.
+exit "$SYNC_RC"

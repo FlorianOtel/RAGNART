@@ -38,18 +38,12 @@ from ragnart.schema import (
     FIELD_PARENT_TEXT,
     FIELD_OWNER,
 )
+# Shared gate rule and threshold: the same definition the ingest pipeline uses.
+from ragnart.textquality import GATE_THRESHOLD, printable_ratio
 import sqlite3
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _printable_ratio(text: str) -> float:
-    """Return fraction of printable characters in text (0.0 to 1.0)."""
-    if not text:
-        return 1.0
-    printable_count = sum(1 for c in text if c.isprintable())
-    return printable_count / len(text)
 
 
 def scan_qdrant_for_corrupt(
@@ -131,7 +125,7 @@ def scan_qdrant_for_corrupt(
             if not source_path or not parent_text:
                 continue
 
-            ratio = _printable_ratio(parent_text)
+            ratio = printable_ratio(parent_text)
             if ratio < threshold:
                 total_corrupt_points += 1
 
@@ -186,8 +180,8 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.85,
-        help="Printable-char ratio threshold (default 0.85); points below this are corrupt",
+        default=GATE_THRESHOLD,
+        help=f"Printable-char ratio threshold (default {GATE_THRESHOLD}, from ragnart.textquality); points below this are corrupt",
     )
     parser.add_argument(
         "--user",

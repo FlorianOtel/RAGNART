@@ -51,6 +51,29 @@ def get_client(url: str, timeout: int = 60) -> QdrantClient:
 # Collection lifecycle
 # ---------------------------------------------------------------------------
 
+def collection_exists(client: QdrantClient, name: str) -> bool:
+    """Return True if `name` resolves to a real collection OR to a Qdrant alias.
+
+    Qdrant aliases do not appear in get_collections(), so checking only that
+    list reports False for a working alias. rag_sparse_migrate.py --swap makes
+    the 'documents' name an alias, which is why this check looks at both.
+    """
+    real_collections = {c.name for c in client.get_collections().collections}
+    aliases = {a.alias_name for a in client.get_aliases().aliases}
+    return name in real_collections or name in aliases
+
+
+def collection_is_alias(client: QdrantClient, name: str) -> bool:
+    """Return True if `name` is an alias and NOT itself a real collection.
+
+    Used by destructive operations that must not act on an alias (for example,
+    delete_collection() on an alias name would fail or hit the wrong target).
+    """
+    real_collections = {c.name for c in client.get_collections().collections}
+    aliases = {a.alias_name for a in client.get_aliases().aliases}
+    return name in aliases and name not in real_collections
+
+
 def ensure_collection(client: QdrantClient) -> None:
     """
     Create the documents collection if it does not already exist.

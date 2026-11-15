@@ -26,11 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-from ragnart.collection import DOCUMENTS_COLLECTION, get_client
-from ragnart.schema import FIELD_OWNER
 from ragnart.state import StateDB
+from ragnart.status import print_status
 
 
 # ---------------------------------------------------------------------------
@@ -375,75 +372,13 @@ def main() -> None:
         state_db.close()
         return
 
-    # --- SQLite queue counts ---
-    if args.user:
-        conn = state_db._conn
-        cur = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM ingestion_queue "
-            "WHERE owner = ? GROUP BY status",
-            (args.user,),
-        )
-        raw = {row["status"]: row["n"] for row in cur.fetchall()}
-        counts = {
-            "pending":    raw.get("pending", 0),
-            "processing": raw.get("processing", 0),
-            "completed":  raw.get("completed", 0),
-            "ignored":    raw.get("ignored", 0),
-            "total":      sum(raw.values()),
-        }
-        scope = f"owner={args.user}"
-    else:
-        counts = state_db.get_counts()
-        scope = "all users"
-
-    print(f"\nIngestion queue ({scope}):")
-    print(f"  pending    : {counts['pending']}")
-    print(f"  processing : {counts['processing']}")
-    print(f"  completed  : {counts['completed']}")
-    print(f"  ignored    : {counts['ignored']}")
-    print(f"  ─────────────────")
-    print(f"  total      : {counts['total']}")
-
-    if counts["total"] > 0:
-        pct = counts["completed"] / counts["total"] * 100
-        print(f"  progress   : {pct:.1f}%")
-
-    # --- Qdrant stats ---
-    try:
-        qdrant = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
-        existing = {c.name for c in qdrant.get_collections().collections}
-        if DOCUMENTS_COLLECTION in existing:
-            total_pts = qdrant.count(DOCUMENTS_COLLECTION, exact=True).count
-            if args.user:
-                user_pts = qdrant.count(
-                    DOCUMENTS_COLLECTION,
-                    count_filter=Filter(must=[
-                        FieldCondition(key=FIELD_OWNER, match=MatchValue(value=args.user))
-                    ]),
-                    exact=True,
-                ).count
-                print(f"\nQdrant '{DOCUMENTS_COLLECTION}' collection:")
-                print(f"  total points    : {total_pts}")
-                print(f"  {args.user:15s} : {user_pts}")
-            else:
-                print(f"\nQdrant '{DOCUMENTS_COLLECTION}' collection:")
-                print(f"  total points    : {total_pts}")
-        else:
-            print(f"\nQdrant: collection '{DOCUMENTS_COLLECTION}' does not exist yet")
-    except Exception as exc:
-        print(f"\nQdrant: unavailable ({exc})")
-
-    # --- Ignored files ---
-    if args.ignored:
-        ignored = state_db.get_ignored(owner=args.user or None)
-        if ignored:
-            print(f"\nIgnored files ({len(ignored)}) — permanently skipped after retry exhaustion:")
-            for row in ignored:
-                print(f"  [{row['retry_count']} retries] {row['file_path']}")
-                if row["skip_reason"]:
-                    print(f"    → {row['skip_reason']}")
-        else:
-            print("\nNo ignored files.")
+    # --- One-shot display: queue counts, Qdrant points, optional ignored listing ---
+    print_status(
+        state_db,
+        qdrant_url=rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"),
+        user=args.user,
+        show_ignored=args.ignored,
+    )
 
     state_db.close()
 

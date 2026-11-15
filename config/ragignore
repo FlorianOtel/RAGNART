@@ -1,0 +1,70 @@
+# =============================================================================
+# RAGNART global ignore rules (config/ragignore)
+# =============================================================================
+# Global exclusion rules for the NAS crawl. They apply under every crawled root
+# and have the LOWEST precedence: any .ragignore inside the crawled tree can
+# override them. This is the analogue of git's core.excludesFile.
+#
+# Syntax is gitignore (https://git-scm.com/docs/gitignore):
+#   - Blank lines and lines starting with '#' are ignored. Write '\#' for a literal '#'.
+#   - A leading '!' re-includes a path matched by an earlier pattern.
+#   - A trailing '/' matches directories only.
+#   - A pattern with no '/' other than a trailing one matches at any depth.
+#   - A leading or middle '/' anchors the pattern to the directory of this file.
+#   - '*', '?', '[...]' and '**' behave as in gitignore.
+#
+# Role split: ragnart.yaml holds inclusion rules (include_extensions).
+# This file holds exclusion rules only.
+#
+# This file is LIVE and global. For rules that apply to one directory only, copy
+# config/ragignore.example as `.ragignore` into that directory. The example is an
+# inert template: every line in it is commented out.
+
+# --- Directories (trailing '/', match at any depth) ----------------------------
+
+# Python virtualenv
+.Gin-AI-python-3.12/
+# pre-2026-11-01 venv (machine-local interpreter)
+.Gin-AI-python-3.12.old/
+# uv-managed Python interpreters on NFS (the venv's base)
+.uv-python/
+# any virtualenv's installed packages, whatever the venv is called
+site-packages/
+# tool caches (uv archives, etc.)
+.cache/
+__pycache__/
+.git/
+node_modules/
+.claude/
+# ~/.claude is symlinked here (NFS-hosted); the real on-disk dirname differs from ".claude/"
+dot.claude-Linux/
+.vscode/
+.venv/
+# macOS stuff
+Library/
+Applications/
+# HuggingFace model cache: READMEs and licenses, not RAG content
+LLMs-cache/
+# garbage
+Downloads/
+# multi-component path: matches this exact segment sequence at any depth
+# IRM/DRM-encrypted old PPTs, unrecoverable
+**/Microsoft--flotel/Documents/
+
+# --- Directory name suffixes (pip package metadata) -----------------------------
+
+# pip package metadata directories
+*.dist-info/
+
+# --- File name substrings (matched anywhere in the name) ------------------------
+
+# Synology NAS streaming metadata
+*@synoeastream*
+# macOS AppleDouble resource-fork sidecars (e.g. ._foo.pptx).
+# No trailing '/', so like any gitignore pattern without one this also matches
+# directories whose name contains "._" and excludes them with their contents.
+*._*
+# Microsoft Office lock/temp files (e.g. ~$foo.pptx).
+# No trailing '/', so like any gitignore pattern without one this also matches
+# directories whose name contains "~$" and excludes them with their contents.
+*~$*

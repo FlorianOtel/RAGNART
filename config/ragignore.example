@@ -1,0 +1,195 @@
+# =============================================================================
+# RAGNART .ragignore template (config/ragignore.example)
+# =============================================================================
+# TWO FILES, TWO ROLES
+#   config/ragignore is the LIVE global exclusion list. It applies to every NAS
+#   root on every scan, with the lowest precedence. It is versioned with the
+#   code, like git's core.excludesFile, and holds system-wide rules such as
+#   .git/, node_modules/ and .venv/.
+#   This file is an INERT template. Everything in it is commented out, so it
+#   excludes nothing. Copy it into a NAS directory as `.ragignore` for that
+#   directory's own rules. Do not copy config/ragignore as a template: that
+#   would duplicate the global rules.
+#
+# WHAT THIS IS
+#   A template. It lists every option a .ragignore file accepts, with a short
+#   explanation and an example for each. Every example is commented out, so
+#   using this file as it is changes nothing.
+#
+#   To use it, copy it into any directory on the NAS as `.ragignore`, then
+#   activate only the examples you need. Each example line starts with the
+#   marker "#> ". To activate one, delete the marker and keep the rest of the
+#   line exactly as written, trailing spaces included.
+#
+# HOW .ragignore FILES WORK
+#   The syntax and matching are those of gitignore, exactly. `git check-ignore`
+#   is the reference. See `docs/RAGNART-design.md` §1.2.
+#   - Patterns are relative to the directory that holds the .ragignore file.
+#   - A .ragignore in a deeper directory takes precedence over one in a
+#     shallower directory.
+#   - config/ragignore, the global file, has the lowest precedence. Its
+#     patterns are relative to the crawled root.
+#   - Within one file, the last matching pattern wins.
+#   - A path inside an excluded directory cannot be re-included.
+#   - These rules apply to the NAS crawl only. The Claude Code and OpenCode
+#     session scanners do not read them.
+#   - .gitignore files are not read.
+#   - An unreadable .ragignore stops the sync. The sync exits with an error and
+#     runs no deletions.
+#
+# EFFECT ON THE INDEX
+#   A newly ignored item leaves the index at the next sync, subject to the
+#   deletion guards. The sync log names the .ragignore file and line that
+#   matched (`docs/RAGNART-design.md` §1.2, deviation A).
+#
+# CHECKING PATHS
+#   ragnart check-ignore -v <path>   shows the file, line and pattern that decide <path>
+#   ragnart ls-files --ignored       lists the on-disk files that the rules exclude
+
+# -----------------------------------------------------------------------------
+# Blank lines and comments
+# -----------------------------------------------------------------------------
+# Blank lines are ignored, and so is any line that starts with '#'.
+#> # A comment line. This example is also ignored.
+
+# -----------------------------------------------------------------------------
+# Escapes: \# and \!
+# -----------------------------------------------------------------------------
+# A backslash makes the next character literal. Use it for a name that starts
+# with '#', which would otherwise be a comment, or with '!', which would
+# otherwise re-include.
+#> \#draft.md
+#> \!bang.txt
+
+# -----------------------------------------------------------------------------
+# Trailing spaces
+# -----------------------------------------------------------------------------
+# Unescaped trailing spaces are stripped, so "name   " means "name". To keep one,
+# escape it with a backslash: "name\ " matches a file called "name ".
+#> scratch\ 
+
+# -----------------------------------------------------------------------------
+# Wildcards: * and ?
+# -----------------------------------------------------------------------------
+# '*' matches any run of characters, except '/'. '?' matches one character,
+# except '/'.
+#> *.tmp
+#> draft-?.md
+
+# -----------------------------------------------------------------------------
+# Bracket expressions: [abc], [a-z], [!abc]
+# -----------------------------------------------------------------------------
+# '[abc]' matches one of a, b or c. '[a-z]' matches one character in the range.
+# '[!abc]' matches one character that is not a, b or c.
+#> scan-[abc].pdf
+#> photo-[a-z].jpg
+#> draft-[!abc].md
+
+# -----------------------------------------------------------------------------
+# POSIX character classes: [[:digit:]]
+# -----------------------------------------------------------------------------
+# A class goes inside a bracket. The names are alnum, alpha, blank, cntrl,
+# digit, graph, lower, print, punct, space, upper and xdigit. Git uses the C
+# locale, so only ASCII characters match.
+#> part-[[:digit:]].bin
+
+# -----------------------------------------------------------------------------
+# No slash: matches at any depth
+# -----------------------------------------------------------------------------
+# A pattern with no '/' except a trailing one matches at any depth below this
+# directory, in files and in directories.
+#> Thumbs.db
+
+# -----------------------------------------------------------------------------
+# Leading slash: anchored to this directory
+# -----------------------------------------------------------------------------
+# A leading '/' anchors the pattern to the directory that holds this file.
+#> /TODO.md
+
+# -----------------------------------------------------------------------------
+# Middle slash: also anchored to this directory
+# -----------------------------------------------------------------------------
+# A '/' anywhere except at the end anchors the pattern, so this matches only
+# docs/draft.md, not sub/docs/draft.md.
+#> docs/draft.md
+
+# -----------------------------------------------------------------------------
+# Trailing slash: directories only
+# -----------------------------------------------------------------------------
+# A trailing '/' matches directories only. A file with the same name is not
+# matched.
+#> cache/
+
+# -----------------------------------------------------------------------------
+# Leading **/: any depth
+# -----------------------------------------------------------------------------
+# '**/' at the start matches in any directory, at any depth.
+#> **/private/
+
+# -----------------------------------------------------------------------------
+# Trailing /**: everything inside
+# -----------------------------------------------------------------------------
+# 'x/**' matches everything inside x, but not x itself.
+#> archive/**
+
+# -----------------------------------------------------------------------------
+# Middle /**/: any number of directories
+# -----------------------------------------------------------------------------
+# 'a/**/b' matches b in a, in any sub-directory of a, at any depth, including
+# directly in a.
+#> docs/**/internal.md
+
+# -----------------------------------------------------------------------------
+# Negation: ! re-includes
+# -----------------------------------------------------------------------------
+# A leading '!' re-includes a path that an earlier pattern in the same file
+# excluded. The last matching pattern decides. The pair below excludes every
+# .log file except keep.log, at any depth.
+#> *.log
+#> !keep.log
+
+# -----------------------------------------------------------------------------
+# Re-including inside an excluded directory: the pitfall
+# -----------------------------------------------------------------------------
+# A path inside an excluded directory cannot be re-included, because the walk
+# never enters that directory. Writing "dir/" and then "!dir/keep.md" does
+# nothing: dir/keep.md stays excluded.
+#
+# Exclude the contents instead. "dir/*" excludes what is directly in dir/, so
+# dir/ itself is still entered, and "!dir/keep.md" re-includes keep.md.
+# Subdirectories of dir/ are excluded with their contents.
+#> dir/*
+#> !dir/keep.md
+
+# -----------------------------------------------------------------------------
+# Per-file opt-out by exact name
+# -----------------------------------------------------------------------------
+# A .ragignore in a deeper directory can re-include one file by its exact name,
+# when a shallower .ragignore or config/ragignore excludes it. The deeper file
+# has higher precedence, so its line wins for that file only.
+#> !README.md
+
+# -----------------------------------------------------------------------------
+# Typical use: build output
+# -----------------------------------------------------------------------------
+# Compiled output that a build recreates on each run.
+#> build/
+#> target/
+
+# -----------------------------------------------------------------------------
+# Typical use: generated reports
+# -----------------------------------------------------------------------------
+# Output of a script rather than authored content.
+#> generated-reports/
+
+# -----------------------------------------------------------------------------
+# Typical use: a large data folder
+# -----------------------------------------------------------------------------
+# Bulk exports that would dominate the index.
+#> dumps/
+
+# -----------------------------------------------------------------------------
+# Typical use: log files
+# -----------------------------------------------------------------------------
+# Log files at any depth.
+#> *.log
