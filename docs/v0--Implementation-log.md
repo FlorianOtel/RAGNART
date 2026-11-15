@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover)
-updated_at: 2026-11-14--00-27
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items)
+updated_at: 2026-11-15--08-55
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,101 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-14--10-00 to 2026-11-15--09-00 -- v0.2 fix-first items 0-4: corpus hygiene, .ragignore, sync guards, read-only CLI
+
+Bridge session between v0.1 and v0.2, run as a `/brain` pipeline (Claude Haiku 5.5 executing
+in Actor dispatches). Plan: Plan Section 6 v0.2, fix-first items 0-4, and the measured
+baseline in Plan Section 3. Fix-first items 5 and 6 were not delivered (see Deviations).
+
+#### What was done
+
+Commits: `c41c08c` (code: admission rules, `.ragignore`, sync guards, read-only CLI, tests); the docs commit that adds this entry ("docs: p1 admission rules, git parallel, .ragignore, measured corpus; log: bridge session").
+
+**Corpus before the cleanup** (2026-11-13 23:55): 2,988,440 points, 15,348 items.
+
+| Class | Points | Share | Items |
+| --- | ---: | ---: | ---: |
+| Oversized (>= 5,000 points) | 1,348,315 | 45.1% | 25 |
+| PDF/DOCX read as raw binary | 1,138,039 | 38.1% | 210 |
+| File gone | 105,129 | 3.5% | -- |
+| Large (1,000-4,999 points) | 85,759 | 2.9% | -- |
+| Sessions | 114,189 | 3.8% | -- |
+| Normal | 197,009 | 6.6% | -- |
+
+Worst culprits: P4OC R8 mapping files (942,670 points), raw-binary PDFs (about 1.13M), CSV
+dumps (about 300k), the duplicated `_AWS` subtree (about 171k), Cisco VPN logs (20k), build
+output (about 35k), reveal.js decks (about 45k).
+
+**Root causes and fixes** (`ragnart/ingest.py`, `ragnart/textquality.py`, `ragnart.yaml`):
+
+| # | Cause | Fix |
+| --- | --- | --- |
+| R1 | docling CUDA OOM: GPU shared with llama-server and Ollama, 3 workers each with a converter; the failure fell back to a raw read | No raw fallback for PDF/DOCX; docling on CPU |
+| R2 | Quality gate counted U+FFFD as printable | NUL and U+FFFD sniff; corrected gate |
+| R3 | No size or chunk caps | 5 MB size cap; 5,000-chunk cap; both mark the item `ignored` with a reason |
+| R4 | Gate applied only at (re)ingestion | `utils/rag_purge_rescan.py` re-checks existing rows against admission |
+| R5 | Over-broad includes (`.txt`, `.csv`), mirrored trees, build directories | `.csv` removed from includes; `config/ragignore` and per-directory `.ragignore` |
+
+**Operator actions:** deleted `OpenFlow-Book-Preview.pdf` and the duplicate `Gitlab--fotel/_AWS`;
+renamed the P4OC mappings to `*.txt.norag`; removed offending PDFs; later deleted the large Java
+books. Added `.ragignore` in `notebooklm-py` (`*.yaml`) and in `AWS--fotel/_AWS/billing` (`*`).
+
+**Point counts:**
+
+| When | Points | Event |
+| --- | ---: | --- |
+| 2026-11-14 00:27 | 2,988,440 | Start of cleanup |
+| 2026-11-14 01:00 run | 1,719,988 | After operator deletions |
+| 2026-11-14 14:30 | -- | Snapshot pair `2026-11-14-14-30-30` (rollback point) |
+| Manual sync | 1,442,702 | 207 rows, 203 of them CSV |
+| `rag_purge_rescan --apply` | 321,424 | 187 PDF/DOCX re-queued for re-parse; 1,067,181 points deleted; 86 marked `ignored` (54,097 points); 230 transient failures re-queued |
+| Re-parse backlog done, 2026-11-15 00:28 | 391,919 | -- |
+| 2026-11-15 08:54 | 348,163 | After the two operator `.ragignore` files (146 cassette YAML, 1 billing PDF) |
+
+**Code delivered:**
+- `ragnart/textquality.py`: text checks (NUL and U+FFFD sniff, quality gate).
+- `ragnart/ragignore.py`: gitignore-semantics matcher; `git check-ignore` is the test oracle.
+- `config/ragignore`, `config/ragignore.example`.
+- `ragnart/cli.py`, `ragnart/__main__.py`, `ragnart/status.py`: `ragnart status`,
+  `ls-files [<path>...]`, `check-ignore -v`. Read-only.
+- `ragnart/ingest.py`: admission (docling on CPU, no raw fallback, NUL and U+FFFD sniff,
+  5 MB size cap, 5,000-chunk cap, corrected gate).
+- `ragnart/scanner.py`: `.ragignore` integration; `ragnart.yaml` exclusion keys removed.
+- `ragnart.yaml`: `rag.admission` block, `rag.sync.max_delete_fraction`, `.csv` commented out.
+- Fix-first items 1-4: skipped roots, owner-scoped deletion, `max_delete_fraction` with
+  `--allow-mass-delete`, `wait=True`, `collection_exists` and alias refusal, `--dry-run`,
+  `/health` with a 2 s check and 503 mapping.
+- `scripts/ragnart-ingest-run.sh`: ingestion continues after a failed sync.
+- `utils/rag_purge_rescan.py`: purge and rescan tool (dry-run by default).
+- `pyproject.toml`: scripts entry, packages, `test` extra. `tests/`: 266 tests.
+- Editable install of `ragnart` into the shared venv.
+
+**Ops:**
+- Ollama `OLLAMA_CONTEXT_LENGTH` 768 -> 2048, via the drop-in
+  `/etc/systemd/system/ollama.service.d/ragnart-context-length.conf`. VRAM 0.83 -> 1.09 GB.
+- Finding: Ollama rejects over-long inputs with HTTP 500; it does not truncate. This caused the
+  earlier "500" ignored rows.
+
+**Docs updated:** `docs/RAGNART-design.md` (§1.2 git parallel with deviations A-G; p1 made
+explicit, including admission; version rule; D6-D8), `docs/Implementation-plan.md`,
+`docs/RAG-strategy.md`, `docs/RAG-troubleshoot.md`, `README.md`.
+
+#### Deviations from the plan
+
+1. **No "p2".** Operator: a version change is a major event; fixes stay `p1` (Plan Section 2).
+2. **Chunk cap 2,000 -> 5,000** (operator). Real books exceeded 2,000 (python-in-a-nutshell
+   2,146 chunks; AYA v1 log 2,167). Briefly 10,000, back to 5,000 after the operator deleted
+   the large Java books.
+3. **Pathspec not used.** Its matching disagreed with git. The own matcher is fuzz-tested
+   against `git check-ignore` (2,000 random rule sets, 0 mismatches).
+4. **Re-parse backlog.** The first run (3 workers) was stopped by Claude Code's low-memory
+   reaper at 20:19 (docling about 16.7 GB RSS). Restarted as a systemd unit with 1 worker.
+5. **Operator requests.** `ls-files` path argument and logical-`$PWD` resolution added;
+   `config/ragignore.example` added.
+6. **Batch barrier observed, not fixed.** The re-parse run showed the docling batch barrier
+   (Plan Section 6 v0.2 fix-first item 6).
+7. **Fix-first items 5 and 6 not delivered** in this session. Both are open (Handover to v0.2).
 
 ### 2026-11-14--00-30 -- design review, design document, as-is docs, corpus analysis, v0.2 handover
 
@@ -125,6 +220,7 @@ below to `docs/Implementation-plan.md` and the matching status markers to
 - **Environment:** Qdrant on `.93` (config `/etc/qdrant/config.yaml`, wired 1 Gb/s), search and
   ingestion on `.95`, data root `/mnt/nfs/__Backups/RAGNART--databases/`; privileged commands via
   `sudo -n` or `ssh root@localhost` (`.95`) and `ssh 192.168.1.93` + `sudo -n` (`.93`).
+- **Open items tracked in `docs/Implementation-plan.md`** (Plan Section 6 v0.2, Plan Section 7 Future work): fix-first items 5 (sync lock) and 6 (batch barrier); reconciliation additions (2 zombie paths under `dot.claude-Linux`, 307 points; 1,270 `completed` rows without points; rescan crash window); future work (chunk sizing in bge-m3 tokens, page numbers, secret filter, unused `rrf_k`, merge `rag_purge_corrupt.py` into `rag_purge_rescan.py`, configurable docling device); 2 rows `ignored` with one-off errors ("All connection attempts failed", "[Errno 24] Too many open files") to re-queue.
 
 ### 2026-11-13--16-15 -- post-close ops: Qdrant config, snapshot retention, data root, Server 1 back on wired
 

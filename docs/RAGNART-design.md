@@ -2,6 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
+updated_by: Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-15--09-05
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -44,6 +46,7 @@ automatically, built up by gathering material and distilling it into references.
 | **Explicit over implicit** | The current scope and grounding are always visible; every widening or narrowing is a deliberate act of the operator, loud and visible, never silent. |
 | **KISS** | Use what exists (paths, folders, files, one pipeline, one store) before adding mechanisms. Add primitives where tuning is needed, not cleverness. |
 | **Predictable, not rigid** | Same input on the same data gives the same result; behaviour changes only when the data or the settings change, and the settings are knobs the operator controls. |
+| **Git parallel** | RAGNART mirrors git in ingestion, exclusion and lifecycle, using git's command names where the mapping is exact (§1.2). |
 | **Current-state documentation** | Documents describe how things are; history is in git and in the implementation logs. |
 
 ### 1.1 Status of this design
@@ -55,17 +58,109 @@ a **Status** line. Summary:
 | Area | Status |
 |---|---|
 | Hosts, services, data root, snapshot policy (§2, §10.4) | Built |
-| Pipeline `p1` (§5) | Built (it is what produced the current index) |
+| Pipeline `p1` (§5), admission rules (§5.2) | Built |
+| Parallel with git (§1.2): ignore rules and the read-only `ragnart` commands `check-ignore`, `ls-files`, `status` | Built. `add`, `rm`, `mv`, `diff`, `fsck`, `gc`: v0.3 |
 | Item identity by path for NAS files, `opencode://` keys (§4.2) | Built; `claude-session://` keys, content hash and move detection: v0.2 |
 | State-database metadata and payload fields beyond today's (§4.3, §4.4), schema version (§4.1), per-item pipeline version | v0.2 |
 | Projects, `project.toml`, tags, grants, `resolve_scope()` / `authorize()` (§4.5, §6) | v0.2 (data model); authentication and grant management: v0.5 |
-| Scope and grounding in the API and the `/ragnart` skill and commands (§8) | API scope and project listing: v0.2; skill, commands and `ragnart` CLI: v0.3 |
-| Project mode, compact, `MEMORY.md`, ingest-now (§7.3, §7.4) | v0.3, after the Transient lifecycle is defined (§13.3) |
-| Pipeline `p2` and corpus cleanup (§13.1) | v0.2 fix-first item 0, delivered by a separate bridge session |
+| Scope and grounding in the API and the `/ragnart` skill and commands (§8) | API scope and project listing: v0.2; skill and commands: v0.3 |
+| Project mode, distill, `MEMORY.md`, `add --wait` (§7.3, §7.4) | v0.3, after the Transient lifecycle is defined (§13.3) |
 | Retrieval-quality knobs and calibration (§9) | `max_hits_per_source` and collapse: v0.2; other knobs and calibration: v0.3 |
-| Deletion rules, reconciliation (§10.2, §10.3) | v0.2 (fix-first guards, tombstone and grace, reconciliation); purge log and confirmed deletes not yet scheduled |
+| Deletion rules (§10.2), reconciliation (§10.3) | Guards, owner scoping and synchronous Qdrant deletes: built. Tombstone and grace period, reconciliation: v0.2. Purge record: not yet scheduled (§13.2) |
 | OpenCode database backup (§10.5) | v0.2 |
 | Kotaemon (§12) | v0.4 |
+
+### 1.2 Parallel with git
+
+RAGNART follows git as closely as it can in ingestion, exclusion and lifecycle. Where a RAGNART
+command does exactly what the git command of the same name does, it takes that name. Where the
+mapping is not exact, RAGNART uses its own terms: the Archive, Runtime and Transient tiers (§7.1),
+the queue, the index, the project, and the static and curated policies (§7.2). The reasons for
+each deviation are recorded here and in decision D7 (§14).
+
+| git concept | RAGNART | Note |
+|---|---|---|
+| Working tree | The NAS sources under the NFS roots | The authority. RAGNART does not modify them. The only files it writes there are `.ragnart/project.toml` (by `init`, planned) and lines appended to `.ragignore` files (by `rm`, planned, deviation B). |
+| Staging area | Queue rows with status `pending` | Queued for ingestion, not yet indexed. |
+| Committed content | The index: Qdrant points and `completed` queue rows | Derived from the NAS (§10.1). |
+| Repository (`.git`) | Project (`.ragnart/project.toml`) | Addressed by path (§4.5). `init` (planned) is `git init`. |
+| `.gitignore` | `.ragignore`, one per directory | Same syntax and precedence (below). |
+| `core.excludesFile` | `config/ragignore` | Global exclusion rules with the lowest precedence. There is no `.git/info/exclude` equivalent. |
+| System, global and local config | `ragnart.yaml`, then `project.toml`, then the request | Each level overrides the one before it (§9.2). |
+| `git status` | `ragnart status` (built) | Queue and Qdrant counts; `--ignored` lists ignored files with their reason. |
+| `git ls-files`, with `--others`, `--ignored`, `--stage` | `ragnart ls-files` (built), same flags | Without a flag, lists indexed files. `--stage` lists every queue row with its status. |
+| `git check-ignore -v` | `ragnart check-ignore -v` (built) | Prints the file, line and pattern that decide each path. |
+| `git add` | `ragnart add` and `ragnart add --wait` (planned) | `add` queues; `add --wait` blocks until the item is indexed (deviation E). |
+| `git rm` | `ragnart rm` (planned) | Appends an anchored line to the nearest `.ragignore`; never deletes a file (deviation B). |
+| `git mv` | `ragnart mv` (planned) | Move detection by `content_hash` (§4.2); nothing is re-embedded. |
+| `git diff` | `ragnart diff` (planned) | The plan of the next sync, shown without applying it. |
+| `git fsck` | `ragnart fsck` (planned) | Reconciliation (§10.3). |
+| `git gc` | `ragnart gc` (planned) | Purges tombstones after the grace period (§10.2). |
+| Staging everything on each run (`git add -A`) | Static policy, run by the timer | Every 6 hours, all files that the inclusion and exclusion rules admit (§7.2). |
+| Staging chosen paths (`git add <path>`) | Curated policy: `add` and `distill` | Only what a project chooses (§7.2, §7.3). |
+| `git commit`, `git log`, branches, remotes | None | Deviation F. The snapshot pairs (§10.4) are the nearest equivalent to tags and restore. |
+
+**Deviations from git.** Each deviation is named by a letter and states its reason.
+
+- **A. Ignore rules also remove indexed content.** The index is the NAS minus what the rules
+  exclude. A newly excluded item leaves the index through the normal sync, under its deletion
+  rules (§10.2). The sync log names the `.ragignore` file and line that matched. *Why:* git's
+  ignore rules never affect tracked files. Here that would keep excluded content in the index
+  indefinitely, which is what the exclusion exists to prevent.
+- **B. `rm` appends a rule and never deletes a file.** `ragnart rm <path>` (planned) adds an
+  anchored pattern to the nearest `.ragignore`. *Why:* the exclusion is durable, visible in a text
+  file, and reversed by removing its line. The NAS is the authority, so RAGNART does not delete
+  files from it.
+- **C. Symbolic links are followed.** The walk follows links, and patterns match the path as
+  walked, never a resolved path. A file reached through several links is queued once, under the
+  first path the walk meets. *Why:* `Gitlab--fotel` is reached through a link, and a rule should
+  match the path the operator sees.
+- **D. One ignore hierarchy across nested projects.** `.ragignore` files apply across project
+  boundaries within an NFS root. *Why:* a project is a folder marked with `.ragnart/`, not a
+  separate repository. A boundary that reset the rules would let excluded content in through the
+  project.
+- **E. `add` queues; `add --wait` blocks.** *Why:* git's `add` is cheap because hashing is cheap.
+  Ingestion parses on the CPU (§5.1) and can take a long time per item, and a blocking default
+  would hold the caller for that time. The ingestion run is the single writer (§10.3), so the queue,
+  not the caller, drives the index.
+- **F. No history, branches or remotes.** *Why:* the NAS is the authority and already keeps
+  history: hourly Synology snapshots and an offsite copy (§10.1). A second history inside RAGNART
+  would duplicate it and could disagree with it. The snapshot pairs (§10.4) are the restore points
+  of the index.
+- **G. An unreadable `.ragignore` stops the sync.** Git warns and continues. RAGNART raises an
+  error: the sync exits with a non-zero code and runs no deletion phase. *Why:* an exclusion that
+  cannot be read must neither admit content it would exclude nor delete content it would keep.
+  Continuing would do one or the other.
+
+**`.ragignore` semantics.** The format and matching are those of `.gitignore`:
+
+- Blank lines and `#` comments are ignored. `\` escapes the next character, including `\#` and a
+  trailing space.
+- A leading `!` re-includes a path. The last matching pattern in a file decides.
+- A trailing `/` matches directories only.
+- A `/` anywhere except at the end anchors the pattern to the directory of its file. Otherwise the
+  pattern matches at any depth below that directory.
+- `*`, `?`, bracket expressions (including POSIX classes such as `[[:digit:]]`) and `**` behave as in
+  gitignore.
+- A `.ragignore` in a directory applies to the paths below it, matched relative to that directory.
+  A file in a deeper directory takes precedence over one in a shallower directory. `config/ragignore`
+  has the lowest precedence and is matched relative to the crawled root.
+- A path below an excluded directory cannot be re-included. The walk does not enter an excluded
+  directory, so a `.ragignore` inside it is never read.
+- The rules apply to the NAS crawl only, not to the Claude Code and OpenCode session scanners.
+  `.gitignore` files are not read.
+- An unreadable `.ragignore` stops the sync (deviation G).
+- `ragnart check-ignore -v <path>` shows the file, line and pattern that decide a path.
+
+**Global and per-directory exclusion files.** Two files hold exclusion rules. `config/ragignore`
+is the live global list. It applies to every NAS root on every scan, has the lowest precedence,
+and lives in the repository, so it is reviewed and versioned with the code, as `ragnart.yaml` is.
+It holds system-wide rules (`.git/`, `node_modules/`, `.venv/`, and similar). A `.ragignore` in a
+directory holds that directory's own rules and belongs to its owner. Precedence, lowest first:
+`config/ragignore`, then the `.ragignore` files from the root downward, where a deeper file wins.
+`config/ragignore.example` is an inert template (every line commented out, excludes nothing; example
+lines start with `#> `, remove the marker to activate one); copy it as `.ragignore` into a directory
+to start local rules. This mirrors git's `core.excludesFile` against `.gitignore`.
 
 ## 2. Architecture
 
@@ -101,7 +196,7 @@ the last two are where kinds of material differ.
 |---|---|---|
 | **Data and access model** | Global | Identity, metadata, projects, grants (§4, §6) |
 | **Ingestion mechanics** | Common | One pipeline, versioned (§5) |
-| **Ingestion policy** | Per kind of material | **Static**: global include/exclude rules, unattended, every 6 hours. **Curated**: only what a project deliberately keeps (§7) |
+| **Ingestion policy** | Per kind of material | **Static**: the inclusion rules of `ragnart.yaml` and the exclusion rules of §1.2, unattended, every 6 hours. **Curated**: only what a project deliberately keeps (§7) |
 | **Curation (lifecycle)** | Per tier | Archive: blunt, mirrors the filesystem. Runtime: session records. Transient: material in flight (§7) |
 
 ## 4. Data model
@@ -114,9 +209,12 @@ Two version numbers govern the data. They are independent.
   database. It names the set of tables and columns and the Qdrant payload layout. Each change
   to the data model is a numbered migration that runs once and records the new version.
 - **Pipeline version — how an item's content became chunks and vectors.** Stored **per item**.
-  The current pipeline is **`p1`**, defined exactly in §5. Any change that alters stored chunks
-  or vectors defines a new version (`p2`, …). Because the version is per item, the collection
-  can hold a mix, and a change re-embeds only the items still on the old version, in batches,
+  The current pipeline is **`p1`**, defined in §5. A pipeline version changes only on a major
+  event: a change that makes items stored under the old version incompatible with new ones, or a
+  significant change of behaviour. Examples are a different embedding model, a change of reranking,
+  and a change to processing that alters results. Bug fixes and improvements to the current pipeline
+  are part of `p1` and do not create a version. Because the version is per item, the collection can
+  hold a mix, and a new version re-embeds only the items still on the old version, in batches,
   instead of the whole corpus.
 
 ### 4.2 Identity of an item
@@ -237,25 +335,54 @@ another project; an alias symlink becomes such a link), `grants` (§6).
 
 ## 5. Pipeline `p1`
 
-`p1` is the exact processing that produced every chunk now in the index. A change to any
-element in §5.1–§5.4 is a new pipeline version.
+`p1` is the current pipeline: the processing of §5.1 to §5.4, which decides what is stored, and the
+retrieval of §5.5, which reads it. Its version rule is in §4.1.
 
 ### 5.1 Parsing
 
 | Input | Parser |
 |---|---|
-| `pdf`, `docx`, `pptx` | docling 2.89.0, `DocumentConverter` with default options, exported to Markdown |
-| `pptx` when docling fails | python-pptx 1.0.2 (after LibreOffice conversion for OLE2 files) |
-| `pdf`, `docx` when docling fails | **raw read of the file bytes as UTF-8 with replacement** (a known defect, §13.1) |
+| `pdf`, `docx`, `pptx` | docling 2.89.0 `DocumentConverter`, exported to Markdown. The accelerator is set explicitly to CPU for each type, so the device is chosen in code and not by docling's automatic choice. PDF layout and table models run on the CPU. |
+| `pptx` when docling fails | python-pptx 1.0.2, after LibreOffice conversion for OLE2 files. If python-pptx also fails, the item fails (§5.2). |
+| `pdf`, `docx` when docling fails | No fallback. The item fails with `docling failed: …` and follows the retry rule of §5.2. |
 | `ipynb` | RAGNART's notebook parser (cells as text) |
 | Claude Code session (`.jsonl`) | RAGNART's parser: user and assistant text turns only; tool calls and tool results are dropped |
 | OpenCode session | Read from the OpenCode server API: user and assistant text |
-| All other included extensions | Read as UTF-8 text with replacement |
+| All other included extensions | Read as UTF-8 text with replacement, then subject to the text-like rules of §5.2 |
 
-### 5.2 Quality gate
+### 5.2 Admission
 
-A parsed text is rejected (`status = ignored`) when fewer than **85%** of its characters
-satisfy Python's `str.isprintable()`.
+Admission decides, before any embedding, whether an item is indexed. A rule that rejects an item
+sets its queue row to `ignored`, and `skip_reason` records the rule with the measured value.
+`ragnart status --ignored` lists these rows with their reason and retry count. The thresholds and
+caps are the values of `rag.admission` in `ragnart.yaml`. The purge tools in `utils/` use the
+same definitions, so they cannot drift from ingestion.
+
+**Before queueing (scan time).** An item is considered only if its extension is in
+`rag.scanner.include_extensions` (`ragnart.yaml`) and no exclusion rule of §1.2 matches it. An
+already-indexed item that an exclusion rule now matches leaves the index through the sync (§10.2).
+
+**After queueing (ingestion), in this order.** The size, NUL-byte and replacement-character rules
+apply to text-like files only: every type except `pdf`, `docx` and `pptx` (docling), `ipynb`,
+Claude Code `.jsonl` sessions and OpenCode sessions.
+
+| Rule | Value | Result and `skip_reason` |
+|---|---|---|
+| Size | More than 5,000,000 bytes (`max_text_file_size_bytes`), checked from the file size before the file is read | `too large: N bytes > 5000000 byte cap` |
+| NUL byte | A NUL byte in the first 8 KB of the file | `binary: NUL byte in first 8KB` |
+| Parsing | `pdf`, `docx`: docling raises. `pptx`: docling and python-pptx both raise. | Retried; after 5 failed attempts, the last error (`docling failed: …`) |
+| Replacement characters | U+FFFD above 0.5% of the decoded text (`fffd_ratio_threshold`, 0.005) | `binary: N% replacement chars` |
+| Quality gate | Printable ratio below 0.85, all items (see below) | `binary content: N% printable chars` |
+| Chunk cap | More than 5,000 chunks (`max_chunks_per_item`), all items. Checked after chunking and before embedding, so no embedding time is spent. | `too large: N chunks > 5000 chunk cap` |
+
+**Quality gate.** The printable ratio is the share of characters in the parsed text that are
+printable (`str.isprintable()`) or a tab, line feed or carriage return, and that are not U+FFFD.
+Empty text, or text that is only whitespace, is not rejected: the item completes with no points.
+
+**Retries.** A parse failure returns the item to `pending` with its retry count raised. The queue's
+`max_retries` (default 5) decides when the item is ignored: the fifth failed attempt ignores it,
+with the last error as `skip_reason`. The other rejections ignore the item at once, without retry.
+A `pdf` or `docx` that docling cannot parse is never read as text.
 
 ### 5.3 Chunking
 
@@ -270,20 +397,49 @@ satisfy Python's `str.isprintable()`.
 
 | Vector | Model | Details |
 |---|---|---|
-| Dense (unnamed) | **bge-m3** served by Ollama on Server 2 | Model digest `790764642607`, F16, 566.7 M parameters, 1024 dimensions, cosine distance. Ollama runs with `OLLAMA_CONTEXT_LENGTH=768`: input beyond 768 bge-m3 tokens is truncated. |
+| Dense (unnamed) | **bge-m3** served by Ollama on Server 2 | Model digest `790764642607`, F16, 566.7 M parameters, 1024 dimensions, cosine distance. Ollama runs with `OLLAMA_CONTEXT_LENGTH=2048`: input beyond 2048 bge-m3 tokens is rejected with HTTP 500, not truncated (§5.6). |
 | Sparse `sparse_text` | **fastembed 0.8.0, `Qdrant/bm25`** | Qdrant IDF modifier |
 
-### 5.5 Not part of `p1`
+**Storage.** Each chunk is one point in the `documents` collection (§7.1). A point holds the dense
+vector and, when the collection has it, the sparse vector `sparse_text`. Its payload holds `text`
+(the child, embedded), `parent_text` (the parent, returned), the payload fields of §4.4 that are
+present today, and `page`, which is always `0`. Before a file's points are written, all points for
+its `source_path` are deleted. The new points are upserted in batches of 256.
 
-Search-time processing does not change stored data and is not part of the pipeline version:
-hybrid fusion (Qdrant RRF), reranking, scope resolution, collapsing and grouping.
+### 5.5 Retrieval
 
-### 5.6 Known properties of `p1`
+Search is part of `p1`, because its results depend on the pipeline: a change to it that changes
+results is a version change (§4.1). Search does not change stored data. The steps, as built in
+`ragnart/search.py` and `ragnart/rerank.py`:
 
-- Chunk sizes are counted in `cl100k_base` tokens, the embedder's limit in bge-m3 tokens.
-  Children (250) stay below the limit; flat 512-token chunks of code, YAML or non-English text
-  can exceed 768 bge-m3 tokens and are truncated before embedding.
-- The raw-read fallback and the quality gate admit binary content (§13.1).
+1. The query is embedded with bge-m3 (dense). When hybrid search is on and the collection has
+   `sparse_text`, the query is also embedded as BM25 sparse vectors.
+2. Hybrid search (`rag.hybrid`, on by default) runs a dense prefetch of 30 candidates
+   (`dense_fetch`) and a sparse prefetch of 30 (`sparse_fetch`), fused by Qdrant's reciprocal rank
+   fusion. Without `sparse_text` the query is dense-only.
+3. Candidate count. With reranking on, hybrid keeps at most 30 candidates (`fetch_cap`), and
+   dense-only fetches `min(limit × 6, 30)` (`fetch_multiplier` 6). With reranking off, hybrid keeps
+   at most 50, and dense-only fetches `min(limit × 3, 50)`.
+4. Reranking (`rag.rerank`, on by default): bge-reranker-v2-m3, served by llama-swap on Server 2,
+   scores each candidate's child text, and candidates are ordered by that score. The request has a
+   10-second timeout. If the reranker fails, the candidates keep their Qdrant order and a warning
+   is logged.
+5. The first `limit` results are returned, each with its `parent_text` as content.
+
+The `score` field is the Qdrant score: the RRF value in hybrid search. The relevance signal is the
+rerank score (§9.2).
+
+### 5.6 Known properties
+
+- Chunk sizes are counted in `cl100k_base` tokens, not bge-m3 tokens (§5.3). The embedder's limit is
+  counted in bge-m3 tokens. Children (250 tokens) stay below the limit.
+- Ollama runs with `OLLAMA_CONTEXT_LENGTH=2048` (§5.4). Flat 512-token chunks of code, YAML or
+  non-English text can produce more than 512 bge-m3 tokens, and a pathological chunk can still exceed
+  2048. Ollama rejects such input with HTTP 500 (`the input length exceeds the context length`); it
+  does not truncate it. The item is retried, then ends `ignored` with the 500 as its `skip_reason`
+  (`docs/RAG-troubleshoot.md` §2.13).
+- Page, slide and cell numbers are not tracked: `page` is always `0`.
+- There is no secret filter: credentials in files and sessions are embedded and returned.
 
 ## 6. Access model
 
@@ -359,7 +515,7 @@ grants shaped for persons and groups) is in place from v0.2 so nothing has to be
 
 | Tier | Lifecycle | Where | Vector-indexed | Leaves the tier by |
 |---|---|---|---|---|
-| **Transient** | Material in flight: gathered, not yet judged | Files in a project's `.ragnart/inbox/`, or an attached folder | **No.** The agent reads the files directly. | Compact (becomes an Archive reference), drop, or expiry |
+| **Transient** | Material in flight: gathered, not yet judged | Files in a project's `.ragnart/inbox/`, or an attached folder | **No.** The agent reads the files directly. | Distill (becomes an Archive reference), `rm`, or expiry |
 | **Archive** | Persistent | NFS roots (static crawl) and project references (curated) | Yes | The file is removed (after the grace period, §10.2) |
 | **Runtime** | Persistent session record; a specific case of Archive | Claude Code and OpenCode sessions | Yes | — |
 
@@ -371,8 +527,8 @@ used while work is in progress and becomes persistent only by being curated.
 
 | Policy | What enters | Trigger |
 |---|---|---|
-| **Static** | Every file under the NFS roots matching the global include/exclude rules in `ragnart.yaml`, plus every Claude Code and OpenCode session | `ragnart-ingest.timer`, every 6 hours |
-| **Curated** | A project's references (`sources/`, `notes/`) and its `MEMORY.md` | Compact, then the next ingestion run, or "ingest now" for that project |
+| **Static** | Every file under the NFS roots that `ragnart.yaml` includes and no rule of §1.2 excludes, plus every Claude Code and OpenCode session | `ragnart-ingest.timer`, every 6 hours |
+| **Curated** | A project's references (`sources/`, `notes/`) and its `MEMORY.md` | Distill, then the next ingestion run, or `add --wait` for that project |
 
 Archive curation is blunt: a file that exists is indexed; a file that is removed has its
 chunks removed. Nothing else decides.
@@ -388,16 +544,16 @@ Project mode is RAGNART's reason to exist. Work in a project has two phases:
 | Lives in | The Transient tier | — |
 | Output | — | The project's **reference set** and its **project memory** |
 
-**Compact** is the step from gather to distill, the deterministic counterpart of a session
+**Distill** is the step from gather to the reference set, the deterministic counterpart of a session
 `/compact`. It is split in two:
 
 - **Selection is deterministic.** Which items persist is decided by explicit rules (in
-  `project.toml`) and explicit keep/drop decisions, recorded. The same inputs and rules give
+  `project.toml`) and explicit `add` and `rm` decisions, recorded. The same inputs and rules give
   the same persisted set.
 - **The summary is generated and contained.** The agent writes or updates the project memory;
   it is a file, edited in place, whose entries point to the references they come from.
 
-Persisting means placing files: a kept item moves from `inbox/` to the project's references;
+Persisting means placing files: a selected item moves from `inbox/` to the project's references;
 the memory file is written. The Archive mechanics then index them like any other file.
 
 ### 7.4 Project context
@@ -415,7 +571,7 @@ materials are seen in relation to one another.
 - **Context is implicit by location** (the nearest `.ragnart/` above the working directory)
   and **explicit by path** from anywhere: "structure the docs the way
   `~/Gin-AI/projects/AYA` does" loads AYA's memory and searches AYA's references.
-- **Context is alive.** Each session adds to it; compact runs whenever work is consolidated.
+- **Context is alive.** Each session adds to it; distill runs whenever work is consolidated.
 - In a code repository the project's own `CLAUDE.md`, docs and git history are references;
   RAGNART's memory lives under `.ragnart/` and never modifies tracked files.
 
@@ -431,13 +587,13 @@ in which it was used is already archived and resumable in the Runtime tier.
 
 Folders that must be searchable by meaning before curation are attached as reference material
 (which indexes them). Kotaemon uploads are deliberate acts and enter directly as references,
-followed by "ingest now".
+followed by `add --wait`.
 
 ### 7.5 Transient lifecycle
 
 The detailed lifecycle of the Transient tier is defined in its own design step (§13.3), with
 the questions of a cache: admission, states and transitions, eviction, invalidation,
-write-back (compact), actors and access through the interfaces.
+write-back (distill), actors and access through the interfaces.
 
 ## 8. Retrieval: scope and grounding
 
@@ -597,7 +753,7 @@ rank-fusion value and does not measure relevance.
 - `ragnart calibrate` runs the set over ranges of knob values and reports the hit rate in the
   top 5, the rank of the first correct source, and pollution indicators; it suggests settings.
 - The operator applies settings explicitly; there is no automatic tuning.
-- The same set is the gate for a new pipeline version: a `p2` may not lower the top-5 hit rate
+- The same set is the gate for the next pipeline version (`p2`): it may not lower the top-5 hit rate
   beyond an agreed tolerance.
 
 ## 10. Failure and consistency
@@ -614,33 +770,46 @@ NAS backups are for emergencies; normal operation never relies on them.
 
 ### 10.2 Deletion rules
 
-**Status.** Target rules. Today the sync deletes every queue row it did not see, without
-waiting for Qdrant to confirm, with one guard (OpenCode rows are kept when the OpenCode API is
-unreachable). Rules 1 and 3 are v0.2 fix-first item 1; rule 2 (tombstone and grace) is part of
-v0.2; rules 4 and 5 are not yet scheduled (§13.2).
+**Status.** Rules 1, 3 and 5 are built. Rule 2 (tombstone and grace period) is v0.2. Rule 4 (purge
+record) is not yet scheduled (§13.2).
 
-Deletion is the dangerous operation:
+Deletion is the dangerous operation. The sync applies these rules:
 
-1. Nothing is deleted because it was **not seen**, unless the scan that missed it is proven
-   complete: every root in scope accessible and non-empty, no scan errors, the source API
-   reachable.
-2. A vanished item is first **tombstoned** (`missing_since`); its chunks are purged after the
-   grace period.
-3. A sync that would delete more than `max_delete_fraction` of the rows in scope skips its
-   deletion phase and fails loudly; an explicit override exists for genuine mass deletions.
-4. Every purge is logged: key, chunk count, reason, time.
-5. Qdrant deletes are confirmed before the state row is removed.
+1. Nothing is deleted because it was **not seen**, unless the scan that missed it is complete. A
+   root is incomplete when it is not a directory, or when it yields zero files while the queue still
+   holds rows under it, because an unmounted mount point looks the same. If any root is incomplete,
+   the whole deletion phase is skipped: no rows and no Qdrant points are deleted, the sync logs an
+   error and exits with code 1, and the queueing done by the scan stands. The check covers only the
+   owners the sync scans: with `--user`, only that owner's rows. An OpenCode session row is kept while
+   the OpenCode API cannot be read. An unreadable `.ragignore` stops the sync before this point
+   (§1.2, deviation G).
+2. A vanished item is to be **tombstoned** (`missing_since`), and its chunks purged after a grace
+   period. In the current sync, its chunks are deleted in the run that finds it missing. Tombstone and
+   grace period are v0.2 (§13.2).
+3. Deletion is limited to `rag.sync.max_delete_fraction` (0.10 in `ragnart.yaml`) of the **completed**
+   rows. When more completed rows would be deleted than that fraction of all completed rows, the
+   deletion phase is skipped, the sync logs an error and exits with code 1. `--allow-mass-delete`
+   runs the deletion for that run.
+4. Every purge is to be recorded with its key, chunk count, reason and time. The sync log names each
+   deleted path and its reason. The chunk count and a purge record are not kept yet (§13.2).
+5. Qdrant deletes wait for Qdrant to confirm them (`wait=true`), and a queue row is removed only after
+   its points are gone. If a delete fails, the sync stops, the row survives, and the next sync retries.
 
 ### 10.3 Operating rules
 
-**Status.** Single writer (the lock) and idempotent ingestion are built. Reconciliation is
-part of v0.2; notifications are not yet scheduled.
+**Status.** The daemon's single-writer lock and idempotent ingestion are built. The sync does not take
+the lock (§13.2). Reconciliation is part of v0.2; notifications are not yet scheduled.
 
-- **Single writer.** One process at a time changes the index, holding the ingestion lock
-  (`RAGNART--databases/rag-ingest.lock`). Ingest-now, compact, keep and drop take the lock or
-  hand their work to the ingestion run. `rag_state.db` is opened from Server 2 only.
-- **Idempotency.** Every operation (ingest a file, sync, backfill, compact, ingest-now) can be
+- **Single writer.** The ingestion daemon changes the index only while it holds the ingestion lock
+  (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`); a second daemon exits. `add --wait`,
+  `distill`, `add` and `rm` take the lock or hand their work to the ingestion run. `rag_state.db` is
+  opened from Server 2 only.
+- **Idempotency.** Every operation (ingest a file, sync, backfill, distill, `add --wait`) can be
   re-run safely after a crash.
+- **Failed sync.** A sync that refuses deletion or crashes does not stop the ingestion run. The
+  daemon, the WAL checkpoint and the snapshot step still run. The run then exits with the sync's exit
+  code, so `ragnart-ingest.service` is marked failed.
+
 - **Reconciliation.** A scheduled check compares the two stores: each completed item's
   `chunk_count` against its points, and every key in Qdrant against a row. It **repairs**
   automatically (re-queues missing items, deletes orphaned points under the deletion rules)
@@ -675,7 +844,7 @@ with the last copies kept, by a timer installed with RAGNART's units.
 | RAM | 23 GB; Qdrant uses 17.2 GB | 27 GB; Ollama, llama-swap and the GPU models share it |
 | Other duties | AYA Windows VM host (its passthrough boot entry reserves 8 GB of hugepages) | Ingestion, search, embedding, reranking |
 
-Qdrant keeps vectors in RAM. A clean corpus (§13.1) is about 400,000 points instead of about
+Qdrant keeps vectors in RAM. A corpus that passes the admission rules of §5.2 is about 400,000 points instead of about
 3 million, roughly 2–3 GB instead of 17 GB, which removes the memory pressure on Server 1. The
 placement of Qdrant is decided after the cleanup, from measured memory use.
 
@@ -683,9 +852,9 @@ placement of Qdrant is decided after the cleanup, from measured memory use.
 
 | Interface | Role |
 |---|---|
-| HTTP API (Server 2, port 8100) | `GET /v1/search` and `GET /health`; planned: project listing and resolution, item listing for metadata queries, grant management |
-| `ragnart` CLI | Planned (v0.3); today the operations tools are separate `utils/rag_*.py` scripts. Operations and project work: `init`, `where`, `add`, `inbox`, `keep`, `drop`, `compact`, `ingest-now`, `expect`, `calibrate`, `grant`, `revoke`, `transfer` |
-| `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.3); today the `/rag` command. Scope and grounding (§8), librarian behaviour, project context loading, compact |
+| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. Planned: project listing and resolution, item listing for metadata queries, grant management |
+| `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.3): `init`, `add`, `add --wait`, `rm`, `mv`, `diff`, `fsck`, `gc`, `distill`, `inbox`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
+| `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.3); today the `/rag` command. Scope and grounding (§8), librarian behaviour, project context loading, `distill` |
 | Kotaemon | Browser UI: project picker as scope, uploads as references, answers by its own model through the SoHoAI gateway |
 
 API versioning, the division of work between CLI, skill and API, and Kotaemon's fit are open
@@ -693,51 +862,27 @@ API versioning, the division of work between CLI, skill and API, and Kotaemon's 
 
 ## 13. Open issues
 
-### 13.1 Corpus pollution — pipeline fragility
+### 13.1 Corpus pollution
 
-Measured on the live index (14,712 items with points, 2,988,440 points):
+Binary and oversized content is kept out by the admission rules of §5.2. A PDF or DOCX that docling
+cannot parse is never read as text. Binary text-like files are rejected by the NUL-byte and
+replacement-character checks, and items over the size, quality or chunk limits are ignored with a
+reason. Mirrored trees are settled: `AWS--fotel` and `Gitlab--fotel` are both indexed (decision D6 in
+§14).
 
-| Category | Points | Share | Items |
-|---|---|---|---|
-| PDF/DOCX read as raw binary bytes (about 4,200 points per MB of file) | 1,243,155 | 41.6% | 211 |
-| Very large `.txt` (Android R8 mapping files in `P4OC/mappings/`, nine versions of about 80 MB; VPN client logs; schema dumps) | 987,376 | 33.0% | 15 |
-| Large CSV exports (data dumps, scoring sheets, course datasets) | 362,643 | 12.1% | 23 |
-| The actual corpus | 395,253 | 13.2% | 14,462 |
-| Item no longer on disk | 13 | 0.0% | 1 |
+### 13.2 Open items in sync and tooling
 
-Causes, all in the ingestion code:
-
-1. When docling fails on a PDF or DOCX, the parser reads the file's bytes as text.
-2. The quality gate counts `str.isprintable()` characters, and the replacement character
-   produced when decoding binary bytes counts as printable, so decoded binary passes. The
-   purge utility `utils/rag_purge_corrupt.py` uses the same test.
-3. There is no maximum file size and no maximum chunk count per item.
-4. The gate runs only at ingestion; unchanged files keep their chunks indefinitely.
-5. The static policy takes every `.txt` and `.csv`; mirrored folder trees (`AWS--fotel` and
-   `Gitlab--fotel`) index the same files twice.
-
-Remedy direction: a pipeline `p2` (no raw-read fallback for binary types, a binary check before
-parsing, size and chunk caps that mark items `ignored` with a visible reason), a one-off purge
-of the affected items after a snapshot pair, and a corrected purge utility, done before the
-v0.2 metadata backfill. Open decisions: whether CSV and similar data files belong in the static
-policy, the cap values, and whether mirrored trees are both indexed. The cleanup is being
-handled in a separate working session.
-
-### 13.2 Known defects in sync and tooling
-
-Listed with code locations, fixes and tests in `docs/Implementation-plan.md` §6 v0.2
-("Fix first"): an unreachable NFS root deletes its tree from the index; a `--user` sync
-deletes other owners' rows; status and reset tools do not resolve the `documents` alias;
-`/health` blocks and search returns 503 until restart when Qdrant was down. Also: sync deletes
-Qdrant points without waiting for confirmation, which can leave orphaned points; there is no
-tombstone or grace period, no `max_delete_fraction`, no purge log and no reconciliation yet
-(§10.2, §10.3).
-
+- **Tombstone and grace period** (§10.2, rule 2). Not built; v0.2.
+- **Purge record** (§10.2, rule 4). The sync log names each deleted path and its reason. The chunk
+  count and a purge record are not kept.
+- **Reconciliation** (§10.3). Not built; v0.2.
+- **Ingestion lock in the sync.** The sync does not take `rag.ingest_lock` (§10.3), so a manual sync
+  can run while the ingestion daemon runs.
 
 ### 13.3 Undefined parts of the design
 
 - **Transient lifecycle** ("cache dynamics"): admission, states and transitions, eviction,
-  invalidation, compact rules, actors, interface-level access. To be defined before v0.3.
+  invalidation, distill rules, actors, interface-level access. To be defined before v0.3.
 - **Interfaces**: API versioning, CLI / skill / API division, Kotaemon fit.
 - **Sharing and ownership transfer**: mechanism in §6.4, not built.
 - **Authentication**: OAuth with group claims, when a second user exists.
@@ -752,8 +897,8 @@ tombstone or grace period, no `max_delete_fraction`, no purge log and no reconci
   specified.
 - An active Claude Code session is re-embedded in full on every change while it grows.
 - Secrets in sessions and files are embedded and returned; there is no secret filter.
-- The static policy runs every 6 hours; curated projects use ingest-now.
-- `p1` truncates inputs longer than 768 bge-m3 tokens (§5.6).
+- The static policy runs every 6 hours; curated projects use `add --wait`.
+- Inputs longer than 2048 bge-m3 tokens are rejected by Ollama, not truncated (§5.6).
 
 ### 13.5 Smaller items
 
@@ -771,7 +916,7 @@ tombstone or grace period, no `max_delete_fraction`, no purge log and no reconci
 | D1c | Payload carries filterable metadata; identical copies collapse; metadata and time filters; metadata-only queries from the state DB | Operator needs "PDF modified last month", "OpenCode sessions last week"; duplicates are noise | Indexes on type, time, hash; listing endpoint |
 | D2 | Everything is a project; grants to persons and groups; inheritance with opt-out; grants in the DB; roles `read`, `admin`; owner = metadata | One access concept instead of three; filesystem permissions unusable; NAS cannot hold access rules | `project_id` on every chunk; auth added later without backfill |
 | D2b | Projects addressed by path; `name` required; immutable `id` in `project.toml`; free tags, DB-only | KISS; moves must not touch Qdrant; tags change often | Tag edits are row updates |
-| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies; `curated` default | Gathered material is noise until judged; sessions already archive the work | No transient collection; compact places files; ingest-now |
+| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies; `curated` default | Gathered material is noise until judged; sessions already archive the work | No transient collection; distill places files; `add --wait` |
 | D3b | Project memory = indexed, citable `MEMORY.md` index; context implicit by location, explicit by path | The AYA-in-Claude-Code experience: no re-seeding | Skill loads the memory on entry |
 | D4 | Scope × grounding, orthogonal; defaults `project+strict` / `all+strict`; changes only by the operator, always shown; natural-language scope translated aloud | Librarian answers; no silent widening | Status line; `/ragnart` commands; required `scope` in the API |
 | D4b | Retrieval-only | Librarian answers; clients already have models | No model gateway; client enforces strict grounding |
@@ -779,3 +924,6 @@ tombstone or grace period, no `max_delete_fraction`, no purge log and no reconci
 | D5 | NAS is the authority; reconciliation repairs and fails loudly; deletion rules; single writer | Mirror SoHoAI's robustness; NAS backups cover disasters | Guards in the sync; scheduled reconciliation |
 | D5b | `opencode.db` local, nightly copy to the NAS per server | SQLite in WAL mode is unsafe on NFS | Backup timer installed with RAGNART |
 | D5c | Daily snapshot pair, 7 kept; local transient `snapshots_path` | Balance restore points against NAS space; avoid double NAS writes | NAS snapshot area about 150 GB |
+| D6 | Mirrored trees (`AWS--fotel`, `Gitlab--fotel`) are both indexed. The duplicated `_AWS` subtree is absent from the NAS | The remaining contents of the two trees differ | No deduplication rule in the scanner. A file reached through several links is queued once (§1.2, deviation C) |
+| D7 | RAGNART mirrors git in ingestion, exclusion and lifecycle. It uses git's command names where the mapping is exact, and its own terms elsewhere (§1.2). Deviations A to G are recorded in §1.2 with their reasons | Git already answers the questions this system asks: what is on disk, what is excluded and why, what would change, what is indexed. Its names are widely known, so one vocabulary serves the CLI and the docs | CLI verbs follow §12. `.ragignore` follows gitignore syntax and precedence. Each deviation carries its reason |
+| D8 | A pipeline version changes only on a major event: incompatibility with stored items, or a significant change of behaviour. Bug fixes and improvements stay in the current version (§4.1) | A version is a signal to the operator and to the calibration gate (§9.3). A new version per fix would make the signal meaningless and send every fix through the gate | Items affected by a fix are re-checked or re-ingested, with the version unchanged. A real new version re-embeds only the items still on the old version |

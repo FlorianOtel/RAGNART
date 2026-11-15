@@ -34,9 +34,9 @@ three tiers of material with different lifetimes.
 
 | Tier | What it holds | How it gets in | Lifetime |
 | --- | --- | --- | --- |
-| **Archive** | Files on the NAS: PDF, DOCX, PPTX, Markdown, text, CSV, YAML, notebooks, HTML, shell scripts | Periodic incremental scan (systemd timer) | Long-lived; follows the files on disk |
+| **Archive** | Files on the NAS: PDF, DOCX, PPTX, Markdown, text, YAML, notebooks, HTML, shell scripts | Periodic incremental scan (systemd timer) | Long-lived; follows the files on disk |
 | **Runtime** | AI-assistant sessions: Claude Code chat logs (`.jsonl`) and OpenCode sessions (through its HTTP API) | The same periodic ingestion | Long-lived; one record per session |
-| **Transient** | Material in flight for the current project: pages, files and notes gathered into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Gathered through the `ragnart` CLI and the assistant skill | Ephemeral: expires unless you **keep** it (compact moves it into the project's references, which the Archive indexes) or **drop** it |
+| **Transient** | Material in flight for the current project: pages, files and notes gathered into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Gathered through the `ragnart` CLI and the assistant skill | Ephemeral: expires unless you **add** it to the project (then **distill** moves it into the project's references, which the Archive indexes) or **rm** it |
 
 **Nested** means every chunk belongs to a project in a directory tree. A
 search can be scoped to one project, optionally including its sub-projects
@@ -89,7 +89,8 @@ planned, so multi-tenancy does not depend on filesystem permissions.
 | Path | What's there |
 | --- | --- |
 | `ragnart/` | The Python package: scanner, chunking/ingestion, embeddings, Qdrant collection, hybrid search, reranking, state DB, OpenCode client, and the FastAPI service (`ragnart/service.py`) |
-| `ragnart.yaml` | All configuration: model and service URLs, scanner include/exclude rules, rerank and hybrid parameters, users and shared spaces |
+| `ragnart.yaml` | All configuration: model and service URLs, scanner include rules, admission caps, sync guard, rerank and hybrid parameters, users and shared spaces |
+| `config/ragignore` | Global exclusion rules for the NAS crawl (gitignore syntax), applied under every root; per-directory `.ragignore` files add to them |
 | `utils/` | Operator tools: ingestion daemon, NFS sync, search CLI, status, corpus maintenance (purge, reset, sparse-vector migration), smoke and benchmark scripts, endpoint comparison |
 | `scripts/` | systemd units (`ragnart-search.service`, `ragnart-ingest.{service,timer}`), the ingestion wrapper, Qdrant + SQLite snapshot script, logrotate config, install script; `scripts/qdrant/` holds Qdrant's config, unit and installer for Server 1 |
 | `docs/` | Design and operations docs (see below) |
@@ -112,6 +113,16 @@ curl 'http://localhost:8100/health'
 `GET /v1/search` parameters: `q` (query), `user` (owner scope), `top_k`,
 `file_types`, `score_threshold`, `rerank`.
 
+The `ragnart` command reads the NAS crawl and changes nothing. It is installed by
+`pip install -e .` in the project venv; `python -m ragnart` runs the same commands without
+the install.
+
+```bash
+ragnart status --ignored                  # queue and Qdrant counts; ignored rows with their reason
+ragnart ls-files [--ignored|--others|--stage] [<path>...]   # indexed files, or files excluded or not yet queued; optionally under paths
+ragnart check-ignore -v <path>            # the .ragignore or config/ragignore line that excludes a path
+```
+
 For a permanent install, `sudo scripts/install-units.sh` installs the
 search service and the ingestion timer as systemd units, plus the log
 rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh`.
@@ -122,7 +133,7 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | --- | --- |
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
 | **v0.2 — Nested** | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
-| **v0.3 — Project mode** | `ragnart` CLI (`init`, `add`, `inbox`, `keep`, `drop`, `compact`, `ingest-now`, …), the `/ragnart` assistant skill with scope and grounding, project memory (`MEMORY.md`), the Transient cache |
+| **v0.3 — Project mode** | `ragnart` CLI (`init`, `add`, `add --wait`, `rm`, `distill`, `inbox`, …), the `/ragnart` assistant skill with scope and grounding, project memory (`MEMORY.md`), the Transient cache |
 | **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
 | **v0.5 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
 

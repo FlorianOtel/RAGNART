@@ -2,8 +2,8 @@
 title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite)
-updated_at: 2026-11-13--16-45
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-14--22-06
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -195,13 +195,11 @@ Work down the layers. Steps 1–2 run on Server 2.
    `python utils/rag_status.py --ignored --user florian` lists every ignored file with its
    reason. A document whose parsed text is empty is skipped with
    `WARNING: Empty document, skipping` and never produces points.
-3. **Why did the scanner not see it?** Check, in this order, against `rag.scanner` in
-   `ragnart.yaml`:
-   - The extension is in `include_extensions` (`.pdf .pptx .docx .md .sh .txt .csv .yaml
-     .yml .ipynb .html .jsonl`).
-   - No `exclude_file_patterns` substring is in the file name (`@synoeastream`, `._`, `~$`).
-   - No directory on the path, **as walked from the root**, ends with an
-     `exclude_dir_names` entry, and none ends with an `exclude_dir_suffixes` entry.
+3. **Why did the scanner not see it?** Check, in this order:
+   - The extension is in `include_extensions` in `ragnart.yaml` (`rag.scanner`).
+   - No `.ragignore` pattern matches. `ragnart check-ignore -v <path>` prints the file and
+     line of the rule that excludes the path, and prints nothing when no rule matches.
+     `config/ragignore` applies under every root (`docs/RAGNART-design.md` §1.2).
    - The file is under a scanned root. The timer syncs only `--user florian`:
      `/mnt/nfs/Florian`, `/home/florian/.claude/projects` and the OpenCode API (§2.6, §2.7).
    - It is not a second path to a file already seen: the scanner follows symlinks and
@@ -231,11 +229,12 @@ Work down the layers. Steps 1–2 run on Server 2.
 **Check:** the facet query in §2.4 step 4, grepped for the unwanted directory; or
 `grep 'Ingested .*' …/logs/rag-ingest.log | grep '<dir>'`.
 
-**Cause:** an `exclude_dir_names` entry matches the path *as `os.walk` sees it*, by suffix
-on a `/` boundary. It does not resolve symlinks and does not match variants of a name:
+**Cause:** no rule in `config/ragignore` or in a `.ragignore` matches the path, so the file is
+included. Rules match the path *as the walk sees it*. The walk does not resolve symlinks, and a
+rule matches the exact name, not variants of it:
 
 - `~/.claude` is a symlink to `/mnt/nfs/Florian/Gin-AI/dot.claude-Linux`, so the NFS walk
-  sees `dot.claude-Linux/`, not `.claude/` — both entries are needed.
+  sees `dot.claude-Linux/`, not `.claude/`. Both names have a rule.
 - `.Gin-AI-python-3.12/` does not match `.Gin-AI-python-3.12.old/`. Venv contents are
   caught generically by `site-packages/`, `.uv-python/` and `.cache/`.
 
@@ -246,29 +245,26 @@ find /mnt/nfs/Florian -maxdepth 3 -type d -name 'dot.*'
 ls -la ~ | grep -- '->'
 ```
 
-**Fix:** add the real on-disk directory name (with trailing `/`) to
-`rag.scanner.exclude_dir_names`. The next sync treats the excluded files as gone: it
-queues Qdrant deletes for them and drops their queue rows. Deletes use `wait=false`, so
-point counts keep falling for a while; wait for `update_queue.length == 0` before quoting a
-count:
-
-```bash
-curl -s http://192.168.1.93:6333/collections/documents \
-  | python3 -c "import json,sys; r=json.load(sys.stdin)['result']; print(r['points_count'], r['update_queue'])"
-```
+**Fix:** add a gitignore pattern for the real on-disk directory (for example
+`dot.claude-Linux/`) to `config/ragignore` (every root), or to the `.ragignore` in the
+directory above it. Syntax and precedence: `docs/RAGNART-design.md` §1.2. Check the result with
+`ragnart check-ignore -v <path>`. The next sync treats the excluded files as gone: it deletes
+their Qdrant points (`wait=True`, so the deletes are applied when the sync returns) and drops
+their queue rows. The sync is subject to the guards in §2.12. Point counts are final when the
+sync exits.
 
 ### 2.6 Sync deletes far more than expected, or a source drops to 0
 
-`rag_sync_nfs.py` treats **every queue row whose path was not seen in this scan** as
-deleted, and removes its points. Anything that hides files from the scan therefore removes
-them from the index.
+`rag_sync_nfs.py` treats **every queue row of the owners it scanned whose path was not seen in
+this scan** as deleted, and removes its points. Anything that hides files from the scan
+therefore removes them from the index, unless a guard stops the deletion (§2.12).
 
 | Symptom in the log | Cause | Fix |
 |---|---|---|
-| `NFS root not accessible, skipping: /mnt/nfs/Florian` followed by a large `Queued Qdrant point deletion for N removed file(s)` | NAS mount missing or stale during the sync | Never run a sync with the mount down (`ls /mnt/nfs/Florian` first). If it happened, remount and run sync + daemon: every file is re-queued and re-ingested. For a large loss, restoring the last snapshot pair is faster (§8). |
+| `Deletion phase SKIPPED: NFS root(s) not scannable this run` (ERROR, exit 1) | NAS mount missing or stale during the sync. Nothing was deleted. | Check the mount (`ls /mnt/nfs/Florian` first), then run the sync again (§2.12). Only if an earlier sync already deleted points, restoring the last snapshot pair is faster (§8). |
 | `claude_chats root not accessible` | `~/.claude` symlink target unreachable | Same as above. |
 | `Opencode API unreachable — preserving N existing opencode session(s)` | OpenCode down or auth failed; existing `opencode://` rows are kept on purpose | See §2.7. |
-| `la-familia` content disappears after a timer run | A sync **without** `--user` scans the shared root `/mnt/nfs/La-Familia` (owner `la-familia`); the timer's `--user florian` sync does not, so it removes those rows again | Shared content is only stable if the timer syncs it; add the shared scope to `RAG_SYNC_USERS` handling in `scripts/ragnart-ingest-run.sh` before relying on it. |
+| `la-familia` content not updated after a timer run | The timer runs `--user florian` only, so it does not scan the shared root `/mnt/nfs/La-Familia` (owner `la-familia`). The timer never deletes `la-familia` rows. | Run `python utils/rag_sync_nfs.py` without `--user` by hand when shared content changes. The deletion guards in §2.12 apply to that run. |
 
 ### 2.7 OpenCode sessions missing
 
@@ -376,11 +372,13 @@ because a newer mtime re-queues a row whatever its status.
 **Symptom:** every chunk of a file fails with HTTP 500 from
 `http://192.168.1.95:11434/api/embeddings`; the Ollama journal shows
 `cudaMalloc failed: out of memory` / `graph_reserve: failed to allocate compute buffers`.
+A single chunk failing with `the input length exceeds the context length` in the Ollama journal
+has another cause: see §2.13.
 
 **Check (Server 2):**
 
 ```bash
-systemctl cat ollama | grep -E 'OLLAMA_(CONTEXT_LENGTH|MAX_LOADED_MODELS)'   # CONTEXT_LENGTH=768
+systemctl cat ollama | grep -E 'OLLAMA_(CONTEXT_LENGTH|MAX_LOADED_MODELS)'   # CONTEXT_LENGTH=2048
 curl -s http://192.168.1.95:11434/api/ps | python3 -m json.tool             # context_length when loaded
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 curl -s http://192.168.1.95:11434/api/embeddings -H 'Content-Type: application/json' \
@@ -390,10 +388,77 @@ curl -s http://192.168.1.95:11434/api/embeddings -H 'Content-Type: application/j
 
 **Cause / fix:** Ollama sizes the compute buffer from the context length. With the default
 (4096) bge-m3 needs ~1.2 GiB of compute buffer on top of its weights, which does not fit
-next to the chat model and the reranker. `Environment="OLLAMA_CONTEXT_LENGTH=768"` in the
-Ollama unit keeps it at ~0.6 GiB total; child chunks are ~250 tokens, so 768 is enough.
-If the line is missing, add it, `sudo systemctl daemon-reload && sudo systemctl restart
-ollama`. Failed files are retried by the next runs.
+next to the chat model and the reranker. The systemd drop-in
+`/etc/systemd/system/ollama.service.d/ragnart-context-length.conf` sets
+`Environment="OLLAMA_CONTEXT_LENGTH=2048"` and overrides the 768 set in `ollama.service`. At 2048,
+Ollama uses ~1.1 GiB of VRAM. The limit is 2048 because chunks are sized in cl100k tokens (flat
+chunks up to 512), and bge-m3 can produce more tokens than cl100k for code, YAML and non-English
+text. A chunk that still exceeds 2048 is rejected (§2.13).
+If the value is not 2048, check that the drop-in exists, then `sudo systemctl daemon-reload && sudo
+systemctl restart ollama`. Failed files are retried by the next runs.
+
+### 2.12 Sync exits 1 with "skipped roots" or "mass delete"
+
+**Symptom:** the sync logs an ERROR and exits 1, and the ingestion log shows
+`WARN: sync exited 1 — deletions not applied`. Either:
+
+- `Deletion phase SKIPPED: NFS root(s) not scannable this run: …`, or
+- `Deletion phase SKIPPED: N completed file(s) would be deleted, more than 10% of the M completed rows …`.
+
+Nothing was deleted. Queueing of new and modified files still ran, and the ingest daemon
+still ran (`docs/RAG-strategy.md` §8.2). The ingestion unit ends failed.
+
+**Check:**
+
+```bash
+grep -E ' (ERROR|WARNING):' /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log | tail -20
+mount | grep /mnt/nfs
+ls /mnt/nfs/Florian
+```
+
+**Skipped roots — cause and fix:** the NFS root is missing, is not a directory, or is empty
+while the queue holds rows under it. The guard refuses deletion for the whole run, and
+`--allow-mass-delete` does not override it. Fix the mount, then run the sync by hand:
+`python utils/rag_sync_nfs.py --user florian`.
+
+**Mass delete — cause and fix:** more than `rag.sync.max_delete_fraction` (`0.10`) of the
+completed rows would be deleted. Usually a source vanished (a directory moved or renamed, a
+share unmounted in part), or a new `.ragignore` or `config/ragignore` rule covers a large part of
+the corpus. Find the cause before overriding. `ragnart check-ignore -v <path>` shows which rule
+excludes a sample path. If the deletion is intended, run the sync again with the override:
+
+```bash
+python utils/rag_sync_nfs.py --user florian --allow-mass-delete
+```
+
+The run logs a WARNING with the counts before it deletes. Qdrant deletes are applied before
+the rows are removed, so an interrupted run is repeated by the next sync.
+
+### 2.13 Items marked ignored with a reason
+
+`ignored` rows carry a `skip_reason`. The reasons written by admission, by the parsers and by the embedder:
+
+| `skip_reason` starts with | Meaning | Changes when |
+|---|---|---|
+| `too large: N bytes > 5000000 byte cap` | A text-like file (not docling, ipynb or jsonl) is bigger than `rag.admission.max_text_file_size_bytes`. It is not read. | The file changes, or the cap is changed and the row is re-checked (below). |
+| `too large: N chunks > 5000 chunk cap` | The item would produce more chunks than `rag.admission.max_chunks_per_item`. Nothing is embedded. | As above. |
+| `binary: NUL byte in first 8KB` | A text-like file has a NUL byte near its start. | As above. |
+| `binary: NN.N% replacement chars` | A text-like file's decoded text has more U+FFFD characters than `rag.admission.fffd_ratio_threshold` (0.5%). | As above. |
+| `binary content: NN% printable chars` | The parsed text is below 0.85 printable (the quality gate). | As above. |
+| `docling failed: <error>` | PDF or DOCX parsing failed. There is no raw-read fallback. The item was retried up to `max_retries` (5), then marked `ignored`. | The file changes, or it is re-queued (§2.10). |
+| `Server error '500 Internal Server Error' … /api/embeddings` | A chunk is longer than Ollama's context length (`OLLAMA_CONTEXT_LENGTH=2048`, bge-m3 tokens). Ollama rejects the input; it does not truncate it. Retried up to `max_retries` (5), then marked `ignored`. **Check:** `ssh root@localhost 'journalctl -u ollama --since -1d --no-pager' \| grep 'input length exceeds the context length'`. | The file changes, or it is re-queued (§2.10). A chunk that is still too long is rejected again. |
+
+The admission rules are in `docs/RAGNART-design.md` §5. The sync re-queues an `ignored`
+row only when its file's mtime changes. A change to a cap in `ragnart.yaml` applies to new and
+changed files. Existing `ignored` and `completed` rows are re-checked with
+`utils/rag_purge_rescan.py` (`docs/RAG-strategy.md` §8.5).
+
+To see the reason for each ignored file:
+
+```bash
+ragnart status --ignored                              # retry count and skip_reason per ignored row
+python utils/rag_status.py --ignored --user florian   # the same listing from the operator tool
+```
 
 ---
 
@@ -470,27 +535,24 @@ python utils/rag_search_cli.py --query "your query" --user florian
 python utils/rag_search_cli.py --query "your query" --user florian --no-rerank --file-types claude_chat
 ```
 
-### 4.1 HTTP 503 "Qdrant client not available"
+### 4.1 HTTP 503 "Qdrant unavailable"
 
-**Cause:** the service connects to Qdrant once, at start. If Qdrant was unreachable then,
-it logs `Qdrant unavailable — search disabled` and answers 503 until it is restarted —
-even after Qdrant is back.
+**Cause:** Qdrant is unreachable, or answers with a server error, while the search runs. The
+search answers 503 `Qdrant unavailable` for that request only.
 
 ```bash
-ssh root@localhost 'journalctl -u ragnart-search.service -n 50 --no-pager' | grep -i qdrant
 curl -s -m 5 http://192.168.1.93:6333/healthz; echo
+curl -s -m 10 http://192.168.1.95:8100/health; echo    # {"status":"degraded","qdrant":false} while Qdrant is down
 ```
 
-**Fix:** once Qdrant answers, `sudo systemctl restart ragnart-search.service`. Restart the
-search service whenever Qdrant was down while the service was starting.
+**Fix:** restore Qdrant (§5). No service restart is needed: the next search after Qdrant
+answers succeeds.
 
-### 4.2 `/health` hangs, or reports `degraded`
+### 4.2 `/health` reports `degraded`
 
-`/health` calls Qdrant's `get_collections()` with the client's 60 s timeout. When Server 1
-is down or unreachable the request hangs well beyond 5 s instead of failing fast; use
-`curl -m 10` in checks. `{"status":"degraded","qdrant":false}` means Qdrant did not answer:
-go to §5 and §6. Searches recover by themselves when Qdrant comes back, unless the service
-started while Qdrant was down (§4.1).
+`/health` probes Qdrant's `/healthz` with a 2 s timeout, so it answers within about 2 s.
+`{"status":"degraded","qdrant":false}` means Qdrant did not answer within that time: go to §5
+and §6. Searches recover by themselves when Qdrant comes back (§4.1).
 
 ### 4.3 Empty or too few results
 
@@ -632,9 +694,6 @@ curl -s http://192.168.1.93:6333/aliases; echo         # documents -> documents_
 python utils/rag_sparse_migrate.py status              # read-only summary
 ```
 
-- `utils/rag_status.py` prints `Qdrant: collection 'documents' does not exist yet` even
-  when all is well: it checks real collection names and does not resolve aliases. Known
-  issue in that utility; ignore the line and use the commands above.
 - If the alias is really missing, `ensure_collection()` in any starting process will create
   an **empty** `documents` collection. Do not start services or ingestion in that state;
   recreate the alias first (`POST /collections/aliases` with
@@ -659,8 +718,6 @@ python utils/qdrant_status.py --watch 30   # poll until green and lag 0
 - On this hybrid collection the "Indexed" figure counts dense **and** sparse vectors, so
   the lag shown is around 50 % even when idle. Compare "Indexed" with 2 × "Points" for the
   real backlog.
-- After `wait=false` deletes (sync cleanup), point counts are only final once
-  `update_queue.length` is 0 (§2.5).
 
 ---
 
@@ -705,8 +762,8 @@ Points that apply here:
   empty `documents` collection (§5.3) while Qdrant is being restored.
 - Afterwards run `python utils/rag_sync_nfs.py --user florian` and the daemon (§2.2) to
   pick up everything changed since the snapshot; ingestion is idempotent.
-- `utils/rag_reset.py [--user OWNER] [--yes]` resets the queue to `pending` (all rows, or
-  one owner) for a full re-ingest. Like `rag_status.py`, it checks real collection names
-  and does not resolve the `documents` alias, so it currently leaves the Qdrant points in
-  place (re-ingest replaces them file by file; points of files that no longer exist stay).
-  It is a last resort, not a repair step.
+- `utils/rag_reset.py [--user OWNER] [--yes]` resets the queue to `pending` (all rows, or one
+  owner) for a full re-ingest. A full reset refuses when `documents` is an alias: it exits
+  non-zero and deletes nothing. Restore from a snapshot pair instead (`docs/RAG-strategy.md`
+  §9.3). `--dry-run` prints the points and rows it would delete and writes nothing. It is a last
+  resort, not a repair step.

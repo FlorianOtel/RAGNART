@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference)
-updated_at: 2026-11-13--16-26
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-14--22-06
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -120,32 +120,47 @@ To add a user, uncomment (or add) a `users:` block with `owner` and `nfs_roots`,
 owner to `RAG_SYNC_USERS` in `scripts/ragnart-ingest-run.sh` (§8.2). The email key is only a
 label; nothing authenticates against it (§10).
 
-### 2.2 Scanner rules (`rag.scanner`)
+### 2.2 Inclusion and exclusion rules
 
-All four keys are required; `scan_nfs_roots()` raises `ValueError` if the section or any key
-is missing. They apply to NAS roots only — the Claude Code and OpenCode scanners have their
-own rules.
+Inclusion and exclusion are separate rules. They apply to NAS roots only; the Claude Code and
+OpenCode scanners have their own rules.
 
-| Key | Values | Matching |
-|---|---|---|
-| `include_extensions` | `.pdf .pptx .docx .md .sh .txt .csv .yaml .yml .ipynb .html .jsonl` | lower-cased file suffix must be in the list |
-| `exclude_dir_names` | `.Gin-AI-python-3.12/`, `.Gin-AI-python-3.12.old/`, `.uv-python/`, `site-packages/`, `.cache/`, `__pycache__/`, `.git/`, `node_modules/`, `.claude/`, `dot.claude-Linux/`, `.vscode/`, `.venv/`, `Library/`, `Applications/`, `LLMs-cache/`, `Downloads/`, `Microsoft--flotel/Documents/` | every entry ends in `/`; the full child path must end with `"/" + entry` (minus its slash), so `Library/` matches `…/Library` but not `…/PublicLibrary`, and multi-component entries match that exact segment sequence; pruned before descent |
-| `exclude_dir_suffixes` | `.dist-info` | bare directory name `endswith(suffix)` |
-| `exclude_file_patterns` | `@synoeastream`, `._`, `~$` | substring of the file name (Synology stream metadata, macOS AppleDouble sidecars, Office lock files) |
+- **Inclusion** is `rag.scanner.include_extensions` in `ragnart.yaml`. A file is a candidate
+  only if its lower-cased suffix is in the list: `.pdf .pptx .docx .md .sh .txt .yaml .yml
+  .ipynb .html .jsonl`. `.csv` is listed in `ragnart.yaml` but commented out, with the reason
+  written next to it.
+- **Exclusion** uses gitignore semantics. `.ragignore` files inside the crawled roots, and the
+  global `config/ragignore` (lowest precedence, applies under every root), exclude paths. The
+  syntax, precedence and the deviations from git are described in `docs/RAGNART-design.md` §1.2.
+- `ragnart check-ignore -v <path>` prints the file and line of the rule that excludes a path.
+  Use it to see why a path is or is not ingested.
 
-Notes on the exclusions:
+**Global and per-directory exclusion files.** Two files hold exclusion rules. `config/ragignore`
+is the live global list. It applies to every NAS root on every scan, has the lowest precedence,
+and lives in the repository, so it is reviewed and versioned with the code, as `ragnart.yaml` is.
+It holds system-wide rules (`.git/`, `node_modules/`, `.venv/`, and similar). A `.ragignore` in a
+directory holds that directory's own rules and belongs to its owner. Precedence, lowest first:
+`config/ragignore`, then the `.ragignore` files from the root downward, where a deeper file wins.
+`config/ragignore.example` is an inert template (every line commented out, excludes nothing; example
+lines start with `#> `, remove the marker to activate one); copy it as `.ragignore` into a directory
+to start local rules. This mirrors git's `core.excludesFile` against `.gitignore`. The git parallel
+and the deviations from git are recorded in `docs/RAGNART-design.md` §1.2.
 
+Notes on the rules in `config/ragignore`:
+
+- A pattern with a trailing `/` matches directories only. A pattern without one (for example
+  `*._*`) also matches a directory whose name fits it, and excludes that directory's contents.
 - An excluded name does not cover a sibling with a longer name (`.Gin-AI-python-3.12/` does
   not match `.Gin-AI-python-3.12.old`). `site-packages/`, `.uv-python/` and `.cache/`
   exclude what makes a directory unwanted, whatever the venv is called.
 - `.claude/` and `dot.claude-Linux/` (the real directory behind the `~/.claude` symlink) keep
   Claude Code's internal state out of the generic scan; session transcripts come in through
   `claude_chats` instead (§2.4).
-- `Microsoft--flotel/Documents/` holds IRM/DRM-encrypted presentations that no parser can read.
+- `**/Microsoft--flotel/Documents/` holds IRM/DRM-encrypted presentations that no parser can read.
 
-To change a rule, edit `ragnart.yaml`; the next sync applies it. A newly excluded file counts
-as gone: the sync deletes its Qdrant points and its queue row (§5.3). No code change or
-manual Qdrant cleanup is needed.
+To change a rule, edit `config/ragignore` (every root) or the `.ragignore` in the directory the
+rule governs. The next sync applies it. A newly excluded file counts as gone: the sync deletes
+its Qdrant points and its queue row (§5.3). No code change or manual Qdrant cleanup is needed.
 
 ### 2.3 Symlink handling
 
@@ -167,7 +182,7 @@ Known symlinks under `/mnt/nfs/Florian`:
 | `Gin-AI/LLMs-cache` | `/mnt/nfs/Temp/Gin-AI--cache/LLMs-cache` | excluded by `LLMs-cache/` |
 | `Gin-AI/certifications--training` | `certifications--training/__private/Gin-AI` | walked once (`visited_real_dirs`) |
 | `Gin-AI/chats/*.md` | files under `certifications--training/` and `Gin-AI/tools/` | ingested once (`visited_real_files`) |
-| `.venv` links | `Gin-AI/.Gin-AI-python-3.12` | excluded by `exclude_dir_names` |
+| `.venv` links | `Gin-AI/.Gin-AI-python-3.12` | excluded by `config/ragignore` |
 
 ### 2.4 Claude Code sessions (`claude_chats`)
 
@@ -229,20 +244,22 @@ against OpenCode 2.x: they answer 200 with HTML.
 
 | Type | Parser | `file_type` stored |
 |---|---|---|
-| `.pdf`, `.docx` | docling → Markdown; on docling failure, raw UTF-8 read | `pdf`, `docx` |
+| `.pdf`, `.docx` | docling → Markdown; on docling failure the file fails (no raw read): it is retried, then `ignored` with `skip_reason` `docling failed: …` | `pdf`, `docx` |
 | `.pptx` | docling; on failure `_parse_pptx()`: OLE2 files (magic `D0 CF 11 E0`) are converted with `libreoffice --headless --convert-to pptx` first, then python-pptx extracts slide text (`Slide N` headers). If that also fails, the file fails — no raw read | `pptx` |
 | `.ipynb` | `_parse_ipynb()`: markdown cells as prose, code cells as fenced `python` blocks, outputs ignored; raw read only if the JSON is invalid | `ipynb` |
-| `.md`, `.txt`, `.csv`, `.yaml`, `.yml`, `.sh`, `.html` | raw UTF-8 read (`errors="replace"`) | the extension |
+| `.md`, `.txt`, `.csv`, `.yaml`, `.yml`, `.sh`, `.html` | raw UTF-8 read (`errors="replace"`), after the admission checks of `docs/RAGNART-design.md` §5 | the extension |
 | Claude Code `.jsonl` | `_parse_claude_chat()` (§2.4) | `claude_chat` |
 | OpenCode session | `_parse_opencode_session()` (§2.5) | `opencode` |
 
-docling runs with one thread-local `DocumentConverter` per worker thread. IRM/DRM-encrypted
-PowerPoint files (OLE2 with an `EncryptedPackage` stream) cannot be converted; they exhaust
-their retries and stay `ignored`.
+docling runs with one thread-local `DocumentConverter` per worker thread, built with explicit
+CPU accelerator options. IRM/DRM-encrypted PowerPoint files (OLE2 with an `EncryptedPackage`
+stream) cannot be converted; they exhaust their retries and stay `ignored`.
 
-**Quality gate.** After parsing, a document whose text is less than 85% printable characters
-is marked `ignored` with `skip_reason = "binary content: N% printable chars"` and gets no
-points. An empty document is marked `completed` with no points.
+**Quality gate.** After parsing, the printable ratio is the fraction of characters that are
+printable, or tab, newline or carriage return, and not U+FFFD (replacement character). Blank text
+counts as 1.0. A document below 0.85 is marked `ignored` with `skip_reason = "binary content: N% printable chars"`
+and gets no points. An empty document is marked `completed` with no points. The size cap, the
+NUL sniff, the U+FFFD ratio and the chunk cap are described in `docs/RAGNART-design.md` §5.
 
 ---
 
@@ -272,11 +289,14 @@ there is no separate docstore.
   `rag_status.py --watch`).
 - `embed_text()` has a 120 s HTTP timeout. Search queries share Ollama with a running ingest
   and can queue behind its embedding requests.
-- Server 2's Ollama runs with `OLLAMA_CONTEXT_LENGTH=768`. Chunks are sized in cl100k tokens,
-  and bge-m3's XLM-R tokenizer produces more tokens than cl100k on dense technical text, so
-  the longest chunks (flat 512) can exceed 768 bge-m3 tokens and are truncated before
-  embedding. Any other Ollama used for embedding must run the same model with the same
-  context length, or its vectors will differ for those chunks.
+- Server 2's Ollama runs with `OLLAMA_CONTEXT_LENGTH=2048`, set by the systemd drop-in
+  `/etc/systemd/system/ollama.service.d/ragnart-context-length.conf`. Chunks are sized in cl100k
+  tokens (flat chunks up to 512), and bge-m3's XLM-R tokenizer produces more tokens than cl100k on
+  code, YAML and non-English text. A pathological chunk can still exceed 2048 bge-m3 tokens. Ollama
+  rejects such an input with HTTP 500 (`the input length exceeds the context length`); it does not
+  truncate it. The item is retried, then ends `ignored` (`docs/RAG-troubleshoot.md` §2.13). Any
+  other Ollama used for embedding must run the same model with the same context length, or its
+  vectors will differ for those chunks.
 
 ### 3.3 Sparse vectors — BM25 via fastembed
 
@@ -405,22 +425,34 @@ any code path; if set by hand, the next sync resets it to `pending` with zero re
 One run reconciles the queue with the sources:
 
 1. Runs the three scanners (§2), each calling `discover_or_update()` per path: new → `pending`,
-   newer mtime → `pending`, otherwise no change.
+   newer mtime → `pending`, otherwise no change. The NAS scan also reports its skipped roots.
 2. Builds the set of paths seen in this run (plus all queued `opencode://` rows if the
-   OpenCode API could not be scanned) and calls `find_deleted()`: every queue row not in
-   that set is gone — deleted from disk, or newly excluded by a scanner rule.
-3. For gone rows in `completed`, deletes their Qdrant points by `source_path` filter
-   (`wait=False`: Qdrant acknowledges and processes asynchronously, so the sync never blocks
-   on re-optimisation). Any exception aborts the run.
-4. Only then removes all gone rows from SQLite (`purge_deleted()`). A run killed between 3
-   and 4 leaves the rows in place, and the next sync repeats the deletes.
+   OpenCode API could not be scanned) and calls `find_deleted()`, limited to the owners whose
+   sources were scanned. A queue row of those owners that is not in the set is gone: deleted
+   from disk, excluded by a `.ragignore` or `config/ragignore` rule, or with an extension
+   outside `include_extensions`. Each gone path is logged with its reason.
+3. Runs the guards below. If one trips, steps 4 and 5 do not run.
+4. For gone rows in `completed`, deletes their Qdrant points by `source_path` filter with
+   `wait=True`: the call returns only after Qdrant has applied the delete, so no points are left
+   without a queue row to retry them. Any exception aborts the run.
+5. Only then removes all gone rows from SQLite (`purge_deleted()`). A run killed between 4
+   and 5 leaves the rows in place, and the next sync repeats the deletes.
+
+**Sync guards.** Two guards skip the whole deletion phase (steps 2 to 5 for deletion; the
+queueing of step 1 still stands). Each logs an ERROR and the run exits with code 1:
+
+- **Skipped roots.** An NFS root that is not a directory, or that is empty while the queue holds
+  rows under it, counts as unmounted. If any in-scope root is skipped, nothing is deleted.
+- **Mass delete.** If the completed rows to delete exceed `rag.sync.max_delete_fraction`
+  (`ragnart.yaml`, `0.10`) of all completed rows, nothing is deleted. `--allow-mass-delete`
+  proceeds anyway and logs a WARNING with the counts.
+
+Diagnosis and recovery for both guards are in `docs/RAG-troubleshoot.md` §2.12.
 
 `--user OWNER` limits the scan to that owner's NFS roots and `claude_chats` roots (and
-OpenCode if `opencode.owner` matches); shared roots are scanned only without `--user`. The
-deletion check in step 2 still compares against **every** queue row, so a `--user` run treats
-rows of other owners — including `la-familia` — as gone and deletes their points. The
-scheduled run uses `--user florian` (§8.2). Run a sync without `--user` only together with a
-change that makes the scheduled run cover the same owners.
+OpenCode if `opencode.owner` matches), and limits deletion to that owner's rows: a `--user`
+run never deletes another owner's rows, including `la-familia`'s. Without `--user` the deletion
+check covers every owner. The scheduled run uses `--user florian` (§8.2).
 
 ### 5.4 Worker loop — `ingest_file()`
 
@@ -431,8 +463,8 @@ change that makes the scheduled run cover the same owners.
 |---|---|
 | 0 | `ensure_collection()`; delete every Qdrant point with this `source_path` (synchronous) |
 | 1 | `mark_processing()` |
-| 2 | parse (§2.6), off the event loop; empty text → `completed`; printable ratio < 0.85 → `ignored` |
-| 3 | chunk (§3.1); no chunks → `completed` |
+| 2 | admission checks for text-like files (size cap, NUL sniff, U+FFFD ratio; `ignored` with a reason, `docs/RAGNART-design.md` §5); then parse (§2.6), off the event loop; empty text → `completed`; printable ratio < 0.85 → `ignored` |
+| 3 | chunk (§3.1); no chunks → `completed`; more chunks than `rag.admission.max_chunks_per_item` → `ignored` with `too large: N chunks > … chunk cap` |
 | 4 | embed child texts with bge-m3, `--batch` requests in flight |
 | 5 | build points: random UUID, dense vector (plus BM25 sparse vector when the collection has `sparse_text`), payload (§4.3) |
 | 6 | upsert in batches of 256 points (keeps each request under Qdrant's HTTP body limit) |
@@ -568,12 +600,13 @@ mode it is accepted and ignored. Callers that want one ranking key use
 
 Response: `{"query", "user", "results": [...]}`, each result with `content` (parent text),
 `source_path`, `score`, `file_name`, `file_type`, `session_title` (empty for NAS files),
-`text` (child chunk) and, when reranked, `rerank_score`. If the service could not reach Qdrant
-at startup, every request answers **503** `Qdrant client not available` for the life of the
-process; restart the service once Qdrant is up.
+`text` (child chunk) and, when reranked, `rerank_score`. When Qdrant is unreachable a search
+answers **503** `Qdrant unavailable`. The next search after
+Qdrant recovers answers normally, with no service restart. Qdrant errors with a 4xx status are
+not mapped to 503.
 
-**`GET /health`** → `{"status": "ok" | "degraded", "qdrant": true | false}`. When Qdrant is
-unreachable the call can block for up to the client timeout (60 s) before answering `degraded`.
+**`GET /health`** → `{"status": "ok" | "degraded", "qdrant": true | false}`. It probes Qdrant's
+`/healthz` with a 2 s timeout, so it answers within about 2 s, with `degraded` when Qdrant is down.
 
 ```bash
 curl 'http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian&top_k=5'
@@ -625,7 +658,11 @@ their own file, not the working directory. The service and the daemon read it on
 | `rag.hybrid.dense_fetch` | `30` | search | |
 | `rag.hybrid.sparse_fetch` | `30` | search | |
 | `rag.hybrid.rrf_k` | `60` | — | not read (§6.1) |
-| `rag.scanner.*` | §2.2 | sync | all four keys required |
+| `rag.admission.max_text_file_size_bytes` | `5000000` | ingest | text-like files above this size are `ignored`; `docs/RAGNART-design.md` §5 |
+| `rag.admission.max_chunks_per_item` | `5000` | ingest | items producing more chunks are `ignored`; `docs/RAGNART-design.md` §5 |
+| `rag.admission.fffd_ratio_threshold` | `0.005` | ingest | text-like files above this U+FFFD ratio are `ignored`; `docs/RAGNART-design.md` §5 |
+| `rag.sync.max_delete_fraction` | `0.10` | sync | mass-delete guard (§5.3) |
+| `rag.scanner.include_extensions` | §2.2 | sync | inclusion only; exclusions are `.ragignore` and `config/ragignore` (§2.2) |
 | `users.<email>.owner`, `.nfs_roots` | §2.1 | sync | |
 | `shared.owner`, `.nfs_roots` | `la-familia`, `/mnt/nfs/La-Familia` | sync | |
 | `claude_chats.roots[]` | `{path: /home/florian/.claude/projects, owner: florian}` | sync | |
@@ -674,6 +711,10 @@ Qdrant on Server 1 has its own installer, `scripts/qdrant/install-qdrant.sh` (§
 4. Snapshot (§9) if the newest `.snapshot` on the NAS is older than
    `RAG_SNAPSHOT_MIN_AGE_H` hours, if none exists, or if `RAG_FORCE_SNAPSHOT=1`.
 
+A sync that exits non-zero (a guard in §5.3 tripped, or a crash) is logged as
+`WARN: sync exited <rc>`. Steps 2 to 4 still run, and the unit ends failed with the first
+non-zero sync exit code.
+
 The wrapper itself takes no lock (the daemon's lock is the only one) and is the single entry
 point for both the timer and manual runs.
 
@@ -702,6 +743,10 @@ python utils/rag_status.py --ignored                 # ignored rows with retry c
 python utils/rag_status.py --list-pending [N]        # pending paths, one per line
 python utils/rag_status.py --watch /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
                                                      # live: per-file chunk progress, rate, ETA
+
+ragnart status --ignored                             # queue and point counts, ignored rows with skip_reason
+ragnart ls-files --ignored [<path>...]               # on-disk files excluded by a .ragignore or config/ragignore rule, optionally under <path>
+ragnart check-ignore -v <path>                       # file and line of the rule that excludes a path
 
 python utils/qdrant_status.py [--watch [SECS]] [--verbose]   # collection status, optimizer lag, segments
 curl -s http://192.168.1.93:6333/collections/documents | python3 -m json.tool
@@ -738,7 +783,7 @@ queue is empty.
 
 To embed with a different Ollama (e.g. Server 1's CPU), change `rag.ollama_url` and run with
 `RAG_WORKERS=1 RAG_BATCH=5`. That Ollama must serve the same `bge-m3` with
-`OLLAMA_CONTEXT_LENGTH=768` (§3.2), and search uses the same key.
+`OLLAMA_CONTEXT_LENGTH=2048` (§3.2), and search uses the same key.
 
 ### 8.5 Maintenance tasks
 
@@ -766,15 +811,16 @@ RAG_BATCH=2 bash scripts/ragnart-ingest-run.sh
 Files rejected by the quality gate (`binary content: …`) come back as `ignored` again unless
 the file itself changes.
 
-**Add or remove an exclusion.** Edit `rag.scanner` in `ragnart.yaml`; the next sync purges or
-queues the affected files (§2.2).
+**Add or remove an exclusion.** Add a pattern to `config/ragignore` (every root) or to the
+`.ragignore` in the directory it governs. Check it with `ragnart check-ignore -v <path>` (§2.2).
+The next sync purges or queues the affected files (§5.3).
 
 **Re-ingest everything.** `python utils/rag_reset.py [--user OWNER] [--yes]` resets queue rows
-to `pending` (all, or one owner's). Its Qdrant step drops the collection (full reset) or
-deletes the owner's points (`--user`) only when `documents` is a real collection; with the
-`documents` alias in place that step is skipped, and the re-ingest replaces each file's points
-through delete-before-insert. Never use it to retry a few files — it re-queues every
-completed row.
+to `pending` (all, or one owner's) and deletes Qdrant points: the owner's points with `--user`,
+or the whole collection for a full reset. A full reset refuses when `documents` is a Qdrant
+alias: it exits non-zero and deletes nothing. Restore per §9.3 instead. `--dry-run` (either
+mode) prints the points and rows it would delete and writes nothing. Never use it to retry a
+few files — it re-queues every completed row.
 
 **Purge corrupt points.** `utils/rag_purge_corrupt.py` scrolls all points and flags sources
 whose `parent_text` printable ratio is below `--threshold` (0.85); it reports whether each
@@ -786,6 +832,12 @@ python utils/rag_purge_corrupt.py --save /tmp/corrupt.txt   # write the path lis
 python utils/rag_purge_corrupt.py --confirm                 # delete; skips files still on disk
 python utils/rag_purge_corrupt.py --confirm --force         # delete even if the file exists
 ```
+
+**Re-check completed rows against the admission rules.** `utils/rag_purge_rescan.py` re-checks
+`completed` rows against the admission rules in force and against the file on disk (§5.4).
+Dry run by default; `--apply` writes. `--rescan` (default) runs the re-check; `--requeue-transient`
+resets `ignored` rows whose reason is a transient 500 or timeout to `pending`. `--save FILE`
+writes the candidate list as TSV. Run it after a snapshot pair (§9.5).
 
 **Search tests.**
 

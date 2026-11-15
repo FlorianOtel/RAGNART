@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned)
-updated_at: 2026-11-14--00-26
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6)
+updated_at: 2026-11-15--09-05
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -57,12 +57,14 @@ commit message and in the implementation log.
 | Design basis | `docs/RAGNART-design.md`; its decision register (§14) is binding for every version | operator |
 | Item identity | Natural key per type; `content_hash` (MD5) as attribute; no surrogate `source_id` | design D1 (§4.2) |
 | Versions of data | Schema version (data model) and per-item pipeline version (`p1`) | design D1b (§4.1, §5) |
+| Pipeline version | `p1` is the working name of the current pipeline. A version change is a major event: an incompatibility or a significant change of behaviour (e.g. a different embedding model, reranking, a results-changing pipeline change). Fixes and improvements stay `p1` | operator |
+| ragnart ↔ git parallel | RAGNART mimics git as closely as possible for ingestion, exclusion and lifecycle: git command names where the mapping is one-to-one, RAGNART terms otherwise; deviations from git are named (A–G). Full mapping and deviations: `docs/RAGNART-design.md` §1.2 | operator; design §1.2 |
 | Access model | Everything is a project; grants to persons and groups; `inherit_access` opt-out; `owner` is metadata; enforced only in `resolve_scope()`/`authorize()` | design D2 (§6) |
 | Projects | Addressed by path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
 | Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
 | Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator |
-| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, compact) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
+| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, distill) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
@@ -76,11 +78,31 @@ These facts hold for every version below. They are checked against the
 repository and the live services; operational detail is in
 `docs/RAG-strategy.md`.
 
-1. **Corpus.** About **2.99M points** in one collection: dense vector
-   (1024-dim, Cosine, unnamed) plus sparse `sparse_text` (IDF),
-   `on_disk_payload: true`. About 2.6M of them are pollution from 249 items
-   (`docs/RAGNART-design.md` §13.1), removed by v0.2 fix-first item 0; the
-   clean corpus is about 400k points. No migration step may require
+1. **Corpus.** Measured 2026-11-15, after fix-first item 0 and the operator's
+   `.ragignore` files: **348,163 points** in **13,386 items**, in one
+   collection: dense vector (1024-dim, Cosine, unnamed) plus sparse
+   `sparse_text` (IDF), `on_disk_payload: true`. The largest item has 4,559
+   points; none is above the 5,000-chunk cap. Composition (points / items):
+
+   | Type | Points | Items |
+   | --- | ---: | ---: |
+   | Claude Code sessions | 100,615 | 4,251 |
+   | `.md` | 72,047 | 3,198 |
+   | `.html` | 56,249 | 523 |
+   | `.pdf` | 53,308 | 1,002 |
+   | `.txt` | 18,521 | 1,428 |
+   | `.ipynb` | 15,721 | 910 |
+   | OpenCode sessions | 14,439 | 433 |
+   | `.docx` | 10,173 | 403 |
+   | `.pptx` | 3,408 | 438 |
+   | `.sh` | 2,639 | 463 |
+   | `.jsonl` | 411 | 101 |
+   | `.yaml` | 338 | 81 |
+   | `.yml` | 294 | 155 |
+
+   Queue: 14,654 `completed` (1,270 of them without points; see the v0.2
+   reconciliation findings), 268 `ignored`, 0 `pending`. The pre-purge history
+   is in `docs/v0--Implementation-log.md`. No migration step may require
    re-embedding or rewriting vectors.
 2. **`documents` is an alias.** `documents` → `documents_new`. Every
    reference to "the `documents` collection" below means the alias; the
@@ -183,7 +205,7 @@ touch a project.
 | --- | --- |
 | v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
 | v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. One principal, granted every top-level project; the result equals today's owner filter. |
-| v0.3 | Project-mode actions (add, keep, drop, compact, ingest-now) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
+| v0.3 | Project-mode actions (add, rm, distill, add --wait) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
 | v0.4 | Kotaemon's login is mapped to a principal; still no authentication. |
 | v0.5 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
 
@@ -224,28 +246,31 @@ hits and repointing any caller found. Fix-first item 0 delivered (below).
 **Fix first (before any schema or backfill work).** The backfill and the
 move detection below rely on a clean corpus and on the sync never deleting
 wrongly. Item 0 is delivered by a separate operator session that bridges
-v0.1 and v0.2; the v0.2 session verifies it. Items 1–4 are fixed, tested and
+v0.1 and v0.2; the v0.2 session verifies it. Items 1–6 are fixed, tested and
 run once by hand (log inspected) before the timer picks up the new sync.
-None of items 1–4 changes Qdrant data or the schema.
+None of items 1–6 changes Qdrant data or the schema.
 
-0. **Corpus hygiene: pipeline `p2` and the purge.** About 87% of the points
-   are pollution: PDF/DOCX read as raw bytes when docling fails, very large
-   generated text files, bulk CSV exports (`docs/RAGNART-design.md` §13.1).
+0. **Corpus hygiene: admission rules and the purge, within `p1`.** The admission rules keep binary, oversized and over-chunked
+   content out of the index (`docs/RAGNART-design.md` §5); the pollution measurements, root causes and
+   the purge are recorded in `docs/v0--Implementation-log.md` (bridge session
+   entry).
    Delivered by the bridge session:
-   - pipeline `p2` in code: no raw-read fallback for binary types, a binary
-     check before parsing, size and chunk caps that mark items `ignored` with a
-     visible reason, a corrected quality gate; `docs/RAGNART-design.md` §5
-     describes `p2` as explicitly as `p1`;
-   - a purge of the polluting items after a snapshot pair, their rows marked
-     `ignored` with the reason; `utils/rag_purge_corrupt.py` uses the corrected
-     test;
+   - admission rules in the current pipeline `p1`: no raw-read fallback for
+     binary types, a binary check before parsing, size and chunk caps that mark
+     items `ignored` with a visible reason, a corrected quality gate; the rules
+     are stated in `docs/RAGNART-design.md` §5 (admission);
+   - `.ragignore` exclusion rules with gitignore semantics, and the global
+     `config/ragignore`; described in `docs/RAGNART-design.md` §1.2;
+   - the purge tool `utils/rag_purge_rescan.py` (dry-run by default; applies
+     only with `--apply`, after a snapshot pair) and the corrected test in
+     `utils/rag_purge_corrupt.py`;
    - the policy decisions behind it (CSV and data files, cap values, mirrored
      trees) recorded in `docs/RAGNART-design.md`.
-   Verify at v0.2 kickoff: point count and composition (no item above the
-   caps, a sample of PDF chunks is text); the current pipeline version is
-   known (`p2`); §3 of this plan refreshed with the new figures.
+   Verified: point count and composition (no item above the
+   caps, a sample of PDF chunks is text); §3 item 1 holds the measured figures.
 
 1. **An unreachable NFS root deletes its whole tree from the index (critical).**
+   Delivered by the bridge session.
    `ragnart/scanner.py` (`scan_nfs_roots`) skips a root that fails
    `os.path.isdir()`, so that root adds nothing to `existing_paths`;
    `StateDB.find_deleted()` (`ragnart/state.py`) treats every queue row missing
@@ -271,6 +296,7 @@ None of items 1–4 changes Qdrant data or the schema.
    every scheduled run (`scripts/ragnart-ingest-run.sh` syncs only
    `RAG_SYNC_USERS=("florian")`). No live impact while `/mnt/nfs/La-Familia` is
    empty.
+   Delivered by the bridge session.
    Fix:
    - `find_deleted(existing_paths, owners)` restricts to `WHERE owner IN (...)`
      (the `owner` column already exists); `rag_sync_nfs.py` passes the owners
@@ -284,6 +310,7 @@ None of items 1–4 changes Qdrant data or the schema.
    `documents_new`) and test it for `documents`. `rag_status.py` reports the
    collection as missing; `rag_reset.py --user X` skips the Qdrant delete but
    still resets rows to `pending`, and the full reset skips its Qdrant step.
+   Delivered by the bridge session.
    Fix:
    - `collection_exists(client, name)` in `ragnart/collection.py`, true for a real
      collection or an alias (`get_aliases()`); used by both scripts.
@@ -298,6 +325,7 @@ None of items 1–4 changes Qdrant data or the schema.
    unreachable at start-up, so every `/v1/search` answers 503 until the service
    restarts; `/health` calls `get_collections()` with the 60 s client timeout
    (`ragnart/collection.py` `get_client`).
+   Delivered by the bridge session.
    Fix:
    - The client is always created at start-up; failures surface per request.
    - `/health` checks Qdrant's `/healthz` with a 2 s timeout and answers
@@ -305,13 +333,46 @@ None of items 1–4 changes Qdrant data or the schema.
    Test: Qdrant stopped -> `/health` answers `degraded` within 3 s; Qdrant started
    -> `/v1/search` answers 200 without restarting `ragnart-search.service`.
 
+5. **A manual sync can overlap the ingestion daemon.** `utils/rag_sync_nfs.py`
+   does not take `rag.ingest_lock`, so it can delete or purge while the daemon
+   writes (`docs/RAGNART-design.md` §13.2, §10.3).
+   Fix: the sync takes `rag.ingest_lock` as the daemon does, and a sync that
+   cannot take it exits non-zero, naming the lock holder.
+   Test: with the daemon holding the lock, a manual sync exits without deleting
+   anything; with the lock free, the sync runs.
+
+6. **The ingest daemon waits for the slowest item of each batch.**
+   `utils/rag_ingest_daemon.py` `run()` fetches 10 pending rows per loop
+   iteration (`_FETCH_BATCH_SIZE`, hardcoded). `--batch` is not the fetch size;
+   it sets the Ollama embedding concurrency within one file. The 10 rows run
+   under an `asyncio.Semaphore(--workers)` in one `asyncio.gather`, and the next
+   fetch happens only when all 10 have finished. Parsing runs in a worker thread
+   (`asyncio.to_thread`, with a thread-local converter from `_get_converter()` in
+   `ragnart/ingest.py`). One long document (a book on CPU docling takes 6–25 min)
+   leaves the other workers idle until it completes. Measured during the re-parse
+   backlog on Server 2: mostly one of three workers busy.
+   Fix:
+   - Replace the fetch-and-gather loop with a continuous pool: `--workers`
+     tasks, each taking the next pending row as soon as its previous file
+     finishes.
+   - The fetch and the claim of the row are one step on the event loop, so two
+     workers never take the same row.
+   - Keep the single-writer rule (one ingestion daemon, `rag_state.db` written
+     from it, `docs/RAG-strategy.md` §5.6 lock on `rag.ingest_lock`) unchanged.
+   Test: with `ingest_file` mocked and `--workers 3`, one item that sleeps for
+   30 s (scaled down for the test) and 20 fast items: all fast items complete
+   while the slow one is still running. With 12 uniform items of 1 s, the run
+   takes about 4 s, so throughput approaches N times the single-worker rate.
+   Each file path is processed exactly once.
+
 **Work items.**
 - Introduce the schema version (`docs/RAGNART-design.md` §4.1) and add the
   tables (`projects`, `project_tags`, `project_links`, `source_links`,
   `grants`) and the per-item metadata of design §4.3 (`source_type`,
   `project_id`, `size_bytes`, `content_hash`, `hashed_at`, `first_seen_at`,
   `modified_at`, `pipeline_version` (the version that produced the item's
-  chunks: `p2` for items ingested after item 0, `p1` otherwise),
+  chunks; every item is `p1`, and the column records the version for a future
+  major change, §2),
   `chunk_count`, `missing_since`, origin details) to `ragnart/state.py`.
 - Add the payload fields and indexes of design §4.4 (`project_id`, `owner`,
   `source_type`, `file_type`, `content_hash` as keywords; `modified_at`,
@@ -346,7 +407,18 @@ None of items 1–4 changes Qdrant data or the schema.
   and per request (echoed).
 - Reconciliation: a scheduled check of `chunk_count` against Qdrant and of
   Qdrant keys against rows; repairs under the deletion rules and fails loudly
-  in the log (design §10.3).
+  in the log (design §10.3). Its first run must also resolve these current
+  findings:
+  - **Zombie paths.** Two paths under `Gin-AI/dot.claude-Linux` (an AYA session
+    `.jsonl` and `memory/aya-v06a-phased.md`, 307 points) have points but no
+    queue row. Rationale: the check compares Qdrant keys with rows, so it must
+    report and resolve points without a row.
+  - **Completed rows without points.** About 1,270 `completed` rows have zero
+    Qdrant points. Rationale: a `completed` row whose points are missing is the
+    divergence this check exists to find.
+  - **Crash in the purge.** A crash between the Qdrant delete and the row update
+    in `utils/rag_purge_rescan.py` leaves a `completed` row without points.
+    Rationale: the same divergence, with a known cause.
 - Nightly online backup of `opencode.db` to
   `RAGNART--databases/opencode-backups/<hostname>-<ip>/`, installed by
   `scripts/install-units.sh` (design §10.5).
@@ -382,13 +454,12 @@ time, not correctness).
   sources, and the response names the projects searched.
 - Moving a project directory changes one `projects` row and zero Qdrant
   points.
-- Fix-first item 0 verified; items 1–4 pass their tests.
+- Fix-first item 0 verified; items 1–5 pass their tests.
 - Reconciliation reports zero unexplained differences on the clean corpus.
 - A result list never contains more than `max_hits_per_source` passages from
   one item.
 
-**Risks.** Backfill runtime against the clean corpus (about 400k points
-after item 0; §3 item 1) needs measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
+**Risks.** Backfill runtime against the clean corpus (§3 item 1: 348,163 points) needs measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
 backfill time may disagree with what a later ingestion run derives if
 sessions moved in the meantime. The 10% missing-threshold default may be
 wrong for this corpus's real churn rate and needs a dry run before being
@@ -407,26 +478,31 @@ scoping work are each large enough to warrant a session).
 
 **Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3,
 §7.4, §8): the `ragnart` CLI, the `/ragnart` skill and commands with scope and
-grounding, the project memory, compact, and ingest-now. The Transient tier is
+grounding, the project memory, distill, and `add --wait`. The Transient tier is
 an ephemeral cache of files; nothing in this version creates a second vector
 index.
 
 **Entry criteria.** v0.2's Definition of done met. The Transient lifecycle
 ("cache dynamics": admission, states, transitions, eviction, invalidation,
-compact rules, actors) is defined and recorded in `docs/RAGNART-design.md`
+distill rules, actors) is defined and recorded in `docs/RAGNART-design.md`
 §7.5 (design §13.3).
 
 **Work items.**
-- `ragnart` CLI: `init` (writes `.ragnart/project.toml` with `name`, `id`,
-  `mode = "curated"`), `where`, `add`, `inbox`, `keep`, `drop`, `compact`,
-  `ingest-now`, plus the metadata listing (`ls` with type and time filters,
-  answered from the state database).
+- `ragnart` CLI, built on the git mapping (`docs/RAGNART-design.md` §1.2):
+  `init` (writes `.ragnart/project.toml` with `name`, `id`,
+  `mode = "curated"`), `add`, `add --wait`, `rm` (appends a pattern to the
+  nearest `.ragignore`; never deletes a file), `mv`, `diff`, `fsck`, `gc`,
+  `distill`, and `where`, `inbox`, `expect`, `calibrate`, `grant`, `revoke`,
+  `transfer`, which have no git equivalent. Plus the metadata listing (`ls`
+  with type and time filters, answered from the state database).
+  `status`, `ls-files` and `check-ignore` are not v0.3 work: they were
+  delivered with v0.2 item 0.
 - `.ragnart/inbox/` as the Transient cache: files only, project-scoped, with
   the expiry and admission rules defined at kickoff.
-- Compact: deterministic selection (rules in `project.toml` and explicit
-  keep/drop, recorded) and file placement into the project's references; the
+- Distill: deterministic selection (rules in `project.toml` and explicit
+  `add`/`rm`, recorded) and file placement into the project's references; the
   agent updates `.ragnart/MEMORY.md` (an index of pointers and hooks, design
-  §7.4). Compact and ingest-now take the ingestion lock.
+  §7.4). Distill and `add --wait` take the ingestion lock.
 - Curated ingestion mode: the static crawl skips `curated` projects except
   their references and `MEMORY.md`; `crawl` projects are indexed in full.
 - `/ragnart` skill and commands for Claude Code and OpenCode: scope and
@@ -438,9 +514,8 @@ compact rules, actors) is defined and recorded in `docs/RAGNART-design.md`
 - `scope` becomes required on `GET /v1/search` once both clients use
   `/ragnart` (§4).
 - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
-  `".ragnart/inbox/"`, `".opencode/"`, `".agents/"` to
-  `rag.scanner.exclude_dir_names` (multi-component entries are supported per
-  `ragnart/scanner.py:44-51`; verify at runtime).
+  `.ragnart/inbox/`, `.opencode/` and `.agents/` to `config/ragignore` (or to a
+  `.ragignore`), so the NAS crawl excludes them (`docs/RAGNART-design.md` §1.2).
 - Retrieval calibration (design §9.2, §9.3): `min_relevance`, `type_weights`
   and the fetch sizes as knobs at three levels; the labelled set with
   `/ragnart expect`; `ragnart calibrate`.
@@ -450,20 +525,21 @@ references enter through the normal ingestion pipeline.
 
 **Definition of done.**
 - In a test project created with `ragnart init`: gather (add pages and files),
-  keep some, drop others, compact; after ingest-now the kept references and
+  `rm` some, distill; after `add --wait` the distilled references and
   `MEMORY.md` are returned by a `project + strict` search with citations, and
-  dropped items are gone from disk.
+  items removed with `rm` are excluded from the index after the next sync while
+  their files stay on disk.
 - The same flow works in Claude Code and OpenCode.
 - Every answer shows the status line; scope changes happen only through the
   commands or a stated natural-language translation.
 - A `curated` project's non-reference files are not in the index.
 
 **Risks.** Capture and curation depend on the skill being followed; nothing
-enforces it. Compact's generated hooks need review by the operator. Whether
+enforces it. Distill's generated hooks need review by the operator. Whether
 OpenCode loads skills from `~/.claude/skills` is unverified (§8).
 
 **Decisions to confirm at kickoff.** The Transient lifecycle rules; expiry
-period; default compact rules for a new project.
+period; default distill rules for a new project.
 
 **Estimated sessions.** 1–2.
 
@@ -475,7 +551,7 @@ driving the CLI.
 
 **Entry criteria.** None strict for the stock-Kotaemon spike, which can be
 done any time. The plugin needs v0.2's `scope` parameter and
-`GET /v1/projects`, and v0.3's ingest-now.
+`GET /v1/projects`, and v0.3's `add --wait`.
 
 **Work items.**
 - Spike (any time before this version, if useful): run stock Kotaemon
@@ -487,7 +563,7 @@ done any time. The plugin needs v0.2's `scope` parameter and
   through `KH_INDEX_TYPES`/`KH_INDICES` in `flowsettings.py`, modelled on
   Kotaemon's bundled GraphRAG index (`libs/ktem/ktem/index/file/graph`).
 - Uploads become references of the selected project (a deliberate act),
-  followed by ingest-now (design §7.4).
+  followed by `add --wait` (design §7.4).
 - Map the Kotaemon login to a principal and pass it on every call (§5, v0.4
   row). RAGNART still trusts the passed value until v0.5.
 - Pin the Kotaemon version used; deploy as one container on Server 1, port
@@ -607,10 +683,50 @@ first); whether an invalid/missing token means "rejected" (HTTP 401) or
 ### Terms
 
 The vocabulary is defined in `docs/RAGNART-design.md`: tiers (§7.1),
-ingestion policies (§7.2), project mode and compact (§7.3), scope and
+ingestion policies (§7.2), project mode and distill (§7.3), scope and
 grounding (§8.1). The project marker directory is `.ragnart/`; inside it,
 `inbox/` is the Transient cache and `sources/`, `notes/` and `MEMORY.md` are
 the project's references.
+
+### Future work (unscheduled)
+
+Pipeline and tooling items with no version assigned. Version rule (§2): a
+results-changing pipeline change is a new pipeline version; fixes and
+improvements stay `p1`.
+
+- **Size chunks in bge-m3 tokens.** Removes the residual rejection of
+  over-length chunks by Ollama (`docs/RAGNART-design.md` §5.6). Changes chunk
+  boundaries and therefore search results: candidate for the next pipeline
+  version, not `p1`.
+- **Real page, slide and cell numbers.** `page` is always `0` (`ragnart/schema.py`
+  `FIELD_PAGE`; `docs/RAGNART-design.md` §4.4, §5.4), so it carries no
+  information. `p1` improvement; applies to newly ingested items.
+- **Secret and credential filter before embedding.** Credentials in files and
+  sessions are embedded and returned today (`docs/RAGNART-design.md` §13.4).
+  `p1` improvement: it changes which items are indexed, not how they are
+  embedded or ranked.
+- **`rag.hybrid.rrf_k: 60` in `ragnart.yaml` is read by no code.** Fusion uses
+  Qdrant's built-in RRF constant, which the fused scores show is k = 2
+  (`docs/RAG-strategy.md` §6.1), so the file's 60 does not describe the
+  behaviour. Remove the key: `p1` improvement, no result change. Wiring it at
+  any value other than the built-in one changes fused ranking: candidate for
+  the next pipeline version.
+- **Consolidate `utils/rag_purge_corrupt.py` into `utils/rag_purge_rescan.py`.**
+  The two tools overlap in purpose. Tooling only; not a pipeline change.
+- **Configurable docling device.** `rag.docling.device: cpu | cuda` in
+  `ragnart.yaml` (default `cpu`), optionally overridden by an environment
+  variable for a single manual run. `_build_converter()` in `ragnart/ingest.py`
+  hard-codes `AcceleratorDevice.CPU` for PDF, DOCX and PPTX. The default stays
+  CPU: on Server 2 the RTX 5070 has about 2 GB free beside the chat LLM (8.4 GB),
+  the reranker (0.6 GB) and Ollama bge-m3 (1.1 GB). A docling converter needs
+  about 1–3 GB per worker, and docling holding GPU memory can push an Ollama model
+  reload onto CPU or make it fail. `cuda` is for an operator-chosen backlog run
+  at a quiet time, for example after unloading the chat model. No automatic
+  GPU-first with CPU fallback: considered and not planned (complexity, VRAM
+  contention with Ollama, device-dependent parse differences). This is a `p1`
+  improvement, not a version change: same models, speed only. GPU and CPU
+  inference can differ slightly, so before adopting it, time one book on GPU and
+  on CPU.
 
 ## 8. Open decisions and parameters to confirm
 
