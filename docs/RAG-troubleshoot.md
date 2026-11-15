@@ -2,8 +2,8 @@
 title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5)
-updated_at: 2026-11-15--19-11
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3)
+updated_at: 2026-11-15--20-03
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -540,6 +540,51 @@ permissions" and the log grows without bound.
 ls -l /mnt/nfs/__Backups/RAGNART--databases/logs/
 ssh root@localhost 'logrotate -d /etc/logrotate.d/ragnart-ingest 2>&1 | grep -iE "error|insecure"'   # no output = fine
 ```
+
+### OpenCode database backup
+
+`ragnart-opencode-backup.timer` fires at 03:30 local time and runs
+`ragnart-opencode-backup.service`, which calls `scripts/opencode-db-backup.sh` as `florian`.
+The script copies the live OpenCode database (`/home/florian/.local/share/opencode/opencode.db`)
+with `sqlite3 .backup`, which is safe while OpenCode writes to it. It does not take the
+ingestion lock (§2.3). Each copy is written to a temp file and renamed into place only when
+non-empty, then the newest 7 are kept:
+
+```
+/mnt/nfs/__Backups/RAGNART--databases/opencode-backups/<hostname>-<ip>/
+  opencode-YYYY-MM-DD.db     (UTC date; ~2.3 GB; mode 0600, directory 0700)
+  .opencode-YYYY-MM-DD.db.tmp (only while a run is active, or left by a crashed run)
+```
+
+**Check:**
+
+```bash
+B=/mnt/nfs/__Backups/RAGNART--databases/opencode-backups
+ls -lt $B/*/                                                     # newest copy dated today or yesterday
+systemctl list-timers ragnart-opencode-backup.timer              # NEXT must be set
+ssh root@localhost 'journalctl -u ragnart-opencode-backup.service -n 20'   # last run's log (journal is root-only)
+```
+
+To check a copy's integrity, open it with the immutable URI form, and do not open it with a
+plain `sqlite3 -readonly`:
+
+```bash
+sqlite3 "file:<path-to-copy>?immutable=1" 'PRAGMA integrity_check;'   # expect: ok
+```
+
+The copies are WAL-mode databases. A plain open, even read-only, creates `-wal` and `-shm`
+side files next to the copy. `immutable=1` opens it without creating them and without
+writing to it.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Newest copy is older than yesterday | Timer missed its slot, or the last run failed | Read the journal lines above. Run the backup now as `florian`: `bash scripts/opencode-db-backup.sh`, or `ssh root@localhost 'systemctl start ragnart-opencode-backup.service'`. A missed slot runs at the next boot (`Persistent=true`). |
+| `systemctl list-timers` shows no `NEXT` for the timer, or the unit is missing | Units not installed or not enabled | `sudo bash scripts/install-units.sh` (installs and enables the timer). |
+| Journal shows an error from the backup step, or `ERROR: backup is empty` | The source database cannot be read. The unit does not set `OPENCODE_DB_PATH`, so the default path `/home/florian/.local/share/opencode/opencode.db` is used | Check that the file exists and is readable by `florian`. |
+| `integrity_check` prints anything other than `ok` | Corrupt copy | Do not restore from it. Use the next-newest copy. The next nightly run writes a new one. |
+| `Permission denied` reading a copy as another user | Copies are owner-only (0600) in a 0700 directory, by design (private session data) | Read as `florian`, or with `sudo`. Do not relax the mode. |
+| A `.opencode-*.db.tmp` file in the directory, older than the last run | A run crashed mid-copy | Removed automatically at the start of the next run. No action. |
+| More than 7 `opencode-*.db` files | Rotation step did not run (the run failed after the copy) | Rotation runs on the next successful backup. Check the journal for the failed step. |
 
 ---
 

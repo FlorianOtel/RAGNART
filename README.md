@@ -111,7 +111,8 @@ curl 'http://localhost:8100/health'
 ```
 
 `GET /v1/search` parameters: `q` (query), `user` (owner scope), `top_k`,
-`file_types`, `score_threshold`, `rerank`.
+`file_types`, `score_threshold`, `rerank`, `max_hits_per_source` (per-source cap on this
+search's results).
 
 The `ragnart` command reads the NAS crawl and changes nothing. It is installed by
 `pip install -e .` in the project venv; `python -m ragnart` runs the same commands without

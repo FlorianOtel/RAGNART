@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry)
-updated_at: 2026-11-15--19-19
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry)
+updated_at: 2026-11-15--20-11
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,49 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-15--19-28 to 2026-11-15--20-11 -- v0.2 session A: continuous worker pool, OpenCode backup, max_hits_per_source; v0.2 decisions
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6
+v0.2, fix-first item 6, work item 11 and work item 9 (cap). First of three back-to-back `/brain`
+sessions for v0.2 (A, then B: data model and backfill, then C: sync, scope, projects, collapse and
+reconciliation). Not a closing session: v0.2 stays open.
+
+#### What was done
+
+Commits: `c4e5616` (code) and the docs commit that adds this entry.
+
+- **Fix-first item 6, continuous worker pool:** `--workers` coroutines each claim the next pending row
+  with `StateDB.claim_next_pending` (one SELECT and one UPDATE, no `await` between them) and run
+  `ingest_file()` until no row is pending. `StateDB.fetch_pending_full` removed.
+- **Work item 11, OpenCode backup:** `scripts/opencode-db-backup.sh` runs `sqlite3 .backup` into
+  `RAGNART--databases/opencode-backups/<host>-<ip>/`, keeps 7 copies, takes no index lock. Units
+  `ragnart-opencode-backup.{service,timer}` run at 03:30; `scripts/install-units.sh` installs and enables them.
+- **Work item 9 cap:** `rag.search.max_hits_per_source` (default 3) applied after rerank, before top_k.
+  `GET /v1/search` takes a per-request override (`ge=1`) and echoes the applied value. CLI flag
+  `--max-hits-per-source` on `utils/rag_search_cli.py`.
+- **Tests:** 290 pass before, 300 pass after.
+- **Live evidence:** 3-worker ingest run of 13 items. Worker 2 held one long session transcript while
+  workers 0 and 1 processed the other 12. No item processed twice, none left in `processing`
+  (14,681 completed, 268 ignored). `/v1/search` echoes 3; `max_hits_per_source=1` gives distinct
+  sources; `=0` gives HTTP 422. `install-units.sh` installed and enabled the backup timer (next run 03:30).
+  One manual backup: 2.2 GiB in 21 s, `PRAGMA integrity_check` ok.
+- **Decisions (v0.2, recorded in the docs):** settled kickoff values; `scope` required on `/v1/search`,
+  with the two `/rag` commands changed in the same change; session attribution by physical-path match,
+  with the per-owner `sessions` project as fallback; subagent keys; shaping order; `scope=none` handled
+  client-side and never sent to the API; `/v1/projects` shape; project ids; empty `grants` means the owner rule applies;
+  plan-then-apply defined; hashing seeded by the backfill.
+
+#### Deviations from the plan
+
+- **Collapse by `content_hash` moved to session C:** it needs `content_hash` in the payload.
+- **Backup output world-readable on the first live run:** `umask 077` added before the code commit;
+  the first copy chmod 600.
+- **WAL copy checks:** `sqlite3 -readonly` on a WAL copy creates `-wal` and `-shm` side files, so
+  troubleshooting uses the `immutable=1` URI.
+- **SoHoAI 307 stub:** keeps its 2026-11-16 removal date (not waived).
+- **Review follow-ups:** dead `fetch_pending_full` removed; CLI `>=1` check added; stale design §7.4
+  citation in Plan Section 2 corrected to design §4.3 and §4.5.
 
 ### 2026-11-15--18-35 to 2026-11-15--19-19 -- v0.2 fix-first item 5: single-writer lock for every index writer
 

@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed)
-updated_at: 2026-11-15--19-11
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants)
+updated_at: 2026-11-15--20-04
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -235,6 +235,7 @@ split into many chunks (Qdrant points).
 |---|---|
 | NAS file | Full path, e.g. `/mnt/nfs/Florian/…/report.pdf` |
 | Claude Code session | `claude-session://<session uuid>` |
+| Claude Code subagent transcript | `claude-session://<session uuid>/agent-<id>`, in the parent session's project (not yet built) |
 | OpenCode session | `opencode://<session id>` |
 | Captured page, operator-added file, note, collateral | Its path under the project's `.ragnart/`; the URL of a capture is an attribute |
 
@@ -329,9 +330,19 @@ segment = "ISV"
   is unambiguous and needs no name resolution.
 - **`id` is the immutable, unique project identifier.** It lives inside the folder, so it
   travels with any move or rename: moving a project changes one row in the state database and
-  nothing in Qdrant, although every chunk carries `project_id`.
+  nothing in Qdrant, although every chunk carries `project_id`. An unmarked NFS root's project id
+  is generated and stored in the `projects` table; a marked directory's id is the one already
+  written in its `project.toml`.
 - **Parent** is the nearest ancestor directory that is also a project. Each NFS root is a
   top-level project; unmarked directories belong to the enclosing project.
+- **Sessions project and session matching (not yet built).** Each owner has a `sessions` project,
+  the fallback project for any item with no enclosing marked project. A session's project is found
+  by resolving its launch directory (Claude Code `cwd`, OpenCode `location.directory`) to its
+  physical path, with symlinks resolved, and matching that path against the physical paths of
+  projects. A launch directory that matches no project falls back to the owner's `sessions`
+  project. Known realpath aliases between mount points (for example `/mnt/nfs/fotel--NAS-home/...`
+  and `/home/florian/Gin-AI`) need an explicit mapping. An NFS-located project is an artefact of
+  the current setup, not a rule.
 - **Tags** are arbitrary `key = value` pairs (every key except the reserved `name`, `id`,
   `inherit_access`, `mode`, `scope`, `grounding`, `capture`, `inbox_expiry_days`). They are stored as rows `(project_id, key, value)`. On each sync
   (and on the `ragnart` command) the tag set read from `project.toml` replaces the stored set:
@@ -526,8 +537,10 @@ primitives:
 ### 6.5 Enforcement
 
 One function turns a request into a filter, `resolve_scope()`, and one decides access,
-`authorize()`. No other code builds a scope filter. Today one principal exists and is granted
-everything; authentication (OAuth with group claims) is added when a second user exists.
+`authorize()`. No other code builds a scope filter. The `grants` table starts empty (not yet built).
+While it has no rows, `authorize()` applies the owner rule of `ragnart/search.py`: an item's
+owner may always read it, and so may anyone when the item's owner is `la-familia`.
+Authentication (OAuth with group claims) is added when a second user exists.
 Multi-tenancy is designed now and built later: the data model (project ids on every chunk,
 grants shaped for persons and groups) is in place from v0.2 so nothing has to be backfilled.
 
@@ -843,6 +856,8 @@ Each hit carries its key and display name, project (path and name), `source_type
 ### 8.8 The API
 
 - `scope` is **required** on every search; there is no server-side default.
+- `scope none` is enforced entirely client-side (not yet built). It causes no retrieval call at
+  all, so the API never receives `scope=none`.
 - The response **echoes the resolved scope** (the projects actually searched) and every
   setting that applied (§9.2).
 - The API returns evidence only. Strict grounding is applied by the client: the `/ragnart`
@@ -857,9 +872,9 @@ features exist only in `/ragnart`.
 
 ## 9. Retrieval quality
 
-**Status.** Today search has none of these knobs except `rerank` and the fetch sizes in
-`ragnart.yaml`. `max_hits_per_source` and collapse by `content_hash` arrive in v0.2; the
-other knobs, the labelled set and `ragnart calibrate` in v0.3.
+**Status.** Today search has `rerank`, the fetch sizes, and `max_hits_per_source`, all in
+`ragnart.yaml` (§9.2). Collapse by `content_hash` is not yet built; the other knobs, the labelled
+set and `ragnart calibrate` are not yet built either (§9.3).
 
 ### 9.1 Predictable, not rigidly deterministic
 
@@ -874,6 +889,8 @@ RAGNART is therefore **predictable** rather than fixed:
   are identical.
 - **Bounded influence of one source.** A source contributes at most `max_hits_per_source`
   passages to a result; identical copies collapse; source types can be weighted or excluded.
+  The shaping order is fixed: rerank, then collapse of identical copies by `content_hash` (not yet
+  built), then the `max_hits_per_source` cap, then the `top_k` cut.
 - **Pollution is visible.** A corpus health report lists sources that appear in the results of
   many unrelated queries, items with abnormal chunk counts, and low-quality text.
 
@@ -885,7 +902,7 @@ and which are not ranked (§7.5).
 | Knob | Controls |
 |---|---|
 | `min_relevance` | Rerank score below which a hit is not a "good hit". It decides the "no good hits" stop (§8.3), which is what leads the operator to widen the scope (§7.3) |
-| `max_hits_per_source` | Per-source cap in one result list |
+| `max_hits_per_source` | Per-source cap in one result list (default 3, `ragnart.yaml` `rag.search.max_hits_per_source`) |
 | `type_weights` | Multipliers or exclusions by `file_type` / `source_type`, including `collateral` and the session types |
 | `dense_fetch`, `sparse_fetch`, `fetch_cap` | Candidates brought to the reranker |
 | `rerank` | Reranking on or off |
@@ -967,6 +984,8 @@ built. Reconciliation is part of v0.2; notifications are not yet scheduled.
   daemon, the WAL checkpoint and the snapshot step still run. The run then exits with the sync's exit
   code, so `ragnart-ingest.service` is marked failed.
 
+- **Plan-then-apply (not yet built).** Each sync is to compute its moves, tombstones, purges and new
+  items as a plan, log it (also printed with `--dry-run`), then apply it.
 - **Reconciliation.** A scheduled check compares the two stores: each completed item's
   `chunk_count` against its points, and every key in Qdrant against a row. It **repairs**
   automatically (re-queues missing items, deletes orphaned points under the deletion rules)
@@ -992,7 +1011,7 @@ built. Reconciliation is part of v0.2; notifications are not yet scheduled.
 
 `opencode.db` stays on Server 2's local disk. A nightly online copy (`sqlite3 .backup`) is
 written to `RAGNART--databases/opencode-backups/<hostname>-<ip>/opencode-<YYYY-MM-DD>.db`,
-with the last copies kept, by a timer installed with RAGNART's units.
+with the last 7 copies kept, by a timer installed with RAGNART's units.
 
 ## 11. Capacity and placement
 
@@ -1009,7 +1028,7 @@ placement of Qdrant is decided after the cleanup, from measured memory use.
 
 | Interface | Role |
 |---|---|
-| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. Planned: project listing and resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
+| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. Planned: project listing (`GET /v1/projects` returns, per project, `id`, `path`, `name`, `parent`, `owner`, `mode`, `tags` and item count, filtered by `user` the same way search is) and resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
 | `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.3): `init`, `capture`, `add`, `add --wait`, `drop`, `note`, `rm`, `mv`, `diff`, `fsck`, `gc`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. In project work the CLI is plumbing, called by the agent (§7.3). Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
 | `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.3); today the `/rag` command. Scope and grounding (§8), librarian behaviour, the action vocabulary and the capture policy (§7.3) |
 | Session-start hook and status line (Claude Code, OpenCode) | Planned (v0.3). Project detection, and the project's state in every session (§7.4) |

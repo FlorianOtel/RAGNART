@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3)
-updated_at: 2026-11-15--19-15
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules)
+updated_at: 2026-11-15--20-11
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -68,7 +68,7 @@ commit message and in the implementation log.
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
-| Session attribution | By launch directory | design §7.4 |
+| Session attribution | By launch directory | design §4.3, §4.5 |
 | v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator; §3 items 1 and 4 |
 | `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | operator |
 
@@ -363,6 +363,7 @@ None of items 1–6 changes Qdrant data or the schema.
    `ragnart/ingest.py`). One long document (a book on CPU docling takes 6–25 min)
    leaves the other workers idle until it completes. Measured during the re-parse
    backlog on Server 2: mostly one of three workers busy.
+   Delivered by v0.2 session A.
    Fix:
    - Replace the fetch-and-gather loop with a continuous pool: `--workers`
      tasks, each taking the next pending row as soon as its previous file
@@ -392,7 +393,9 @@ None of items 1–6 changes Qdrant data or the schema.
   search while they build.
 - Re-key Claude Code sessions from their `.jsonl` path to
   `claude-session://<uuid>` (design §4.2), in the state database and the
-  payload together; no re-embedding.
+  payload together; no re-embedding. Claude Code subagent transcripts are separate items keyed
+  `claude-session://<session-uuid>/agent-<id>`, in the parent session's project (design §4.2,
+  not yet built).
 - Write a backfill script modelled on `utils/rag_sparse_migrate.py`, but
   doing `set_payload` by `source_path` filter on the live
   `documents` alias — no new collection, no alias swap. Dry-run first;
@@ -400,7 +403,7 @@ None of items 1–6 changes Qdrant data or the schema.
   derive `project_id` and the new metadata the same way the extended scanner
   does, and also backfill session attribution (Claude Code `cwd`, OpenCode
   `location.directory`) read fresh at parse time — this data is currently
-  parse-time-only and is not persisted.
+  parse-time-only and is not persisted. The backfill also seeds `size_bytes` and `content_hash` (MD5) by reading every NAS file once; after that a file is hashed only when its size or modification time changes (design §4.2).
 - Make each NFS root a top-level project and create a per-owner `sessions`
   project, so every file and every session has a `project_id` even with no
   `.ragnart/project.toml` anywhere above it (design §6.1).
@@ -409,16 +412,22 @@ None of items 1–6 changes Qdrant data or the schema.
   `scope`, `grounding`, `capture`, `inbox_expiry_days`; every other key is a tag,
   `docs/RAGNART-design.md` §4.5),
   move detection by `content_hash`, tombstones with a grace period, and
-  plan-then-apply reconciliation (design §4.2, §10.2), on top of the mount
+  plan-then-apply reconciliation (design §10.2, §10.3), on top of the mount
   guard and missing-sources threshold of fix-first item 1.
 - Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the `scope`
   parameter on `GET /v1/search` (project path, selection by paths and tags,
   `all`; resolved scope echoed in the response; design §8.8), and
-  `GET /v1/projects`.
-- Attach sessions to projects by launch directory (`docs/RAGNART-design.md` §4.3, origin details).
+  `GET /v1/projects`. `scope` is required on `GET /v1/search`, with no server-side
+  default (design §8.8). The two `/rag` command copies (`~/.claude/commands/rag.md`,
+  `~/.config/opencode/commands/rag.md`) are updated in the same change.
+- Attach sessions to projects by launch directory (`docs/RAGNART-design.md` §4.3, origin details;
+  the matching rule and the per-owner `sessions` project, §4.5, not yet built): the launch
+  directory is resolved to its physical path and matched against the physical paths of projects;
+  an unmatched session goes to its owner's `sessions` project.
 - Search: `max_hits_per_source` cap and collapse of identical copies by
   `content_hash` (design §9.1, §8.7), with the cap as a knob in `ragnart.yaml`
-  and per request (echoed).
+  and per request (echoed). Delivered by v0.2 session A (the cap). Collapse by
+  `content_hash` remains open: it needs `content_hash` in the payload.
 - Reconciliation: a scheduled check of `chunk_count` against Qdrant and of
   Qdrant keys against rows; repairs under the deletion rules and fails loudly
   in the log (design §10.3). Its first run must also resolve these current
@@ -435,7 +444,7 @@ None of items 1–6 changes Qdrant data or the schema.
     Rationale: the same divergence, with a known cause.
 - Nightly online backup of `opencode.db` to
   `RAGNART--databases/opencode-backups/<hostname>-<ip>/`, installed by
-  `scripts/install-units.sh` (design §10.5).
+  `scripts/install-units.sh` (design §10.5). Delivered by v0.2 session A.
 
 **Data migration & rollback.**
 1. Snapshot pair first: Qdrant snapshot of `documents_new` plus a
@@ -463,7 +472,7 @@ time, not correctness).
 - Point count in `documents` is unchanged before/after the backfill.
 - No vectors are rewritten (verified on a sample of points: vectors read
   before and after are identical).
-- The 14 bench queries return the same results with no `project` given.
+- The 14 bench queries return the same results with `scope=all`.
 - A scoped search (`scope=<project path>`) returns only that project's
   sources, and the response names the projects searched.
 - Moving a project directory changes one `projects` row and zero Qdrant
@@ -479,11 +488,11 @@ sessions moved in the meantime. The 10% missing-threshold default may be
 wrong for this corpus's real churn rate and needs a dry run before being
 trusted.
 
-**Decisions to confirm at kickoff.** Scheduled sync scope: all configured
-roots in one run (recommended) or `la-familia` added to `RAG_SYNC_USERS`;
-missing-sources threshold (10% suggested); grace period before purge (24h suggested); backfill batch size;
-whether to pilot the backfill on one owner's data before the full corpus;
-the default `max_hits_per_source`; how many OpenCode backup copies to keep.
+**Decisions (settled at kickoff).** Scheduled sync covers all configured roots in
+one run. Missing-sources threshold: 10% (`rag.sync.max_delete_fraction`). Grace
+period before purging a missing source's chunks: 24 hours. Backfill: checkpoint
+every 100 items, one `set_payload` per `source_path`, pilot on one subtree first.
+Default `max_hits_per_source`: 3. OpenCode backup copies kept: 7.
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
@@ -764,24 +773,27 @@ improvements stay `p1`.
 | # | Item | Suggested default | Confirm at |
 | --- | --- | --- | --- |
 | 1 | Transient expiry | 30 days | settled |
-| 2 | Grace period before purging missing Archive sources | 24 hours | v0.2 kickoff |
-| 3 | Missing-sources threshold that aborts a sync | 10% | v0.2 kickoff |
+| 2 | Grace period before purging missing Archive sources | 24 hours | settled |
+| 3 | Missing-sources threshold that aborts a sync | 10% | settled |
 | 4 | RAGNART service port on Server 2 | 8100 | settled |
 | 5 | Token vs OIDC detail (format, issuer, storage) | per-client tokens first, OIDC optional later | v0.5 kickoff |
 | 6 | Invalid/missing-token behaviour | not pre-decided — rejected (401) vs anonymous-no-grants | v0.5 kickoff |
 | 7 | Docker on Server 1 (for Kotaemon's container) | unverified — check before v0.4 kickoff | v0.4 kickoff |
 | 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.3 kickoff |
 | 9 | Claude Desktop Code session transcript location | unverified — needed before the Runtime-tier check can be written | v0.5 kickoff |
-| 10 | Backfill batch size / pilot scope (one owner first?) | not pre-decided | v0.2 kickoff |
+| 10 | Backfill batch size / pilot scope (one owner first?) | checkpoint every 100 items; pilot on one subtree first | settled |
 | 11 | Notifications (channel, events: failed run, guard tripped, snapshot failed, reconciliation problems) | not scheduled; ntfy on Server 1 available | open |
 | 12 | Corpus-hygiene policy: CSV and data files, size and chunk caps, mirrored trees | decided in fix-first item 0 | bridge session |
+| 13 | Default `max_hits_per_source` | 3 | settled |
+| 14 | OpenCode backup copies kept | 7 | settled |
+| 15 | Scheduled sync scope | all configured roots in one run | settled |
 
 ## 9. Version status table
 
 | Version | Status | Session(s) | Commit(s) |
 | --- | --- | --- | --- |
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
-| v0.2 Nested | planned | — | — |
+| v0.2 Nested | in progress | 3 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A) |
 | v0.3 Project mode | planned | — | — |
 | v0.4 Kotaemon | planned | — | — |
 | v0.5 Tenancy & authentication | planned | — | — |

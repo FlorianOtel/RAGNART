@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5)
-updated_at: 2026-11-15--19-11
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6)
+updated_at: 2026-11-15--20-04
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -456,8 +456,12 @@ check covers every owner. The scheduled run uses `--user florian` (§8.2).
 
 ### 5.4 Worker loop — `ingest_file()`
 
-`utils/rag_ingest_daemon.py` fetches pending rows 10 at a time (oldest first) and runs
-`ingest_file()` on up to `--workers` of them concurrently, until no row is `pending`. Per file:
+`utils/rag_ingest_daemon.py` runs `--workers` coroutines as a continuous pool. Each worker calls
+`StateDB.claim_next_pending()` (the oldest `pending` row, moved to `processing` by one SELECT and
+one UPDATE with no `await` between them, so no other worker can claim the same row; §5.6), runs
+`ingest_file()` on that row, and then claims the next one. A worker that finishes early claims the
+next pending row at once rather than waiting for the others. The pool stops when no row is
+`pending`. Per file:
 
 | Step | Action |
 |---|---|
@@ -482,7 +486,7 @@ Both flags are required.
 
 | Flag | Controls | Scheduled value | CPU-embedding value |
 |---|---|---|---|
-| `--workers N` | files processed concurrently (docling parse overlaps other files' embedding) | 3 | 1 |
+| `--workers N` | coroutines in the continuous pool (§5.4), each processing one file at a time; docling parse overlaps other files' embedding | 3 | 1 |
 | `--batch M` | concurrent Ollama requests per file | 20 | 5 |
 | `--log-file PATH` | also log to this file (needed by `rag_status.py --watch`) | `logs/rag-ingest.log` | — |
 
@@ -524,10 +528,11 @@ The holder writes the same `pid N on HOST, <command>, since <time>` line into th
 takes the lock. A contender never rewrites the file. The file is not cleared when the holder exits,
 so when the lock is free it shows the last holder's line. Its mtime is the last acquisition.
 
-The lock is needed because `fetch_pending_full()` and `mark_processing()` are not one atomic
-step; two daemons could pick the same rows and both upsert, leaving duplicate points. The same
-reasoning covers the other writers: nothing may change the index under a sync, a purge, a reset or
-a snapshot.
+The lock is needed because the index has exactly one writer. Two processes could claim the same
+pending rows and both upsert, leaving duplicate points. Claim atomicity holds only inside one
+daemon process: `StateDB.claim_next_pending()` is safe because all its workers share one event-loop
+thread, and that guarantee does not extend to another process. The same reasoning covers the other
+writers: nothing may change the index under a sync, a purge, a reset or a snapshot.
 
 | Scenario | Outcome |
 |---|---|
@@ -627,8 +632,9 @@ mode it is accepted and ignored. Callers that want one ranking key use
 | `file_types` | repeated string | none | e.g. `&file_types=pdf&file_types=claude_chat` |
 | `score_threshold` | float 0–1 | 0.0 | dense-only path only |
 | `rerank` | bool | config (`true`) | `rerank=false` skips the cross-encoder |
+| `max_hits_per_source` | int ≥1 | config (`3`) | per-source cap, applied after rerank, before top_k; echoed in the response |
 
-Response: `{"query", "user", "results": [...]}`, each result with `content` (parent text),
+Response: `{"query", "user", "max_hits_per_source", "results": [...]}`, each result with `content` (parent text),
 `source_path`, `score`, `file_name`, `file_type`, `session_title` (empty for NAS files),
 `text` (child chunk) and, when reranked, `rerank_score`. When Qdrant is unreachable a search
 answers **503** `Qdrant unavailable`. The next search after
@@ -688,6 +694,7 @@ their own file, not the working directory. The service and the daemon read it on
 | `rag.hybrid.dense_fetch` | `30` | search | |
 | `rag.hybrid.sparse_fetch` | `30` | search | |
 | `rag.hybrid.rrf_k` | `60` | — | not read (§6.1) |
+| `rag.search.max_hits_per_source` | `3` | search | default cap; `docs/RAGNART-design.md` §9.2 |
 | `rag.admission.max_text_file_size_bytes` | `5000000` | ingest | text-like files above this size are `ignored`; `docs/RAGNART-design.md` §5 |
 | `rag.admission.max_chunks_per_item` | `5000` | ingest | items producing more chunks are `ignored`; `docs/RAGNART-design.md` §5 |
 | `rag.admission.fffd_ratio_threshold` | `0.005` | ingest | text-like files above this U+FFFD ratio are `ignored`; `docs/RAGNART-design.md` §5 |
@@ -720,6 +727,8 @@ Anything that touches `rag_state.db` runs on **Server 2** (§5.6).
 | `ragnart-search.service` (Server 2) | simple, `Restart=on-failure` | `uvicorn ragnart.service:app --host 0.0.0.0 --port 8100`, `User=florian` |
 | `ragnart-ingest.timer` (Server 2) | timer | `OnCalendar=*-*-* 01,07,13,19:00:00`, `AccuracySec=10min`, `Persistent=true` (a slot missed while down runs at next boot) |
 | `ragnart-ingest.service` (Server 2) | oneshot | runs `scripts/ragnart-ingest-run.sh` as `florian`; `TimeoutStartSec=7200` kills a stuck run (crash recovery resets its rows on the next start) |
+| `ragnart-opencode-backup.service` (Server 2) | oneshot | runs `scripts/opencode-db-backup.sh` as `florian`; backs up `opencode.db` (§9.6) |
+| `ragnart-opencode-backup.timer` (Server 2) | timer | `OnCalendar=*-*-* 03:30:00`, `AccuracySec=10min`, `Persistent=true` (a slot missed while down runs at next boot) |
 | `qdrant.service` (Server 1) | simple | §4.1 |
 | `/etc/logrotate.d/ragnart-ingest` (Server 2) | logrotate | §8.6 |
 
@@ -1066,6 +1075,24 @@ bash scripts/sqlite-qdrant-snapshot.sh                    # direct; takes the in
 ```
 
 Each extra pair counts toward the 7 kept, so forcing snapshots shortens the history.
+
+### 9.6 OpenCode database backup
+
+`scripts/opencode-db-backup.sh` takes a nightly backup of the local OpenCode database
+(`opencode.db`; default `/home/florian/.local/share/opencode/opencode.db`, overridable with
+`OPENCODE_DB_PATH`). `ragnart-opencode-backup.timer` starts `ragnart-opencode-backup.service`
+(§8.1). Both are installed on Server 2 by `scripts/install-units.sh`.
+
+| Item | Value |
+|---|---|
+| When | 03:30 local time daily (`OnCalendar=*-*-* 03:30:00`); `Persistent=true`, so a slot missed while the host was down runs at the next boot |
+| Method | `sqlite3 .backup` (SQLite's online backup API); OpenCode keeps writing to the live database during the run |
+| Where | `RAGNART--databases/opencode-backups/<hostname>-<ip>/opencode-<YYYY-MM-DD>.db` under the data root (§1.3); the date is UTC |
+| Write | a temp file `.opencode-<YYYY-MM-DD>.db.tmp` in the same directory, renamed to the final name only when non-empty; an empty result is an error and is removed. A stale temp file from a crashed run is deleted first |
+| File mode | 0600 (`umask 077`): the copies hold private session data |
+| Retention | the newest 7 `opencode-*.db` in each `<hostname>-<ip>` directory; older copies are deleted |
+| Index writer | no. It does not take `rag.ingest_lock` (§5.6): it reads OpenCode's database and writes only its own backup directory |
+| Duration | a 2.2 GiB `opencode.db` backs up in about 21 s |
 
 ---
 
