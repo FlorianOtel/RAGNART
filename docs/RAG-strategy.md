@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6)
-updated_at: 2026-11-15--20-04
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7)
+updated_at: 2026-11-15--23-38
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -188,10 +188,28 @@ Known symlinks under `/mnt/nfs/Florian`:
 
 `scan_claude_chats()` walks each `claude_chats.roots[].path` (configured:
 `/home/florian/.claude/projects`, owner `florian`) with `followlinks=True`, takes every
-`.jsonl` (main sessions and `<uuid>/subagents/agent-*.jsonl`), dedups by real path, and
-applies none of the `rag.scanner` rules.
+`.jsonl` (main sessions, `<uuid>/subagents/agent-*.jsonl` and
+`<uuid>/subagents/workflows/wf_*/agent-*.jsonl`), dedups by real path, and applies none of the
+`rag.scanner` rules.
 
-`_parse_claude_chat()` in `ragnart/ingest.py` turns a transcript into text:
+Each transcript is queued under a session key, not its path. `claude_jsonl_key()` in
+`ragnart/scanner.py` computes the key, and the real `.jsonl` path is stored in `origin_path`:
+
+| Transcript | Queue key (`file_path`) |
+|---|---|
+| `<uuid>.jsonl` | `claude-session://<uuid>` |
+| `<uuid>/subagents/agent-<id>.jsonl` | `claude-session://<uuid>/agent-<id>` |
+| `<uuid>/subagents/workflows/wf_<w>/agent-<id>.jsonl` | `claude-session://<uuid>/agent-<id>` |
+| `<uuid>/subagents/workflows/wf_<w>/journal.jsonl` | not queued: a workflow orchestration log, not a conversation |
+
+A workflow `journal.jsonl` is never discovered, so a sync removes any row it had, subject to the
+guards in §5.3. A `claude_chats` root that is missing, or that yields no transcripts while the
+queue still holds rows under it, blocks deletion for the whole run (§5.3).
+
+A session uuid can be found in more than one transcript file: for example in two Claude Code project folders after a session was copied, or in a git worktree. Within one scan, all copies of one key compete: the newest copy by modification time wins, and an exact tie goes to the greatest path. The key is queued once, from the winning copy, and `origin_path` follows the winner. The other copies are duplicate locations and are not indexed.
+
+`_parse_claude_chat()` in `ragnart/ingest.py` reads the transcript at `origin_path` and turns it
+into text:
 
 - keeps user and assistant text blocks; skips meta entries, `tool_use`, `tool_result`,
   thinking blocks, XML-tagged command strings and file-history snapshots;
@@ -203,7 +221,9 @@ applies none of the `rag.scanner` rules.
   real user message, cut to 60 characters. Subagent transcripts get the parent session's
   title plus ` [subagent]`.
 
-Points get `file_type = "claude_chat"`, and `file_name` is set to the session title.
+Points get `file_type = "claude_chat"`, and `file_name` is set to the session title. The first
+non-empty top-level `cwd` of the transcript is the session's launch directory. It is stored
+verbatim in the `launch_dir` column (§5.1) and not in the payload.
 
 ### 2.5 OpenCode sessions (`opencode`)
 
@@ -336,15 +356,15 @@ live deployment `documents` is an **alias** for the real collection `documents_n
 | Points | ~2.99 million |
 | Dense vector | unnamed, 1024 dimensions, cosine |
 | Sparse vector | `sparse_text`, `modifier: idf` |
-| Payload index | `source_path` (keyword) — the only indexed field |
+| Payload indexes | keyword: `source_path`, `project_id`, `owner`, `source_type`, `file_type`, `content_hash`; datetime: `modified_at`, `ingested_at` (`ensure_payload_indexes()`, `ragnart/collection.py`) |
 | HNSW | `m 16`, `ef_construct 100`, in RAM |
 | Payload storage | on disk (`on_disk_payload: true`) |
 
 `ensure_collection()` runs at search-service startup, at daemon startup and on every search
 and ingest call. If neither a collection nor an alias named `documents` exists, it creates a
 real `documents` collection with the dense and sparse spaces above. It also creates the
-`source_path` keyword index if missing — every per-file delete filters on that field, and
-without the index such deletes scan the whole collection and time out.
+payload indexes listed above that are missing. Every per-file delete filters on `source_path`,
+and without that index such deletes scan the whole collection and time out.
 
 Qdrant 1.17 cannot add a sparse space to an existing collection. `utils/rag_sparse_migrate.py`
 handles that case: `migrate` copies all points into `documents_new` with computed sparse
@@ -364,7 +384,7 @@ Field names are constants in `ragnart/schema.py`; no other module uses string li
 | `text` | child chunk — what was embedded and what the reranker scores | all |
 | `parent_text` | parent chunk (or the flat chunk) — returned as `content` | all |
 | `owner` | owner string (`florian`, `la-familia`, …) | all |
-| `source_path` | NFS path, or `opencode://<id>` — the provenance returned to clients | all |
+| `source_path` | NFS path, `opencode://<id>`, or `claude-session://<uuid>[/agent-<id>]` (the queue key, not the transcript path) — the provenance returned to clients | all |
 | `file_name` | file name; session title for `claude_chat` and `opencode` | all |
 | `file_type` | extension, `claude_chat` or `opencode` | all |
 | `page` | always `0` (no page tracking) | all |
@@ -373,6 +393,11 @@ Field names are constants in `ragnart/schema.py`; no other module uses string li
 | `session_id` | session UUID / OpenCode id | `claude_chat`, `opencode` |
 | `project` | basename of the session's cwd | `claude_chat` only |
 | `session_title` | human-readable session title | `claude_chat`, `opencode` |
+| `project_id` | owning RAGNART project. Always `global` today: the item is outside every ragnart project, and no ragnart projects exist yet | all |
+| `source_type` | `file`, `claude_session` or `opencode_session` | all |
+| `modified_at` | ISO 8601 UTC of the queue row's `last_modified` (file mtime, or OpenCode `time.updated`) | all |
+| `ingested_at` | ISO 8601 UTC of the time the points were written; the same value as the row's `completed_at` | all |
+| `content_hash` | MD5 hex digest of the source bytes. No value for `opencode`: `null` on points written by the new ingest code, absent on points written by the backfill (§5.7) | all |
 
 Point IDs are random UUIDs; per-file delete-before-insert (§5.4) makes deterministic IDs
 unnecessary.
@@ -384,11 +409,19 @@ unnecessary.
 ### 5.1 `rag_state.db` — the ingestion queue
 
 `/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db`, SQLite in WAL mode, managed by
-`ragnart/state.py` (`StateDB`). One table:
+`ragnart/state.py` (`StateDB`). It holds six tables: `ingestion_queue` (below) and five project
+tables (after the block).
+
+Schema version is tracked in SQLite's `PRAGMA user_version`. `ragnart/state.py`'s `_MIGRATIONS` is an
+ordered `(version, statements)` list. At `StateDB()` open, every migration above the stored version
+runs in ascending order, and the stored version is set after each one. A `StateDB(..., read_only=True)` runs no migration. Each statement runs on its own,
+and an `OperationalError` (for example, a column that already exists) is ignored, so a migration
+re-runs safely after a crash. The current version is 2. Version 1 is the `skip_reason` column and the
+`max_retries` floor. Version 2 is the columns and tables below.
 
 ```sql
 CREATE TABLE ingestion_queue (
-    file_path       TEXT PRIMARY KEY,      -- NFS path, .jsonl path, or opencode://<id>
+    file_path       TEXT PRIMARY KEY,      -- NFS path, claude-session://<uuid>[/agent-<id>], or opencode://<id>
     owner           TEXT NOT NULL,
     last_modified   REAL NOT NULL,         -- mtime (or OpenCode time.updated) at discovery
     status          TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | completed | ignored
@@ -398,12 +431,40 @@ CREATE TABLE ingestion_queue (
     started_at      TEXT,                  -- ISO UTC, set on → processing
     completed_at    TEXT,                  -- ISO UTC, set on → completed
     progress_detail TEXT,                  -- starting | parsing | chunking (N chunks) | embedding i/N | upserting
-    skip_reason     TEXT                   -- why the row is ignored
+    skip_reason     TEXT,                  -- why the row is ignored
+    -- Version 2 columns (12). Discovery fills origin_path, source_type, file_type and first_seen_at.
+    -- Ingest and the backfill fill the rest.
+    project_id       TEXT NOT NULL DEFAULT 'global',  -- 'global' = outside every ragnart project
+    source_type      TEXT,                  -- file | claude_session | opencode_session
+    file_type        TEXT,                  -- extension, claude_chat or opencode
+    origin_path      TEXT,                  -- where the bytes are read: the file (NAS), the .jsonl (claude-session://); NULL for opencode://
+    size_bytes       INTEGER,               -- NULL for opencode://
+    content_hash     TEXT,                  -- MD5 hex; NULL for opencode://
+    hashed_at        TEXT,                  -- ISO UTC of the hash; NULL for opencode://
+    first_seen_at    TEXT,                  -- ISO UTC, set on insert by discovery; rows completed before v2 take completed_at
+    pipeline_version TEXT,                  -- 'p1' once written by ingest or the backfill; NULL = not migrated
+    chunk_count      INTEGER,               -- points written
+    missing_since    TEXT,                  -- reserved: no code writes it yet
+    launch_dir       TEXT                   -- session launch directory, verbatim; NULL for files
 );
 ```
 
+The five project tables are created by version 2. `projects` holds one reserved row, `global`
+(name `Global`, no path, no parent, `inherit_access` 0), inserted with `INSERT OR IGNORE`. The other
+four are empty:
+
+| Table | Holds |
+|---|---|
+| `projects` | One row per ragnart project; only the reserved `global` row exists |
+| `project_tags` | `key = value` tags per project |
+| `project_links` | Links between projects |
+| `source_links` | Source paths attached to a project |
+| `grants` | Role per principal per project |
+
+The purpose of the `global` project and of these tables is in `docs/RAGNART-design.md` §4.6.
+
 The `StateDB()` constructor writes (`PRAGMA journal_mode=WAL`, `CREATE TABLE IF NOT EXISTS`,
-column migrations, commit) — opening the DB with it is never read-only.
+the migrations above, commit) — opening the DB with it is never read-only.
 
 ### 5.2 Status transitions
 
@@ -425,12 +486,13 @@ any code path; if set by hand, the next sync resets it to `pending` with zero re
 One run reconciles the queue with the sources:
 
 1. Runs the three scanners (§2), each calling `discover_or_update()` per path: new → `pending`,
-   newer mtime → `pending`, otherwise no change. The NAS scan also reports its skipped roots.
+   newer mtime → `pending`, otherwise no change. The NAS and `claude_chats` scans also report their skipped roots. A `claude_chats` scan queues one copy per session key: the newest copy wins (§2.4).
 2. Builds the set of paths seen in this run (plus all queued `opencode://` rows if the
    OpenCode API could not be scanned) and calls `find_deleted()`, limited to the owners whose
    sources were scanned. A queue row of those owners that is not in the set is gone: deleted
    from disk, excluded by a `.ragignore` or `config/ragignore` rule, or with an extension
-   outside `include_extensions`. Each gone path is logged with its reason.
+   outside `include_extensions`. A `claude-session://` row is gone when no transcript with its key is
+   found in any `claude_chats` root. Each gone path is logged with its reason.
 3. Runs the guards below. If one trips, steps 4 and 5 do not run.
 4. For gone rows in `completed`, deletes their Qdrant points by `source_path` filter with
    `wait=True`: the call returns only after Qdrant has applied the delete, so no points are left
@@ -442,7 +504,9 @@ One run reconciles the queue with the sources:
 queueing of step 1 still stands). Each logs an ERROR and the run exits with code 1:
 
 - **Skipped roots.** An NFS root that is not a directory, or that is empty while the queue holds
-  rows under it, counts as unmounted. If any in-scope root is skipped, nothing is deleted.
+  rows under it, counts as unmounted. A `claude_chats` root gets the same treatment: one that is
+  not a directory, or that yields zero transcripts while the queue holds rows under it, is skipped.
+  If any in-scope root is skipped, nothing is deleted.
 - **Mass delete.** If the completed rows to delete exceed `rag.sync.max_delete_fraction`
   (`ragnart.yaml`, `0.10`) of all completed rows, nothing is deleted. `--allow-mass-delete`
   proceeds anyway and logs a WARNING with the counts.
@@ -475,6 +539,17 @@ next pending row at once rather than waiting for the others. The pool stops when
 | 7 | `mark_completed()` |
 
 Any exception → `mark_failed()` (retry or `ignored`, §5.2), and the daemon moves on.
+
+**Metadata (v2).** Before step 5, `ingest_file()` hashes the source with `hash_file()`
+(`ragnart/hashing.py`: size and MD5). For NAS files it hashes `file_path`. For `claude-session://`
+keys it hashes `origin_path`, because the key is not a path, and it parses the transcript from
+`origin_path` too. OpenCode sessions are not hashed: their content lives only in OpenCode's database,
+so `size_bytes`, `content_hash` and `hashed_at` stay NULL. Every point carries `project_id` (`global`),
+`source_type`, `modified_at` (the row's `last_modified` as ISO UTC), `ingested_at` (the row's
+`completed_at`) and `content_hash`. Step 7 writes the matching SQLite columns with `pipeline_version = 'p1'`,
+plus `size_bytes`, `hashed_at`, `chunk_count`, `file_type` and `launch_dir`. `launch_dir` is the
+session's launch directory, verbatim: Claude's first non-empty `cwd`, or OpenCode's `location.directory`.
+It is written to the SQLite column only, never to the payload.
 
 **Idempotency.** Step 0 makes every attempt start from zero points for that file. A retry
 after a partial upsert, a re-ingest of a modified file, or a re-run after a crash between
@@ -553,6 +628,81 @@ ad-hoc `sqlite3` sessions all run on Server 2. Of these, the sync, the daemon, t
 the run script, `rag_reset.py` (without `--dry-run`), `rag_purge_corrupt.py --confirm` and
 `rag_purge_rescan.py --apply` take the ingestion lock. `rag_status.py`, the dry runs and the
 read-only `ragnart` CLI never take it. The search service never opens the state DB.
+
+### 5.7 Metadata backfill — `utils/rag_metadata_backfill.py`
+
+A one-time, payload-only migration. It gives every item ingested before v2 its metadata (§4.3, §5.1):
+`set_payload` in Qdrant and SQLite column updates. It never re-embeds and never touches vectors.
+Rows written by the v2 ingest code already carry `pipeline_version = 'p1'`, so the backfill skips them.
+
+**Row kinds** (`classify()`):
+
+| Kind | Rows | What it does |
+|---|---|---|
+| `nas` | NAS files | Hashes the file. Payload set under its unchanged key. |
+| `claude` | Transcripts under a `claude_chats` root | Hashes the file and reads its first `cwd`. Re-keys from the `.jsonl` path to its `claude-session://` key, in Qdrant and SQLite. `origin_path` keeps the `.jsonl` path. |
+| `claude_journal_skip` | Workflow `journal.jsonl` | Nothing. Left unchanged. |
+| `opencode` | `opencode://` sessions | Reads `launch_dir` from `GET /api/session/<id>`. No hash. |
+
+**Candidates:** rows with `status = 'completed'` and `pipeline_version IS NULL`, ordered by `file_path`.
+`ignored` rows are not candidates. `--prefix PATH` is a plain string match on `file_path`. End it with
+`/` so that a sibling directory is not matched.
+
+**Modes:**
+
+- **Dry-run** (the default; `--dry-run` is accepted too). Opens the DB read-only, takes no lock, writes
+  nothing, and calls neither Qdrant nor the OpenCode API. It prints the count per kind, the hashing volume,
+  and the estimated time at `--assumed-mb-per-sec` (default 50).
+- **Apply** (`--apply`). Takes the ingestion lock (§5.6) before it opens the DB. A lock that is held
+  exits 75 and names the holder.
+
+**Per-row order** (`process_one()`), committed row by row:
+
+1. Read the file (hash, first `cwd`) or the OpenCode API. Nothing is written yet.
+2. Qdrant `set_payload`, filtered on the row's **current** key, `wait=True`. For a Claude row the payload's
+   `source_path` is the new key.
+3. Count the points under the new key (NAS and Claude rows; OpenCode rows skip this step).
+4. One SQLite `UPDATE` (re-key and metadata), committed. This is the step that marks the row migrated.
+
+A crash before step 4 leaves `pipeline_version` NULL, and a re-run repeats the row. A crash after step 2 is
+harmless: the old-key filter then matches no points, and step 3 still counts the new key.
+
+**Per-row failures.** A failure in any step (vanished file, read error, Qdrant error, OpenCode API error)
+is logged with the key and the reason, and counted. The row keeps
+`pipeline_version` NULL, and the run continues with the next row. The run exits 1 if any row failed, 0
+otherwise. A re-run retries the failed rows.
+
+**Collisions.** One session uuid can be found in two transcript files (§2.4). If the old-key row's new key already has a row, the two copies are resolved, not failed. The newer file by modification time wins; an exact tie goes to the greatest path. Every Qdrant point under either key is deleted, the old-key row is removed, and the row under the new key keeps its place with `origin_path` set to the winner and status `pending`, so the daemon re-ingests the winning copy. The run summary counts these as `collisions resolved: N`.
+
+**Checkpoint.** `{db_base_path}/sqlite/metadata_backfill.checkpoint` (default; `--checkpoint-file`
+overrides it). One line every 100 rows: UTC time, `done/total` and the last `file_path`. The file is
+appended to, and the counts restart at 0 on each run. It is for the operator to watch. Nothing reads it back.
+
+**Runbook** (run on Server 2, where `rag_state.db` lives):
+
+1. Snapshot the pair: run `bash scripts/sqlite-qdrant-snapshot.sh` directly. It takes the ingestion lock itself (exit 75 if a sync or daemon holds it), then takes a pair unconditionally.
+   `RAG_FORCE_SNAPSHOT` is read only by `scripts/ragnart-ingest-run.sh`, which also runs sync and the daemon, so this step does not use it.
+2. Keep `ragnart-ingest.timer` stopped, and do not run any sync, daemon or run script, from the code change
+   until step 6 completes. `sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service`
+   Why: the new scanner keys Claude transcripts `claude-session://`. A sync before the backfill would see
+   the old `.jsonl`-keyed rows as deleted and queue new keys, which re-ingests the sessions and duplicates
+   their points.
+3. Dry-run, and check the report. The `claude_journal_skip` count should be small.
+   `python utils/rag_metadata_backfill.py --dry-run`
+4. Pilot, one prefix at a time, checking the result after each. Examples:
+   `python utils/rag_metadata_backfill.py --apply --prefix /mnt/nfs/Florian/Gin-AI/projects/RAGNART/`,
+   `python utils/rag_metadata_backfill.py --apply --prefix /home/florian/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-RAGNART/`,
+   `python utils/rag_metadata_backfill.py --apply --prefix opencode://ses_1`.
+5. Full run, as a transient user unit so it survives the shell:
+   `systemd-run --user --unit=ragnart-metadata-backfill --working-directory=/mnt/nfs/Florian/Gin-AI/projects/RAGNART ~/Gin-AI/.Gin-AI-python-3.12/bin/python utils/rag_metadata_backfill.py --apply`
+   Follow it with `journalctl --user -u ragnart-metadata-backfill.service -f`, and read its state with
+   `systemctl --user show -p ActiveState --value ragnart-metadata-backfill.service`.
+6. Restart the timer only after a run that exited 0: `sudo systemctl start ragnart-ingest.timer`.
+   After a run that exited 1, a Claude row that remains NULL is still old-keyed, and a timer started
+   now would sync it as deleted. Re-run the backfill first.
+   A stalled or failed run is diagnosed in `docs/RAG-troubleshoot.md` §2.14.
+
+Checks: point count in `documents` before and after, and the payload of a sample of points.
 
 ---
 

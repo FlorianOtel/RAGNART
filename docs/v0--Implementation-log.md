@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry)
-updated_at: 2026-11-15--20-11
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated)
+updated_at: 2026-11-15--23-53
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,62 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-15--21-16 to 2026-11-15--23-42 -- v0.2 session B: baseline data model, Claude Code re-key, metadata backfill
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6 v0.2,
+work items 1-4 delivered, items 5 and 8 rewritten. Second of three back-to-back `/brain` sessions for v0.2
+(A, then B, then C). Not a closing session: v0.2 stays open.
+
+#### What was done
+
+Commits: `8a0f6b3` (baseline data model, Claude Code re-key, metadata backfill), `7cedd0c` (session-uuid
+collision repair), and the docs commit that adds this entry.
+
+- **Schema and state:** schema version 2 through `PRAGMA user_version`; per-item columns (including
+  `origin_path` and `launch_dir`); tables `projects` (with the reserved `global` row), `project_tags`,
+  `project_links`, `source_links`, `grants`.
+- **Qdrant:** eight payload indexes (keyword: `source_path`, `project_id`, `owner`, `source_type`,
+  `file_type`, `content_hash`; datetime: `modified_at`, `ingested_at`).
+- **Claude Code re-key:** scanner keys `claude-session://` (`docs/RAGNART-design.md` §4.2); workflow journals excluded.
+- **Backfill:** `utils/rag_metadata_backfill.py` (dry-run, prefix pilot, checkpoint, resumable, per-row failure
+  handling); runbook in `docs/RAG-strategy.md` §5.7.
+- **Decisions (v0.2 session B, recorded in the docs):**
+  1. **Baseline data model:** items outside ragnart projects (today all items) follow the single-user RAG data model and retrieval, now and later.
+  2. **`project_id`:** always present; `global` outside ragnart projects; one reserved `projects` row.
+  3. **Access:** grants govern items in ragnart projects (v0.5); the owner rule governs `global` items, permanently.
+  4. **No root or sessions projects:** a crawl root is a traversal start and owner mapping; launch directories recorded verbatim; no alias map.
+  5. **Membership:** an item belongs to the closest enclosing ragnart project; a ragnart project's parent is the closest enclosing one.
+  6. **Path selection:** not part of the baseline model and not scheduled; a path term in a `<selection>` names ragnart projects only.
+  7. **`origin_path`:** the key for a NAS file, the `.jsonl` path for a Claude Code transcript, `NULL` for OpenCode.
+  8. **Claude Code keys:** main transcript `claude-session://<uuid>`; subagent and workflow agent `claude-session://<uuid>/agent-<id>`; workflow journals excluded.
+  9. **Metadata of existing items:** `modified_at` from the row's last mtime, `ingested_at` and `first_seen_at` from `completed_at`, `pipeline_version` `p1`, hash read once by the backfill; OpenCode `content_hash` NULL.
+  10. **Pilot:** the backfill restricted by prefix, in three parts; a migration safety step, not a project.
+  11. **Kickoff values:** checkpoint every 100 items; one `set_payload` per `source_path`; 10% delete guard; 24 h grace (session C); pilot first.
+  12. **Duplicate copies (found during the live run):** the session-uuid rule (`docs/RAGNART-design.md` §14 D11): one session uuid is one item; the newest copy by mtime wins (then the greatest path); other copies are duplicate locations, not indexed.
+- **Rejected alternatives:** root projects; per-owner `sessions` project or an unfiled project; `NULL` `project_id`;
+  path selection via per-point ancestor lists; alias map for `fotel--NAS-home`; separate keys for diverged session copies.
+- **Tests:** 300 pass before, 368 pass after.
+- **Live evidence:**
+  - Snapshot pair 2026-11-15 21:23 UTC (3.1 GB Qdrant snapshot, 258 MB `rag_state.db`).
+  - Dry run: 14,681 candidates (9,915 NAS, 4,332 Claude Code, 433 OpenCode, 1 journal); 13.5 GB to hash.
+  - Pilot: 167 rows (21 NAS, 88 Claude Code, 58 OpenCode), 0 errors; 36/36 sample vectors identical; datetime range query works.
+  - Full run: 14,634 migrated; 46 re-key collisions (same uuid in two project directories: 35 identical, 9 prefix, 2 diverged).
+  - Collision repair (session-uuid rule, `docs/RAGNART-design.md` §14 D11): 46 resolved; 38 sessions re-queued and re-ingested; 0 failed. Points 348,715 to 347,314 after the repair (the colliding keys' points deleted, 38 sessions re-ingested from their newest copy: net -1,401); 58/58 sample vectors identical.
+  - Every point has `project_id` and the other new fields, except 307 points of two known zombie sources under `dot.claude-Linux` (no queue row; session C reconciliation).
+  - Bench: the 14 queries against a temporary restore of the pre-migration snapshot, compared with the live collection: 12/14 identical top-5 source sets. The two differences are identical-content copies (d2l mxnet/pytorch/tensorflow variants; Dropbox and certifications copies of the same AWS file). The pre-migration collection itself varied between two runs of the same query (known non-determinism). Temporary collection deleted.
+  - First sync with the new scanner deleted only the workflow journal row. Points 347,812 after that sync (new and changed transcripts, including this session's).
+  - New ingestion writes `project_id`, `source_type`, `modified_at`, `ingested_at`, `content_hash` and `launch_dir`.
+  - Search service restarted; timer resumed.
+
+#### Deviations from the plan
+
+- **Baseline bench not captured before the migration:** verified instead by restoring the snapshot into a temporary collection.
+- **`launch_dir` column added (amendment B1):** beyond the Planner's draft.
+- **Duplicate copies found during the live run:** the full run exposed the 46 collisions; the repair followed as a separate commit.
+- **Failure evidence:** the systemd journal of the failed per-unit run is not available; the evidence is the re-run output.
+- **Review fixes:** early-exit paths now set `pipeline_version` (a zero-turn Claude transcript regression test);
+  NAS `.jsonl` files outside the Claude layout handled; empty Claude root guard added.
 
 ### 2026-11-15--19-28 to 2026-11-15--20-11 -- v0.2 session A: continuous worker pool, OpenCode backup, max_hits_per_source; v0.2 decisions
 

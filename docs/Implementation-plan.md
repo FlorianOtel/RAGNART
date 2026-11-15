@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules)
-updated_at: 2026-11-15--20-11
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6)
+updated_at: 2026-11-15--23-53
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -59,7 +59,7 @@ commit message and in the implementation log.
 | Versions of data | Schema version (data model) and per-item pipeline version (`p1`) | design D1b (§4.1, §5) |
 | Pipeline version | `p1` is the working name of the current pipeline. A version change is a major event: an incompatibility or a significant change of behaviour (e.g. a different embedding model, reranking, a results-changing pipeline change). Fixes and improvements stay `p1` | operator |
 | ragnart ↔ git parallel | RAGNART mimics git as closely as possible for ingestion, exclusion and lifecycle: git command names where the mapping is one-to-one, RAGNART terms otherwise; deviations from git are named (A–G). Full mapping and deviations: `docs/RAGNART-design.md` §1.2 | operator; design §1.2 |
-| Access model | Everything is a project; grants to persons and groups; `inherit_access` opt-out; `owner` is metadata; enforced only in `resolve_scope()`/`authorize()` | design D2 (§6) |
+| Access model | Every item belongs to exactly one project: a ragnart project, or the reserved `global` project. Grants apply on ragnart projects; the owner rule applies to `global` items | design §4.6, §6.1, §6.5 |
 | Projects | Addressed by path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
 | Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
@@ -68,8 +68,15 @@ commit message and in the implementation log.
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
-| Session attribution | By launch directory | design §4.3, §4.5 |
+| Session attribution | The launch directory is recorded verbatim in `launch_dir`. A session belongs to a ragnart project only when launched inside one | design §4.3, §4.5 |
 | v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator; §3 items 1 and 4 |
+| Baseline data model | Items outside ragnart projects (today: all items) follow the single-user RAG data model and retrieval semantics, now and later; the ragnart model applies only inside a ragnart project | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
+| `global` project_id | Every item carries `project_id`; items outside ragnart projects carry the reserved `global` (one, not per owner); placing an item in a ragnart project changes only its `project_id`, never re-embeds | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
+| Two access rules | Grants govern items inside ragnart projects (v0.5); the owner rule (owner may read; anyone may read `la-familia` items) governs `global` items, permanently | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
+| No root or sessions projects | No root-level projects, no per-owner `sessions` project, no common-ancestor attachment; a crawl root is only a traversal starting point plus the owner mapping | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
+| Path selection outside ragnart projects | Not scheduled: a path term in a `<selection>` names ragnart projects only, resolved through `projects.path` | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6, §8.1 |
+| Workflow journals | Excluded as orchestration logs, not conversation; subagent and workflow-agent transcripts are keyed `claude-session://<uuid>/agent-<id>` | operator, v0.2 session B; `docs/RAGNART-design.md` §4.2 |
+| Duplicate session copies | One session uuid is one item. When several transcript files carry it, the newest copy by modification time (an exact tie goes to the greatest path) is the item's origin; the other copies are duplicate locations and are not indexed | operator, v0.2 session B; `docs/RAGNART-design.md` §4.2, §14 D11 |
 | `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | operator |
 
 ## 3. Current baseline
@@ -78,16 +85,14 @@ These facts hold for every version below. They are checked against the
 repository and the live services; operational detail is in
 `docs/RAG-strategy.md`.
 
-1. **Corpus.** Measured 2026-11-15, after fix-first item 0 and the operator's
-   `.ragignore` files: **348,163 points** in **13,386 items**, in one
-   collection: dense vector (1024-dim, Cosine, unnamed) plus sparse
-   `sparse_text` (IDF), `on_disk_payload: true`. The largest item has 4,559
-   points; none is above the 5,000-chunk cap. Composition (points / items):
+1. **Corpus.** Measured 2026-11-15, after the first sync with the new scanner (which ingested new and changed transcripts): **347,812 points** in **13,393 items**, in one
+   collection: dense vector (1024-dim, Cosine, unnamed) plus sparse `sparse_text` (IDF), `on_disk_payload: true`.
+   The largest item has 4,559 points; none is above the 5,000-chunk cap. Composition (points / items):
 
    | Type | Points | Items |
    | --- | ---: | ---: |
-   | Claude Code sessions | 100,615 | 4,251 |
-   | `.md` | 72,047 | 3,198 |
+   | Claude Code sessions | 100,436 | 4,258 |
+   | `.md` | 72,160 | 3,198 |
    | `.html` | 56,249 | 523 |
    | `.pdf` | 53,308 | 1,002 |
    | `.txt` | 18,521 | 1,428 |
@@ -95,35 +100,34 @@ repository and the live services; operational detail is in
    | OpenCode sessions | 14,439 | 433 |
    | `.docx` | 10,173 | 403 |
    | `.pptx` | 3,408 | 438 |
-   | `.sh` | 2,639 | 463 |
-   | `.jsonl` | 411 | 101 |
+   | `.sh` | 2,648 | 464 |
+   | `.jsonl` | 117 | 100 |
    | `.yaml` | 338 | 81 |
    | `.yml` | 294 | 155 |
 
-   Queue: 14,654 `completed` (1,270 of them without points; see the v0.2
-   reconciliation findings), 268 `ignored`, 0 `pending`. The pre-purge history
-   is in `docs/v0--Implementation-log.md`. No migration step may require
-   re-embedding or rewriting vectors.
+   Queue: 14,660 `completed`, 268 `ignored`, 0 `pending`. Completed rows without points are the v0.2
+   reconciliation findings (§6 v0.2). The pre-purge history is in `docs/v0--Implementation-log.md`.
+   No migration step may require re-embedding or rewriting vectors.
 2. **`documents` is an alias.** `documents` → `documents_new`. Every
    reference to "the `documents` collection" below means the alias; the
    underlying name `documents_new` matters only for snapshot restore
    (`docs/RAG-strategy.md` §4.2 and §9.3).
-3. **Only `source_path` is Qdrant-indexed.** The live `payload_schema` has
-   one keyword index, `source_path`; `ragnart/collection.py:121` is the only
-   `create_payload_index()` call. v0.2 adds the indexes of
-   `docs/RAGNART-design.md` §4.4.
+3. **Eight payload fields are Qdrant-indexed.** Keyword indexes on `source_path`, `project_id`,
+   `owner`, `source_type`, `file_type` and `content_hash`; datetime indexes on `modified_at` and
+   `ingested_at`. `ensure_payload_indexes()` (`ragnart/collection.py:135`) registers them. The index
+   list is `docs/RAGNART-design.md` §4.4.
 4. **Point IDs are random; replace deletes by `source_path`.**
-   `ragnart/ingest.py:846` uses `uuid.uuid4()`; a file replace deletes by a
-   `source_path` filter (`ragnart/ingest.py:722-735`,
-   `utils/rag_sync_nfs.py:45-67`). So `set_payload` filtered by
+   `ragnart/ingest.py:1033` uses `uuid.uuid4()`; a file replace deletes by a
+   `source_path` filter (`ragnart/ingest.py:783-835`,
+   `utils/rag_sync_nfs.py:90-100`). So `set_payload` filtered by
    `source_path` can add or rewrite payload fields (including the key itself)
    without touching vectors, and a later full re-ingest still replaces cleanly by
    filter.
 5. **Owner comes from config, per NFS root.** The scanner assigns each
-   configured root's `owner` literal (`ragnart/scanner.py:119-132`);
-   `derive_owner()` in `ragnart/schema.py:33` is not called. Search filters
+   configured root's `owner` literal (`ragnart/scanner.py:93-112`);
+   `derive_owner()` in `ragnart/schema.py:42` is not called. Search filters
    `owner IN [user, 'la-familia']` only when `user` is supplied
-   (`ragnart/search.py:104-110`).
+   (`ragnart/search.py:155-160`).
 6. **Filesystem permissions cannot carry tenancy.** Both NFS roots
    (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`) are `florian:florian`, mode
    `777`; nearly every file is owned by uid 555; there are no per-person Unix
@@ -134,7 +138,8 @@ repository and the live services; operational detail is in
 7. **Data root and snapshots.** All persistent data lives under
    `/mnt/nfs/__Backups/RAGNART--databases/` (`sqlite/rag_state.db`, `logs/`,
    `qdrant-snapshots/documents/`, `rag-ingest.lock`). One restore pair
-   (`documents_new-*.snapshot`, ~21 GB, plus `rag_state-*.db`) is taken per
+   (`documents_new-*.snapshot`, plus `rag_state-*.db`; about 3.4 GB on 2026-11-15: 3.1 GB Qdrant
+   snapshot and 258 MB `rag_state.db`) is taken per
    day at the end of an ingestion run by `scripts/sqlite-qdrant-snapshot.sh`;
    7 pairs are kept (`docs/RAG-strategy.md` §9.1).
 8. **Services and hosts.** Qdrant on Server 1 (192.168.1.93:6333).
@@ -160,12 +165,13 @@ These are hard rules that every version from v0.2 onward obeys.
   the Qdrant payload in the same operation (plan-then-apply). Updating only
   one side makes the next scan see delete+new and re-embed — wasteful, not
   corrupting, but it defeats the point of move detection.
-- **Schema changes are additive-only, through `_MIGRATIONS`.** New columns
-  and tables go through the existing `_MIGRATIONS` list pattern in
-  `ragnart/state.py` (a list of `ALTER TABLE` statements applied
-  idempotently, with failures swallowed because the column already exists;
-  there is no schema-version table). Never rename or drop a column, and
-  never change `ingestion_queue.file_path`'s role as primary key.
+- **Schema changes are additive-only, through the ordered `_MIGRATIONS` in `ragnart/state.py`.** Each
+  entry is a schema version with its SQL statements. The version is SQLite's `PRAGMA user_version`;
+  version 2 is the v0.2 session B model (per-item columns including `origin_path` and `launch_dir`, and
+  the `projects`, `project_tags`, `project_links`, `source_links` and `grants` tables). A migration runs
+  once, in ascending order; a statement that fails with an `OperationalError` is skipped, so a run that
+  crashed part-way can be repeated. Never rename or drop a column, and never change
+  `ingestion_queue.file_path`'s role as primary key.
 - **Search without new parameters is unchanged.** Until the `/ragnart` client
   replaces `/rag` (v0.3), `GET /v1/search` called without `scope` must return
   the same ranking it returns today; from v0.3 `scope` is required
@@ -204,7 +210,7 @@ touch a project.
 | Version | Addition |
 | --- | --- |
 | v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
-| v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. One principal, granted every top-level project; the result equals today's owner filter. |
+| v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. Items outside ragnart projects (`project_id` `global`) keep the owner rule; the result equals today's owner filter. |
 | v0.3 | Project-mode actions (capture, add, add --wait, drop, note, rm, gc) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
 | v0.4 | Kotaemon's login is mapped to a principal; still no authentication. |
 | v0.5 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
@@ -386,27 +392,34 @@ None of items 1–6 changes Qdrant data or the schema.
   `modified_at`, `pipeline_version` (the version that produced the item's
   chunks; every item is `p1`, and the column records the version for a future
   major change, §2),
-  `chunk_count`, `missing_since`, origin details) to `ragnart/state.py`.
+  `chunk_count`, `missing_since`, origin details) to `ragnart/state.py`. Delivered by v0.2 session B.
 - Add the payload fields and indexes of design §4.4 (`project_id`, `owner`,
   `source_type`, `file_type`, `content_hash` as keywords; `modified_at`,
   `ingested_at` as datetimes) — online and additive; `documents` keeps serving
-  search while they build.
+  search while they build. Delivered by v0.2 session B.
 - Re-key Claude Code sessions from their `.jsonl` path to
   `claude-session://<uuid>` (design §4.2), in the state database and the
   payload together; no re-embedding. Claude Code subagent transcripts are separate items keyed
-  `claude-session://<session-uuid>/agent-<id>`, in the parent session's project (design §4.2,
-  not yet built).
+  `claude-session://<session-uuid>/agent-<id>`, with the parent session's `project_id` (design §4.2).
+  Delivered by v0.2 session B, including workflow-depth subagent transcripts and exclusion of
+  workflow orchestration journals.
 - Write a backfill script modelled on `utils/rag_sparse_migrate.py`, but
   doing `set_payload` by `source_path` filter on the live
   `documents` alias — no new collection, no alias swap. Dry-run first;
   resumable (checkpoint by last `source_path` processed); batched. It must
   derive `project_id` and the new metadata the same way the extended scanner
-  does, and also backfill session attribution (Claude Code `cwd`, OpenCode
-  `location.directory`) read fresh at parse time — this data is currently
-  parse-time-only and is not persisted. The backfill also seeds `size_bytes` and `content_hash` (MD5) by reading every NAS file once; after that a file is hashed only when its size or modification time changes (design §4.2).
-- Make each NFS root a top-level project and create a per-owner `sessions`
-  project, so every file and every session has a `project_id` even with no
-  `.ragnart/project.toml` anywhere above it (design §6.1).
+  does. Launch directories are recorded verbatim in `launch_dir` (Claude Code
+  `cwd`, OpenCode `location.directory`), never normalised; title and start time
+  stay in the payload (`session_title`) and in `first_seen_at`. The backfill also
+  seeds `size_bytes` and `content_hash` (MD5) by reading every NAS file and every
+  Claude Code transcript once; after that a file is hashed only when its size or
+  modification time changes (design §4.2). Delivered by v0.2 session B as
+  `utils/rag_metadata_backfill.py`.
+- Every item carries a `project_id`: the id of the closest enclosing ragnart
+  project, or the reserved `global` value for an item outside any ragnart
+  project (`docs/RAGNART-design.md` §4.6, §6.1). There is no root-level project
+  and no per-owner `sessions` project; a crawl root is only a traversal starting
+  point plus the owner mapping.
 - Extend the scanner and `rag_sync_nfs.py` with marker discovery
   (`.ragnart/project.toml`: reserved keys `name`, `id`, `inherit_access`, `mode`,
   `scope`, `grounding`, `capture`, `inbox_expiry_days`; every other key is a tag,
@@ -420,10 +433,12 @@ None of items 1–6 changes Qdrant data or the schema.
   `GET /v1/projects`. `scope` is required on `GET /v1/search`, with no server-side
   default (design §8.8). The two `/rag` command copies (`~/.claude/commands/rag.md`,
   `~/.config/opencode/commands/rag.md`) are updated in the same change.
-- Attach sessions to projects by launch directory (`docs/RAGNART-design.md` §4.3, origin details;
-  the matching rule and the per-owner `sessions` project, §4.5, not yet built): the launch
-  directory is resolved to its physical path and matched against the physical paths of projects;
-  an unmatched session goes to its owner's `sessions` project.
+- Record each session's launch directory verbatim in `launch_dir`, including a
+  stale or deleted directory: never normalised, resolved or matched. A session
+  launched outside a ragnart project is an ordinary RAG item
+  (`docs/RAGNART-design.md` §4.6). Attaching sessions to ragnart projects by
+  launch directory happens only when ragnart projects exist
+  (`docs/RAGNART-design.md` §4.5); that is session C's work.
 - Search: `max_hits_per_source` cap and collapse of identical copies by
   `content_hash` (design §9.1, §8.7), with the cap as a knob in `ragnart.yaml`
   and per request (echoed). Delivered by v0.2 session A (the cap). Collapse by
@@ -453,36 +468,48 @@ None of items 1–6 changes Qdrant data or the schema.
 2. Pause the ingestion timer (hold its NFS lock) for the backfill's
    duration — the backfill and an ingestion run must not touch the same
    rows concurrently.
-3. Apply `_MIGRATIONS` (tables and columns).
-4. Create the three payload indexes.
+3. Apply `_MIGRATIONS` (tables and columns). Delivered by v0.2 session B.
+4. Create the payload indexes of `docs/RAGNART-design.md` §4.4 (eight fields).
+   Delivered by v0.2 session B.
 5. Run the backfill dry-run, inspect the plan, then run it for real,
-   batched and resumable.
+   batched and resumable. Delivered by v0.2 session B
+   (`utils/rag_metadata_backfill.py`).
 6. Resume the ingestion timer.
 
-Rollback: restore from the snapshot pair per `docs/RAG-strategy.md` §9.3
-(full) or §9.4 (state-DB-only). Because the
-backfill never rewrites vectors, a SQLite-only rollback is expected to
-suffice; the extra payload fields and indexes left in Qdrant are inert to
-the old code and are left in place by design, not removed. A SQLite-only
-rollback also reverts the backfill's checkpoint, so a retried backfill
-restarts from zero rather than resuming (it is idempotent, so this costs
-time, not correctness).
+Rollback after the backfill: restore the snapshot pair together, the Qdrant snapshot and the matching
+`rag_state.db` copy, per `docs/RAG-strategy.md` §9.3. A SQLite-only rollback (`docs/RAG-strategy.md` §9.4)
+is not sufficient: the backfill re-keyed Qdrant payloads (the `source_path` of Claude Code transcripts
+moved to their `claude-session://` keys, and the collision repair deleted duplicate points), so an older
+`rag_state.db` would no longer match them. The extra payload fields and indexes left in Qdrant are inert
+to the old code and are left in place by design, not removed.
 
 **Definition of done.**
-- Point count in `documents` is unchanged before/after the backfill.
+- Point count in `documents`. The backfill's payload pass left it unchanged (348,715 before and after).
+  Resolving the 46 duplicate-copy collisions (session-uuid rule, `docs/RAGNART-design.md` §14 D11) deleted the colliding keys' points and
+  re-ingested 38 sessions once from their newest copy: 348,715 to 347,314 (net -1,401). The first sync with the new scanner then
+  added new and changed transcripts: live count 347,812 on 2026-11-15 (§3 item 1). Results in
+  `docs/v0--Implementation-log.md`.
 - No vectors are rewritten (verified on a sample of points: vectors read
-  before and after are identical).
-- The 14 bench queries return the same results with `scope=all`.
-- A scoped search (`scope=<project path>`) returns only that project's
-  sources, and the response names the projects searched.
-- Moving a project directory changes one `projects` row and zero Qdrant
-  points.
+  before and after are identical). Checked by v0.2 session B's live backfill;
+  results in `docs/v0--Implementation-log.md`.
+- The 14 bench queries return the same results with `scope=all`. Checked by
+  v0.2 session B's live backfill; results in `docs/v0--Implementation-log.md`. Measured against a
+  temporary restore of the pre-migration snapshot: 12 of 14 queries had identical top-5 source sets;
+  the 2 differences were identical-content copies. The pre-migration collection itself varied between
+  two runs of the same query (known non-determinism, `docs/RAG-strategy.md` §6.5, which covers rank
+  ties and reranker shifts, not set-level variation between runs). The `scope=all` form of this
+  criterion is re-checked in session C, once `scope` exists.
+- A scoped search (`scope=<ragnart project path>`) returns only that ragnart
+  project's sources, and the response names the ragnart projects searched.
+  Session C.
+- Moving a ragnart project directory changes one `projects` row and zero Qdrant
+  points. Session C (no ragnart projects exist after session B).
 - Fix-first item 0 verified; items 1–5 pass their tests.
-- Reconciliation reports zero unexplained differences on the clean corpus.
+- Reconciliation reports zero unexplained differences on the clean corpus. Session C.
 - A result list never contains more than `max_hits_per_source` passages from
   one item.
 
-**Risks.** Backfill runtime against the clean corpus (§3 item 1: 348,163 points) needs measuring, not assuming. Re-deriving session `cwd`/`location.directory` at
+**Risks.** Backfill runtime measured: 14,681 rows, 13.5 GB hashed, about 20 minutes for the full pass on Server 2. Re-deriving session `cwd`/`location.directory` at
 backfill time may disagree with what a later ingestion run derives if
 sessions moved in the meantime. The 10% missing-threshold default may be
 wrong for this corpus's real churn rate and needs a dry run before being
@@ -493,6 +520,17 @@ one run. Missing-sources threshold: 10% (`rag.sync.max_delete_fraction`). Grace
 period before purging a missing source's chunks: 24 hours. Backfill: checkpoint
 every 100 items, one `set_payload` per `source_path`, pilot on one subtree first.
 Default `max_hits_per_source`: 3. OpenCode backup copies kept: 7.
+
+Kickoff decisions of v0.2 session B (operator, 2026-11-15), each documented in `docs/RAGNART-design.md`:
+- Baseline data model: an item outside ragnart projects follows the single-user RAG data model and retrieval semantics, now and later (`docs/RAGNART-design.md` §4.6).
+- `project_id` is always present; items outside ragnart projects carry the reserved `global`, with one reserved `projects` row (`docs/RAGNART-design.md` §4.6).
+- Two access rules by design: grants govern items inside ragnart projects; the owner rule governs `global` items, permanently (`docs/RAGNART-design.md` §4.6).
+- No root-level projects, no per-owner `sessions` project; a crawl root is only a traversal starting point plus the owner mapping; launch directories are recorded verbatim (`docs/RAGNART-design.md` §4.6).
+- An item belongs to the closest enclosing ragnart project; a ragnart project's parent is the closest enclosing ragnart project (`docs/RAGNART-design.md` §4.5).
+- Path selection outside ragnart projects is not scheduled; a path term in a `<selection>` names ragnart projects only (`docs/RAGNART-design.md` §4.6).
+- `origin_path` records where an item's bytes are read: the key for a NAS file, the `.jsonl` path for a Claude Code transcript, `NULL` for OpenCode (`docs/RAGNART-design.md` §4.3).
+- Claude Code main transcripts are keyed `claude-session://<uuid>`, subagent and workflow-agent transcripts `claude-session://<uuid>/agent-<id>`; workflow journals are excluded (`docs/RAGNART-design.md` §4.2).
+- Session-uuid rule (operator, 2026-11-15, found during the live backfill): one session uuid is one item; the newest copy by modification time wins (an exact tie goes to the greatest path); the other copies are not indexed. The backfill resolves collisions automatically (`docs/RAG-strategy.md` §5.7; `docs/RAGNART-design.md` §4.2, §14 D11).
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
@@ -793,7 +831,7 @@ improvements stay `p1`.
 | Version | Status | Session(s) | Commit(s) |
 | --- | --- | --- | --- |
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
-| v0.2 Nested | in progress | 3 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A) |
+| v0.2 Nested | in progress | 4 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A), `8a0f6b3` (session B) |
 | v0.3 Project mode | planned | — | — |
 | v0.4 Kotaemon | planned | — | — |
 | v0.5 Tenancy & authentication | planned | — | — |

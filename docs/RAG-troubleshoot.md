@@ -2,8 +2,8 @@
 title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3)
-updated_at: 2026-11-15--20-03
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: metadata backfill entry §2.14; automatic collision resolution §2.14; skipped-root message §2.6 and §2.12)
+updated_at: 2026-11-15--23-39
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -286,7 +286,7 @@ therefore removes them from the index, unless a guard stops the deletion (§2.12
 
 | Symptom in the log | Cause | Fix |
 |---|---|---|
-| `Deletion phase SKIPPED: NFS root(s) not scannable this run` (ERROR, exit 1) | NAS mount missing or stale during the sync. Nothing was deleted. | Check the mount (`ls /mnt/nfs/Florian` first), then run the sync again (§2.12). Only if an earlier sync already deleted points, restoring the last snapshot pair is faster (§8). |
+| `Deletion phase SKIPPED: root(s) not scannable this run` (ERROR, exit 1) | NAS mount missing or stale during the sync. Nothing was deleted. | Check the mount (`ls /mnt/nfs/Florian` first), then run the sync again (§2.12). Only if an earlier sync already deleted points, restoring the last snapshot pair is faster (§8). |
 | `claude_chats root not accessible` | `~/.claude` symlink target unreachable | Same as above. |
 | `Opencode API unreachable — preserving N existing opencode session(s)` | OpenCode down or auth failed; existing `opencode://` rows are kept on purpose | See §2.7. |
 | `la-familia` content not updated after a timer run | The timer runs `--user florian` only, so it does not scan the shared root `/mnt/nfs/La-Familia` (owner `la-familia`). The timer never deletes `la-familia` rows. | Run `python utils/rag_sync_nfs.py` without `--user` by hand when shared content changes. The deletion guards in §2.12 apply to that run. |
@@ -427,7 +427,7 @@ systemctl restart ollama`. Failed files are retried by the next runs.
 **Symptom:** the sync logs an ERROR and exits 1, and the ingestion log shows
 `WARN: sync exited 1 — deletions not applied`. Either:
 
-- `Deletion phase SKIPPED: NFS root(s) not scannable this run: …`, or
+- `Deletion phase SKIPPED: root(s) not scannable this run: …`, or
 - `Deletion phase SKIPPED: N completed file(s) would be deleted, more than 10% of the M completed rows …`.
 
 Nothing was deleted. Queueing of new and modified files still ran, and the ingest daemon
@@ -441,9 +441,9 @@ mount | grep /mnt/nfs
 ls /mnt/nfs/Florian
 ```
 
-**Skipped roots — cause and fix:** the NFS root is missing, is not a directory, or is empty
-while the queue holds rows under it. The guard refuses deletion for the whole run, and
-`--allow-mass-delete` does not override it. Fix the mount, then run the sync by hand:
+**Skipped roots — cause and fix:** a root is missing, is not a directory, or (an NFS root) is empty
+while the queue holds rows under it. A `claude_chats` root that yields no transcripts while the queue holds rows under it counts the same way. The guard refuses deletion for the whole run, and
+`--allow-mass-delete` does not override it. Fix the mount or the root path, then run the sync by hand:
 `python utils/rag_sync_nfs.py --user florian`.
 
 **Mass delete — cause and fix:** more than `rag.sync.max_delete_fraction` (`0.10`) of the
@@ -484,6 +484,52 @@ To see the reason for each ignored file:
 ragnart status --ignored                              # retry count and skip_reason per ignored row
 python utils/rag_status.py --ignored --user florian   # the same listing from the operator tool
 ```
+
+### 2.14 Metadata backfill (v2) stalls or reports errors
+
+The backfill is `utils/rag_metadata_backfill.py`; its runbook is `docs/RAG-strategy.md` §5.7.
+
+**Symptom:** `--apply` prints `errors:` greater than 0 and exits 1, or the run stops making progress.
+
+**Check what remains.** Run on Server 2:
+
+```bash
+DB=/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
+sqlite3 "$DB" "SELECT COUNT(*) FROM ingestion_queue WHERE status='completed' AND pipeline_version IS NULL;"
+python utils/rag_metadata_backfill.py --dry-run       # per kind; read-only, takes no lock
+```
+
+Workflow journals (`claude_journal_skip`) are never migrated. They stay NULL until a sync removes
+their rows, so a non-zero count after a full run is expected when journals remain.
+
+**Re-running is safe.** Migrated rows have `pipeline_version = 'p1'` and are skipped. Failed rows still
+have it NULL and are retried. Run `--dry-run` first to check the plan, then `--apply`. For a long run,
+use the `systemd-run --user` form in `docs/RAG-strategy.md` §5.7. If the lock is held, `--apply` exits
+75 and names the holder (§2.3).
+
+**Per-row errors.** Each failed row is logged as `Backfill failed for <key> — <reason>`, in the run's
+output (or `journalctl --user -u ragnart-metadata-backfill.service`). A failed row keeps `pipeline_version`
+NULL, and the run continues with the next row.
+
+| Reason | Meaning | Fix |
+|---|---|---|
+| `FileNotFoundError` on a NAS path or a `.jsonl` | The file vanished after it was ingested. The file is read before any Qdrant write, so nothing changed for that row. | Nothing to migrate. Once the backfill has finished, a sync removes the row and its points (`docs/RAG-strategy.md` §5.3): `python utils/rag_sync_nfs.py --user florian`. |
+| `HTTPError` with 401 or 403, on `/api/session/…` | The OpenCode password was rejected. | Check `opencode.password_env_file` (§2.7). Re-run. |
+| `ValueError` "answered text/html (not JSON)" | The OpenCode API route is wrong or the server is not 2.x. | Check `opencode.api_url` in `ragnart.yaml`. Re-run. |
+| `URLError` | The OpenCode server is unreachable from Server 2. | Start the OpenCode server (§2.7), then re-run. |
+| Timeout or `ResponseHandlingException` from Qdrant | Qdrant is slow or down (§2.8). | Re-run once Qdrant answers `/healthz`. |
+
+**Collisions are resolved automatically.** One session uuid can exist as two transcript files, for example copies in two Claude Code project folders. The backfill keeps the newer copy (by modification time; an exact tie goes to the greatest path), deletes the Qdrant points under both keys of that session, and re-queues the session as `pending` under its new key. The daemon re-ingests the newer copy on the next run after the timer is restarted (`docs/RAG-strategy.md` §5.7, step 6). The run summary counts these as `collisions resolved: N`. A collision is not an error: `errors:` does not count it, and the run exits 0. Nothing needs to be done by hand.
+
+**Checkpoint file.** `/mnt/nfs/__Backups/RAGNART--databases/sqlite/metadata_backfill.checkpoint` has one
+line every 100 rows: UTC time, `done/total` (counts restart at 0 on each run), and the last `file_path`.
+
+```bash
+tail -3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/metadata_backfill.checkpoint
+```
+
+It is for watching progress only. Nothing reads it back, so a stale file does not affect correctness. A
+file that stops growing means the run has stopped: check `systemctl --user show -p ActiveState --value ragnart-metadata-backfill.service`.
 
 ---
 
