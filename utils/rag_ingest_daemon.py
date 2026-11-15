@@ -3,7 +3,12 @@
 Process pending files from the RAG ingestion queue.
 
 Runs the 7-step atomic ingestion loop (parse → chunk → embed → upsert) until
-the queue is empty. Files are fetched from SQLite in batches of 10 (hardcoded).
+the queue is empty.
+
+Work is distributed by a continuous pool, not in batches. --workers coroutines
+each claim one pending file at a time from SQLite (StateDB.claim_next_pending),
+ingest it, and claim the next one as soon as they finish. A slow file therefore
+holds only its own worker; the others keep moving through the queue.
 
 Both --workers and --batch are required. They are separate knobs for different
 bottlenecks — the right values depend on where the embedding server lives:
@@ -56,7 +61,9 @@ def _add_file_handler(log_path: str) -> None:
     logging.getLogger().addHandler(handler)
 
 
-_FETCH_BATCH_SIZE = 10  # files fetched from SQLite per loop iteration (hardcoded)
+# Emit a queue-wide summary (get_counts) once per this many completions. Replaces the
+# old per-batch summary, since there are no batches any more.
+_SUMMARY_EVERY = 10
 
 
 async def run(
@@ -66,19 +73,28 @@ async def run(
     embed_concurrency: int,
     file_workers: int,
 ) -> None:
-    """Main worker loop — processes files in parallel up to file_workers at a time."""
+    """Run file_workers coroutines that claim and ingest pending files until none remain."""
     recovered = state_db.crash_recovery()
     if recovered:
         logger.info("Crash recovery: reset %d stuck file(s) to pending", len(recovered))
 
     processed = failed = 0
-    sem = asyncio.Semaphore(file_workers)
 
-    async def ingest_one(row: dict) -> None:
+    async def worker(worker_id: int) -> None:
+        """Claim one pending file at a time and ingest it, until the queue has no pending rows."""
         nonlocal processed, failed
-        file_path = row["file_path"]
-        async with sem:
-            logger.info("Processing [%d done / %d failed]: %s", processed, failed, file_path)
+        while True:
+            # claim_next_pending is synchronous with no await, so two workers cannot
+            # claim the same row (see its docstring in ragnart/state.py).
+            row = state_db.claim_next_pending()
+            if row is None:
+                return
+
+            file_path = row["file_path"]
+            logger.info(
+                "[worker %d] processing [%d done / %d failed]: %s",
+                worker_id, processed, failed, file_path,
+            )
             try:
                 await ingest_file(
                     file_path=file_path,
@@ -90,20 +106,19 @@ async def run(
                 )
                 processed += 1
             except Exception:
-                failed += 1  # ingest_file already logged + marked failed
+                # Per-item guard: a failing file must not end this worker, or the
+                # gather below would cancel the other workers. ingest_file already
+                # logged and marked the row failed.
+                failed += 1
 
-    while True:
-        rows = state_db.fetch_pending_full(limit=_FETCH_BATCH_SIZE)
-        if not rows:
-            break
+            if (processed + failed) % _SUMMARY_EVERY == 0:
+                counts = state_db.get_counts()
+                logger.info(
+                    "Progress — pending: %d  completed: %d  failed: %d",
+                    counts["pending"], counts["completed"], counts["failed"],
+                )
 
-        await asyncio.gather(*[ingest_one(row) for row in rows])
-
-        counts = state_db.get_counts()
-        logger.info(
-            "Batch done — pending: %d  completed: %d  failed: %d",
-            counts["pending"], counts["completed"], counts["failed"],
-        )
+    await asyncio.gather(*[worker(i) for i in range(file_workers)])
 
     logger.info("Worker finished: %d processed, %d failed", processed, failed)
 

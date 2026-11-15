@@ -37,6 +37,51 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
+# Fallback per-source cap, used only when ragnart.yaml omits rag.search.max_hits_per_source.
+# resolve_max_hits_per_source() is the single place that applies it.
+DEFAULT_MAX_HITS_PER_SOURCE = 3
+
+
+def resolve_max_hits_per_source(value: int | None, rag_cfg: dict) -> int:
+    """
+    Return the effective per-source cap for one search.
+
+    A per-request value wins; otherwise the config value; otherwise the module default.
+
+    This is the single source of truth for the default. search_rag(),
+    ragnart/service.py and utils/rag_search_cli.py all call it, so the value echoed
+    in the HTTP response is always the value that was actually applied.
+
+    Args:
+        value:   Per-request override, or None to use the config default.
+        rag_cfg: config["rag"] dict; read rag_cfg["search"]["max_hits_per_source"].
+
+    Returns:
+        The cap as an int (>= 1 when the caller validates input).
+    """
+    if value is not None:
+        return value
+    return rag_cfg.get("search", {}).get("max_hits_per_source", DEFAULT_MAX_HITS_PER_SOURCE)
+
+
+def _cap_hits_per_source(results: list[dict], max_hits_per_source: int) -> list[dict]:
+    """
+    Keep at most max_hits_per_source hits for each source_path, in input order.
+
+    Walks the list once. A hit is kept only while its source's running count is
+    still within the cap. Hits are never added back from outside the list, so a
+    short candidate pool returns fewer results rather than triggering a re-query.
+    """
+    kept: list[dict] = []
+    counts: dict[str, int] = {}
+    for hit in results:
+        source = hit["source_path"]
+        counts[source] = counts.get(source, 0) + 1
+        if counts[source] <= max_hits_per_source:
+            kept.append(hit)
+    return kept
+
+
 async def search_rag(
     query: str,
     user_id: str | None,
@@ -48,6 +93,7 @@ async def search_rag(
     rerank: bool | None = None,
     rerank_cfg: dict | None = None,
     hybrid: bool | None = None,
+    max_hits_per_source: int | None = None,
 ) -> list[dict]:
     """
     Semantic search over the user's documents + shared (la-familia) content.
@@ -74,6 +120,8 @@ async def search_rag(
         rerank:          Enable cross-encoder reranking; None = read from rag_cfg default.
         rerank_cfg:      Rerank config dict; None = read from rag_cfg default.
         hybrid:          Enable hybrid dense+sparse search; None = read from rag_cfg default.
+        max_hits_per_source: Per-source cap applied after rerank and before the limit
+                         slice; None = read from rag_cfg default (see resolve_max_hits_per_source).
 
     Returns:
         List of dicts with keys:
@@ -95,6 +143,9 @@ async def search_rag(
     # -- 0c. Resolve effective hybrid settings ----
     _hybrid_section = rag_cfg.get("hybrid", {})
     effective_hybrid = hybrid if hybrid is not None else _hybrid_section.get("enabled", False)
+
+    # -- 0d. Resolve effective per-source cap ----
+    effective_max_hits_per_source = resolve_max_hits_per_source(max_hits_per_source, rag_cfg)
 
     # -- 1. Embed the query ------------------------------------------------
     vector = await embed_text(query, model=model, ollama_url=ollama_url)
@@ -208,7 +259,11 @@ async def search_rag(
     if effective_rerank and results_full:
         results_full = await _rerank_candidates(query, results_full, effective_rerank_cfg)
 
-    # -- 6. Slice to limit ----
+    # -- 6. Apply per-source cap (after rerank, before the limit slice) ----
+    # Runs on the full reranked pool so that the top_k cut is taken from the capped list.
+    results_full = _cap_hits_per_source(results_full, effective_max_hits_per_source)
+
+    # -- 7. Slice to limit ----
     results = results_full[:limit]
 
     logger.debug(

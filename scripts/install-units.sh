@@ -28,6 +28,8 @@ echo "Installing RAGNART systemd units..."
 cp "${REPO}/scripts/ragnart-search.service" "${UNIT_DIR}/ragnart-search.service"
 cp "${REPO}/scripts/ragnart-ingest.service" "${UNIT_DIR}/ragnart-ingest.service"
 cp "${REPO}/scripts/ragnart-ingest.timer"   "${UNIT_DIR}/ragnart-ingest.timer"
+cp "${REPO}/scripts/ragnart-opencode-backup.service" "${UNIT_DIR}/ragnart-opencode-backup.service"
+cp "${REPO}/scripts/ragnart-opencode-backup.timer"   "${UNIT_DIR}/ragnart-opencode-backup.timer"
 
 echo "Installing logrotate config (replaces SoHoAI's /etc/logrotate.d/rag-ingest)..."
 install -m 0644 "${REPO}/scripts/ragnart-ingest-logrotate" /etc/logrotate.d/ragnart-ingest
@@ -42,6 +44,7 @@ systemctl reset-failed rag-ingest.service 2>/dev/null || true
 echo "Enabling RAGNART's units..."
 systemctl enable --now ragnart-ingest.timer
 systemctl enable --now ragnart-search.service
+systemctl enable --now ragnart-opencode-backup.timer
 
 echo
 echo "=== Status ==="

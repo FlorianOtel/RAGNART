@@ -218,4 +218,23 @@ def test_search_success_still_returns_results(qdrant_client, ensure_ok, fake_sea
         response = client.get("/v1/search", params={"q": "hello"})
 
     assert response.status_code == 200
-    assert response.json() == {"query": "hello", "user": None, "results": []}
+    # max_hits_per_source is echoed with the config default (ragnart.yaml: 3).
+    assert response.json() == {
+        "query": "hello",
+        "user": None,
+        "max_hits_per_source": 3,
+        "results": [],
+    }
+
+
+def test_search_echoes_max_hits_per_source_default_and_override(qdrant_client, ensure_ok, fake_search):
+    # Without the parameter the echoed value is the ragnart.yaml default (3).
+    # With ?max_hits_per_source=7 the request value wins and is echoed back.
+    with TestClient(service.app) as client:
+        default_body = client.get("/v1/search", params={"q": "hello"}).json()
+        override_body = client.get(
+            "/v1/search", params={"q": "hello", "max_hits_per_source": 7}
+        ).json()
+
+    assert default_body["max_hits_per_source"] == 3
+    assert override_body["max_hits_per_source"] == 7

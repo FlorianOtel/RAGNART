@@ -1,0 +1,12 @@
+[Unit]
+Description=RAGNART nightly backup of OpenCode database
+
+[Timer]
+# Fire at 03:30 local time, after the 01:00 ingestion slot and clear of the 07:00 slot.
+OnCalendar=*-*-* 03:30:00
+AccuracySec=10min
+# Run once at next boot if the scheduled slot was missed (e.g. server was down)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

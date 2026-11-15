@@ -1,0 +1,15 @@
+[Unit]
+Description=RAGNART nightly backup of OpenCode database (opencode.db)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=florian
+Environment=HOME=/home/florian
+ExecStart=/mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/opencode-db-backup.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

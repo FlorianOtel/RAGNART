@@ -22,6 +22,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 
 from ragnart import search_rag
 from ragnart.collection import ensure_collection, get_client
+from ragnart.search import resolve_max_hits_per_source
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,11 +91,16 @@ async def search(
                                    description="Minimum cosine score; 0=no filter"),
     rerank: bool | None = Query(None,
                                 description="Enable cross-encoder reranking; None=config default"),
+    max_hits_per_source: int | None = Query(None, ge=1,
+                                            description="Per-source cap on this search's results; None=config default"),
 ):
     """Retrieve RAG document hits without invoking any LLM. Moved from
     SoHoAI's /v1/rag/search (main.py) on 2026-11-13; same params and
     response shape, minus the multi-query variant (dropped — see
     docs/Implementation-plan.md §2)."""
+    # Resolve the cap here, not only inside search_rag(), so the value echoed in the
+    # response is exactly the value that was applied.
+    effective_cap = resolve_max_hits_per_source(max_hits_per_source, app.state.rag_cfg)
     try:
         results = await search_rag(
             query=q,
@@ -105,6 +111,7 @@ async def search(
             file_types=file_types,
             score_threshold=score_threshold,
             rerank=rerank,
+            max_hits_per_source=effective_cap,
         )
     except ResponseHandlingException as exc:
         # qdrant_client wraps every transport failure raised by its HTTP layer
@@ -125,7 +132,7 @@ async def search(
         "RAG search: q=%r user=%s top_k=%d score_threshold=%.2f rerank=%s → %d result(s)",
         q, user, top_k, score_threshold, rerank, len(results),
     )
-    return {"query": q, "user": user, "results": results}
+    return {"query": q, "user": user, "max_hits_per_source": effective_cap, "results": results}
 
 
 def _qdrant_healthy(qdrant_url: str) -> bool:

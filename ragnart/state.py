@@ -290,14 +290,36 @@ class StateDB:
             )
         return [row["file_path"] for row in cur.fetchall()]
 
-    def fetch_pending_full(self, limit: int = 10) -> list[dict]:
-        """Return up to `limit` pending rows with file_path and owner, oldest first."""
-        cur = self._conn.execute(
+    def claim_next_pending(self) -> dict | None:
+        """
+        Claim the oldest pending row: pending → processing, in one call.
+
+        Returns {"file_path": ..., "owner": ...} for the claimed row, or None when no
+        row is pending. The continuous worker pool in utils/rag_ingest_daemon.py calls
+        this once each time a worker becomes free.
+
+        Why no explicit SQL transaction is needed: the daemon's workers are asyncio
+        coroutines on a single OS thread, and this method contains no `await`. Nothing
+        else on the event loop can run between the SELECT and the UPDATE, so no other
+        worker can claim the same row in between. The `status = 'pending'` guard on the
+        UPDATE keeps it from touching a row that has already left 'pending'.
+        """
+        row = self._conn.execute(
             "SELECT file_path, owner FROM ingestion_queue "
-            "WHERE status = 'pending' ORDER BY rowid LIMIT ?",
-            (limit,),
+            "WHERE status = 'pending' ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+
+        claimed = dict(row)
+        self._conn.execute(
+            "UPDATE ingestion_queue "
+            "SET status = 'processing', started_at = ?, progress_detail = 'starting' "
+            "WHERE file_path = ? AND status = 'pending'",
+            (_now(), claimed["file_path"]),
         )
-        return [dict(row) for row in cur.fetchall()]
+        self._conn.commit()
+        return claimed
 
     def mark_processing(self, file_path: str) -> None:
         """Transition pending → processing; record start timestamp."""

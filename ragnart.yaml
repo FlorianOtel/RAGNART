@@ -54,6 +54,13 @@ rag:
     sparse_fetch: 30                          # candidates from sparse prefetch branch
     rrf_k: 60                                 # RRF constant k (standard: 60)
 
+  # -- Search-time result shaping (RAGNART-design.md §9.1, §9.2) -------------
+  search:
+    # Per-source cap on one result list: at most this many passages from any
+    # one source_path, applied after reranking and before the top_k cut.
+    # Overridable per request via ?max_hits_per_source=N on GET /v1/search.
+    max_hits_per_source: 3
+
   # -- Ingestion admission (p1 admission rules, see docs/RAGNART-design.md §5) ---
   # Applied by ragnart/ingest.py to every queued item before any embedding work.
   # An item that breaks a rule is marked 'ignored' with the reason as skip_reason.

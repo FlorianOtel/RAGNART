@@ -24,10 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import yaml  # noqa: E402
 
 from ragnart.collection import get_client
-from ragnart.search import search_rag
+from ragnart.search import resolve_max_hits_per_source, search_rag
 
 
-async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None, score_threshold: float = 0.0, rerank: bool | None = None) -> None:
+async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None, score_threshold: float = 0.0, rerank: bool | None = None, max_hits_per_source: int | None = None) -> None:
     qdrant_client = get_client(qdrant_url)
 
     results = await search_rag(
@@ -39,6 +39,7 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
         file_types=file_types,
         score_threshold=score_threshold,
         rerank=rerank,
+        max_hits_per_source=max_hits_per_source,
     )
 
     if not results:
@@ -76,6 +77,17 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
             print(f"  ... [{len(results[0]['content'])} chars total]")
 
 
+def positive_int(value: str) -> int:
+    """argparse type: accept only integers >= 1 (matches the service's ge=1 on max_hits_per_source)."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be an integer, got {value!r}")
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {number}")
+    return number
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test RAG search from the command line")
     parser.add_argument("--query", required=True, help="Search query")
@@ -90,6 +102,8 @@ def main() -> None:
                         help="Minimum cosine score to include (0=no filter, e.g. 0.50)")
     parser.add_argument("--no-rerank", action="store_true",
                         help="Disable cross-encoder reranking (use Qdrant cosine order only)")
+    parser.add_argument("--max-hits-per-source", type=positive_int, default=None, metavar="N",
+                        help="Per-source cap on results (default: ragnart.yaml rag.search.max_hits_per_source)")
     args = parser.parse_args()
 
     if not args.no_filter and not args.user:
@@ -105,7 +119,11 @@ def main() -> None:
 
     rerank = False if args.no_rerank else None
 
-    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None, score_threshold=args.score_threshold, rerank=rerank))
+    # Resolve the cap here with the same helper search_rag() uses, so the value is
+    # the one actually applied (CLI flag if given, otherwise ragnart.yaml).
+    max_hits = resolve_max_hits_per_source(args.max_hits_per_source, rag_cfg)
+
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None, score_threshold=args.score_threshold, rerank=rerank, max_hits_per_source=max_hits))
 
 
 if __name__ == "__main__":
