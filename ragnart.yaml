@@ -26,8 +26,10 @@ rag:
   # Snapshots (DR):        /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/
 
   # -- Ingestion lock (shared across servers via NFS) ---------------------------
-  # NFSv4.1 + local_lock=none forwards flock() to the NAS lock manager, making
-  # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
+  # Single-writer lock taken by ragnart/lock.py (fcntl.lockf) for every writer of
+  # the index: sync, ingest daemon, purge/reset tools in write mode, snapshot and run
+  # scripts. Required key. NFSv4.1 with local_lock=none passes the lock to the NAS
+  # lock manager (cross-machine). See docs/RAG-strategy.md §5.6.
   ingest_lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock"
 
   # -- Cross-encoder reranking (RAG-strategy.md §6.3) ------------------------

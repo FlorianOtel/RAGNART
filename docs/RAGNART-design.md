@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2)
-updated_at: 2026-11-15--18-30
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed)
+updated_at: 2026-11-15--19-11
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -947,13 +947,20 @@ Deletion is the dangerous operation. The sync applies these rules:
 
 ### 10.3 Operating rules
 
-**Status.** The daemon's single-writer lock and idempotent ingestion are built. The sync does not take
-the lock (§13.2). Reconciliation is part of v0.2; notifications are not yet scheduled.
+**Status.** The single-writer lock covering every writer of the index, and idempotent ingestion, are
+built. Reconciliation is part of v0.2; notifications are not yet scheduled.
 
-- **Single writer.** The ingestion daemon changes the index only while it holds the ingestion lock
-  (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`); a second daemon exits. `add --wait`,
-  `add`, `rm` and `gc` take the lock or hand their work to the ingestion run. `rag_state.db` is
-  opened from Server 2 only.
+- **Single writer.** Every process that writes `rag_state.db` rows or Qdrant points holds the
+  ingestion lock (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`, required in `ragnart.yaml`)
+  while it writes: `utils/rag_sync_nfs.py`, `utils/rag_ingest_daemon.py`,
+  `utils/rag_purge_rescan.py --apply`, `utils/rag_purge_corrupt.py --confirm`, `utils/rag_reset.py`
+  without `--dry-run`, and `scripts/sqlite-qdrant-snapshot.sh`. `scripts/ragnart-ingest-run.sh` holds
+  the lock for its whole run (sync, daemon, WAL checkpoint, snapshot), and the steps inside the run
+  run under that hold. The one exception is `utils/rag_sparse_migrate.py`, a one-off migration that is
+  run with the timer stopped. The lock is fail-fast: a second writer exits with status 75 at once and
+  prints the holder (pid, host, command line, start time), which is also written into the lock file.
+  It never waits. The planned v0.3 verbs `add`, `add --wait`, `rm` and `gc` will take the same lock.
+  `rag_state.db` is opened from Server 2 only.
 - **Idempotency.** Every operation (ingest a file, sync, backfill, `add --wait`, `gc`) can be
   re-run safely after a crash.
 - **Failed sync.** A sync that refuses deletion or crashes does not stop the ingestion run. The
@@ -1027,8 +1034,6 @@ reason. Mirrored trees are settled: `AWS--fotel` and `Gitlab--fotel` are both in
 - **Purge record** (§10.2, rule 4). The sync log names each deleted path and its reason. The chunk
   count and a purge record are not kept.
 - **Reconciliation** (§10.3). Not built; v0.2.
-- **Ingestion lock in the sync.** The sync does not take `rag.ingest_lock` (§10.3), so a manual sync
-  can run while the ingestion daemon runs.
 
 ### 13.3 Undefined parts of the design
 

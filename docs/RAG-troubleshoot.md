@@ -3,7 +3,7 @@ title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5)
-updated_at: 2026-11-14--22-06
+updated_at: 2026-11-15--19-11
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -140,22 +140,35 @@ python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
 `--workers` and `--batch` are both required. GPU embedding (Ollama on Server 2):
 `--workers 3 --batch 20`. CPU embedding: `--workers 1 --batch 5`.
 
-### 2.3 "Another rag_ingest_daemon is already running (lock held …)"
+### 2.3 "another writer holds the ingestion lock" (exit 75)
 
-Only one daemon may run at a time, on any host. The daemon takes
-`fcntl.lockf()` on `/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock`; the NAS lock
-manager makes the lock cross-host. The lock file is always 0 bytes; its mtime advances on
-every daemon start.
+**Symptom.** A run, a sync, the daemon, a purge, a reset or the snapshot script exits with
+status 75 and prints one line to stderr:
+
+```
+ragnart: another writer holds the ingestion lock (/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock): pid N on HOST, <command>, since <time>
+```
+
+A timer run shows the same line in `journalctl -u ragnart-ingest.service`, and the unit is
+marked failed with status 75. Nothing is written: the writer exits before its first write.
+The next scheduled slot runs normally.
+
+**Cause.** Only one index writer may hold the lock at a time, on any host. The writers and the
+lock are described in `docs/RAG-strategy.md` §5.6. The holder keeps the lock until it exits; a
+second writer does not wait.
+
+**How to see the holder.**
 
 ```bash
-# Is a daemon running anywhere?
-systemctl show -p ActiveState --value ragnart-ingest.service
-pgrep -af 'utils/rag_ingest_daemon.py'
-ssh 192.168.1.93 "pgrep -af 'utils/rag_ingest_daemon.py'"
+# The lock file holds one line: the holder's pid, host, command and start time.
+cat /mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock
 
-# Is the lock free? (takes and releases it at once; uses lockf like the daemon —
-# `flock --nonblock` is not reliable on this Synology NFSv4.1 mount)
-python3 -c "
+# Is that pid still running? Run this on the host named in the line.
+ps -o pid,lstart,args -p <pid>
+
+# Is the lock held right now? Takes and releases it at once, using lockf like the writers
+# (`flock --nonblock` is not reliable on this Synology NFSv4.1 mount).
+~/Gin-AI/.Gin-AI-python-3.12/bin/python -c "
 import fcntl
 f = open('/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock', 'a')
 try:
@@ -165,12 +178,24 @@ except BlockingIOError:
 "
 ```
 
-- Lock held and a daemon process exists → wait for it, or stop it
-  (`sudo systemctl stop ragnart-ingest.service` for the timer's run).
-- Lock held and no process on either server → a client that held it has died without the
-  NAS noticing yet; NFSv4 leases expire within a few minutes. Re-check, then retry.
-- When the queue is empty the daemon prints "No pending files" to stdout (journal), not to
-  `rag-ingest.log`. A run with nothing to do leaves no "Processing" lines in the log.
+The file is not cleared when its holder exits. So when the probe says `lock free`, the line
+in the file is the last holder's, and its pid is normally no longer running.
+
+`python -m ragnart.lock held` (run from the repository root) does not report a holder. It
+exits 0 only when the calling process is a step started by a run script under its lock, and 1
+otherwise. Use `cat` and the probe above to find out who holds the lock.
+
+**What to do.**
+
+- The named pid is running on its host: wait for it. A timer run ends by itself, or at the
+  2 h cap (`TimeoutStartSec=7200`). To stop a timer run now, use
+  `sudo systemctl stop ragnart-ingest.service`. For a manual writer, let it finish, or stop it
+  with Ctrl-C or `kill <pid>`; the lock is released when it exits.
+- The named pid is gone, or the probe says `lock free`: the lock is free. Run the command again.
+- **Never delete or rename the lock file.** The lock is a kernel record lock on the open file,
+  not on its name. Deleting the file does not release a holder that still has it open. A writer
+  that then creates a new file takes a lock on a different file, and two writers could hold
+  "the" lock at once.
 
 ### 2.4 A file does not show up in search
 
@@ -499,8 +524,9 @@ curl -s http://192.168.1.93:6333/collections/documents/snapshots; echo     # nor
 | More than 7 `.snapshot` files, or `logs/sqlite-qdrant-snapshot.log` keeps growing | A second snapshot job (cron) runs besides the wrapper; the wrapper never writes that log file | `crontab -l` and `sudo crontab -l` on both servers, `grep -rl snapshot /etc/cron.d /etc/crontab`; remove the extra job. |
 | `rag_state-*.db` without a matching `.snapshot` | Pair rotated out | Removed automatically by the rotation step. |
 
-Run `sqlite-qdrant-snapshot.sh` by hand only on Server 2 (it opens `rag_state.db`) and
-only while no ingestion run is active (it does not take the ingest lock).
+Run `sqlite-qdrant-snapshot.sh` by hand only on Server 2 (it opens `rag_state.db`). It takes the
+ingest lock itself, and while a run or another writer holds the lock it exits 75 and names the
+holder (§2.3).
 
 ### Log rotation
 

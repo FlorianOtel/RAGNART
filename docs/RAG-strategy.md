@@ -3,7 +3,7 @@ title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5)
-updated_at: 2026-11-14--22-06
+updated_at: 2026-11-15--19-11
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -79,7 +79,7 @@ default) both point to `/mnt/nfs/__Backups/RAGNART--databases/`:
 
 ```
 /mnt/nfs/__Backups/RAGNART--databases/
-├── rag-ingest.lock                     ← NFS lock held by the running ingestion daemon (§5.6)
+├── rag-ingest.lock                     ← NFS lock held by the running index writer; holds the holder's line (§5.6)
 ├── sqlite/
 │   └── rag_state.db                    ← ingestion queue (SQLite, WAL mode)
 ├── logs/
@@ -491,24 +491,51 @@ many chunks, and shorter waits for search queries during an ingest.
 
 ### 5.6 Concurrency rules
 
-**One daemon at a time, across hosts.** The daemon takes an exclusive lock on
-`rag.ingest_lock` (`/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock`) before any work,
-with `fcntl.lockf(LOCK_EX | LOCK_NB)` (POSIX record lock, `F_SETLK`). With NFSv4.1 and
-`local_lock=none` the NAS lock manager arbitrates, so the lock holds across machines. A second
-daemon prints `Another rag_ingest_daemon is already running (lock held: …)` and exits.
-`flock()` is not used: on this NAS a non-blocking `flock` blocks indefinitely. The daemon
-touches the lock file on start, so its mtime shows the last run. Without the config key the
-lock falls back to `/tmp/rag-ingest.lock` (host-local).
+**One index writer at a time, across hosts.** Every process that writes `rag_state.db` rows or
+Qdrant points takes an exclusive lock on `rag.ingest_lock`
+(`/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock`) before its first write, with
+`fcntl.lockf(LOCK_EX | LOCK_NB)` (POSIX record lock, `F_SETLK`; code in `ragnart/lock.py`). With
+NFSv4.1 and `local_lock=none` the NAS lock manager arbitrates, so the lock holds across machines.
+The kernel releases it when the holder exits. `flock()` is not used: on this NAS a non-blocking
+`flock` blocks indefinitely. The key is required in `ragnart.yaml`; a missing key is an error, and
+there is no host-local fallback.
+
+Writers that take the lock:
+
+- `utils/rag_sync_nfs.py` (every run)
+- `utils/rag_ingest_daemon.py` (every run)
+- `utils/rag_purge_rescan.py --apply` (a dry run never takes it)
+- `utils/rag_purge_corrupt.py --confirm` (a dry run never takes it)
+- `utils/rag_reset.py` without `--dry-run`
+- `scripts/sqlite-qdrant-snapshot.sh` (the whole run, standalone or from the run script)
+- `scripts/ragnart-ingest-run.sh` (the whole run: sync, daemon, WAL checkpoint, snapshot)
+
+The steps that the run script starts find the lock held by their ancestor and do not take it again.
+`utils/rag_sparse_migrate.py` is the one exception: a one-off migration, run with the timer stopped.
+
+The lock is not waited for. A writer that finds it held prints one line to stderr and exits with
+status 75 (`EX_TEMPFAIL`):
+
+```
+ragnart: another writer holds the ingestion lock (<path>): pid N on HOST, <command>, since <time>
+```
+
+The holder writes the same `pid N on HOST, <command>, since <time>` line into the lock file after it
+takes the lock. A contender never rewrites the file. The file is not cleared when the holder exits,
+so when the lock is free it shows the last holder's line. Its mtime is the last acquisition.
 
 The lock is needed because `fetch_pending_full()` and `mark_processing()` are not one atomic
-step; two daemons could pick the same rows and both upsert, leaving duplicate points.
+step; two daemons could pick the same rows and both upsert, leaving duplicate points. The same
+reasoning covers the other writers: nothing may change the index under a sync, a purge, a reset or
+a snapshot.
 
 | Scenario | Outcome |
 |---|---|
-| Two daemons, any hosts | second exits on the lock |
+| Two writers, any hosts | the second exits 75 at once, names the holder, and writes nothing |
 | Timer fires while a run is active | systemd does not start a oneshot that is still running |
-| Manual wrapper while the service runs | both syncs run (idempotent); the second daemon exits on the lock |
-| Sync while the daemon ingests a modified file | sync re-queues it; the daemon may still mark it `completed`; the next sync re-queues it again |
+| Manual `scripts/ragnart-ingest-run.sh` while the service runs | exits 75 at once, names the holder; no step runs |
+| Manual sync or daemon while a run holds the lock | exits 75 at once, names the holder; nothing is written |
+| Timer run starts while a manual writer holds the lock | the unit exits 75 and shows as failed; nothing is written, and the next slot runs normally |
 
 **`rag_state.db` is opened from Server 2 only.** In WAL mode, SQLite keeps the WAL index in
 `rag_state.db-shm`, memory-mapped as shared memory. Two hosts map it through their own page
@@ -516,8 +543,11 @@ caches over NFS with nothing keeping the copies coherent; NFS file locks do not 
 index. A connection from a second host while Server 2 writes — including a read-only
 `sqlite3 "file:…?mode=ro"` — can return wrong results or make the writer fail with
 `database disk image is malformed`. Therefore the timer, `rag_sync_nfs.py`, the daemon, the
-snapshot script, `rag_status.py`, `rag_reset.py`, `rag_purge_corrupt.py` and ad-hoc `sqlite3`
-sessions all run on Server 2. The search service never opens the state DB.
+snapshot script, `rag_status.py`, `rag_reset.py`, `rag_purge_corrupt.py`, `rag_purge_rescan.py` and
+ad-hoc `sqlite3` sessions all run on Server 2. Of these, the sync, the daemon, the snapshot script,
+the run script, `rag_reset.py` (without `--dry-run`), `rag_purge_corrupt.py --confirm` and
+`rag_purge_rescan.py --apply` take the ingestion lock. `rag_status.py`, the dry runs and the
+read-only `ragnart` CLI never take it. The search service never opens the state DB.
 
 ---
 
@@ -646,7 +676,7 @@ their own file, not the working directory. The service and the daemon read it on
 | `rag.top_k` | `5` | — | not read; the API default is `top_k=5` |
 | `rag.qdrant_collection` | `documents` | `qdrant_status.py` only | all other code uses the constant `documents` |
 | `rag.qdrant_url` | `http://192.168.1.93:6333` | all | |
-| `rag.ingest_lock` | `/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock` | daemon | §5.6 |
+| `rag.ingest_lock` | `/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock` | every index writer | required, no default; §5.6 |
 | `rag.rerank.enabled` | `true` | search | per call: `rerank=false`, `--no-rerank` |
 | `rag.rerank.server_url` | `http://192.168.1.95:8000/v1/rerank` | search | llama-swap |
 | `rag.rerank.model` | `bge-reranker-v2-m3` | search | must match the llama-swap model key |
@@ -706,7 +736,7 @@ Qdrant on Server 1 has its own installer, `scripts/qdrant/install-qdrant.sh` (§
 
 1. `rag_sync_nfs.py --user <u>` for each entry of `RAG_SYNC_USERS` (`("florian")`).
 2. `rag_ingest_daemon.py --workers $RAG_WORKERS --batch $RAG_BATCH --log-file $LOGFILE`
-   (takes the NFS lock; exits at once if another daemon holds it).
+   (runs under the ingestion lock that the wrapper holds for the whole run, §5.6).
 3. `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` (non-fatal on failure).
 4. Snapshot (§9) if the newest `.snapshot` on the NAS is older than
    `RAG_SNAPSHOT_MIN_AGE_H` hours, if none exists, or if `RAG_FORCE_SNAPSHOT=1`.
@@ -715,8 +745,9 @@ A sync that exits non-zero (a guard in §5.3 tripped, or a crash) is logged as
 `WARN: sync exited <rc>`. Steps 2 to 4 still run, and the unit ends failed with the first
 non-zero sync exit code.
 
-The wrapper itself takes no lock (the daemon's lock is the only one) and is the single entry
-point for both the timer and manual runs.
+The wrapper takes the ingestion lock before step 1 and holds it until the run ends (§5.6). If
+another writer holds the lock, the run exits 75 before any step starts. The wrapper is the single
+entry point for both the timer and manual runs.
 
 | Env variable | Default | Purpose |
 |---|---|---|
@@ -1031,7 +1062,7 @@ are deleted again. Qdrant ends up with one set of points per source either way.
 
 ```bash
 RAG_FORCE_SNAPSHOT=1 bash scripts/ragnart-ingest-run.sh   # preferred: runs after the daemon
-bash scripts/sqlite-qdrant-snapshot.sh                    # direct; only while no ingest is running
+bash scripts/sqlite-qdrant-snapshot.sh                    # direct; takes the ingestion lock itself, exits 75 while a run holds it
 ```
 
 Each extra pair counts toward the 7 kept, so forcing snapshots shortens the history.

@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry)
-updated_at: 2026-11-15--18-30
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry)
+updated_at: 2026-11-15--19-19
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -37,6 +37,50 @@ log records what happened, including what diverged.
 ## v0.1 -- Spin-off
 
 Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+
+### 2026-11-15--18-35 to 2026-11-15--19-19 -- v0.2 fix-first item 5: single-writer lock for every index writer
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6
+v0.2, fix-first item 5 (widened). Not a closing session: v0.2 stays open.
+
+#### What was done
+
+Commits: `b88d4a4` (code) and the docs commit that adds this entry.
+
+- **Research:** only the ingest daemon took a lock. It exited 0 on contention, wrote no holder and
+  truncated the lock file. The other five writers took none. `fcntl.lockf` works on the NFSv4.1
+  mount between Server 2 processes; `flock` and `lockf` conflict there. systemd prevents overlapping
+  timer runs only.
+- **`ragnart/lock.py`:** exit 75 (`EXIT_LOCK_HELD`, sysexits `EX_TEMPFAIL`) naming the holder; the
+  holder line is written into the lock file; `run` and `held` subcommands; ancestor check
+  (`held_by_ancestor`) so a child of a run-wide hold does not block on its parent; `rag.ingest_lock`
+  is required, with no `/tmp` fallback.
+- **Writers:** `utils/rag_sync_nfs.py`, `utils/rag_ingest_daemon.py`, `utils/rag_purge_rescan.py`
+  (`--apply` only), `utils/rag_purge_corrupt.py` (`--confirm` only), `utils/rag_reset.py`
+  (non-dry-run only). **Scripts:** `scripts/sqlite-qdrant-snapshot.sh` (self re-exec guard);
+  `scripts/ragnart-ingest-run.sh` (run-wide hold).
+- **Tests:** 290 pass, including `tests/test_lock.py` and one lock test per writer.
+- **Live evidence:** with the lock held by `python -m ragnart.lock run -- sleep 25`, sync, daemon and
+  snapshot each exited 75 naming the holder. `systemctl start ragnart-ingest.service` under the
+  run-wide hold ended `Result=success` with 5 new items. The nested snapshot path was not exercised
+  live (20 h rule).
+- **Reviews:** code PASS; docs PASS.
+- **Docs:** `docs/RAGNART-design.md` §10.3 and §13.2; `docs/Implementation-plan.md` fix-first item 5,
+  §3 "One database host, one writer", the reserved `project.toml` keys and the §4.3 citation;
+  `docs/RAG-strategy.md` §5.6; `docs/RAG-troubleshoot.md` §2.3; the `rag.ingest_lock` comment in
+  `ragnart.yaml`.
+
+#### Deviations from the plan
+
+- **Item 5 widened** from the sync to every writer. Operator-approved.
+- **Daemon contention exit changed** from 0 to 75 (`EXIT_LOCK_HELD`, sysexits `EX_TEMPFAIL`: a
+  temporary failure that a retry can clear). Contention no longer reads as success.
+- **Two plan corrections** against the refined design folded into this session: the reserved
+  `project.toml` keys in `docs/Implementation-plan.md` go from 4 to the 8 of `docs/RAGNART-design.md`
+  §4.5; the session-attribution citation goes from design §7.4 to design §4.3 (§7.4 is the v0.3
+  harness section).
+- **Starting log line moved** below the lock guard in `scripts/ragnart-ingest-run.sh`, so it does not
+  print twice when the wrapper re-execs.
 
 ### 2026-11-15--18-30 -- design session: the project workflow
 

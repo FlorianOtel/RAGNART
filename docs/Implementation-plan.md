@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5)
-updated_at: 2026-11-15--18-30
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3)
+updated_at: 2026-11-15--19-15
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -177,9 +177,9 @@ These are hard rules that every version from v0.2 onward obeys.
   `documents` → `documents_new` and the file name `rag_state.db` stay the
   same at every version. The recovery procedures in `docs/RAG-strategy.md`
   §9 refer to both by name.
-- **One database host, one ingestion daemon.** `rag_state.db` is opened from
-  Server 2 only, and one ingestion daemon runs at a time, enforced by an NFS
-  `lockf` lock (`docs/RAG-strategy.md` §5.6). If the search service ever
+- **One database host, one writer.** `rag_state.db` is opened from Server 2
+  only, and one writer of the index runs at a time, enforced by the NFS
+  `lockf` lock that every writer takes (`docs/RAG-strategy.md` §5.6). If the search service ever
   needs the SQLite file directly rather than just Qdrant, it opens it
   read-only.
 - **Snapshot before scale.** A matching Qdrant snapshot and `rag_state.db`
@@ -333,13 +333,25 @@ None of items 1–6 changes Qdrant data or the schema.
    Test: Qdrant stopped -> `/health` answers `degraded` within 3 s; Qdrant started
    -> `/v1/search` answers 200 without restarting `ragnart-search.service`.
 
-5. **A manual sync can overlap the ingestion daemon.** `utils/rag_sync_nfs.py`
-   does not take `rag.ingest_lock`, so it can delete or purge while the daemon
-   writes (`docs/RAGNART-design.md` §13.2, §10.3).
-   Fix: the sync takes `rag.ingest_lock` as the daemon does, and a sync that
-   cannot take it exits non-zero, naming the lock holder.
-   Test: with the daemon holding the lock, a manual sync exits without deleting
-   anything; with the lock free, the sync runs.
+5. **Writers of the index can overlap.** Only the ingestion daemon took
+   `rag.ingest_lock`, so a manual sync, a purge, a reset or the snapshot could
+   change `rag_state.db` or Qdrant while the daemon or another run wrote
+   (`docs/RAGNART-design.md` §10.3, §13.2).
+   Delivered by the v0.2 item 5 session (2026-11-15).
+   Fix:
+   - `ragnart/lock.py` is the one lock for every writer. The sync, the daemon,
+     `utils/rag_purge_rescan.py --apply`, `utils/rag_purge_corrupt.py --confirm`,
+     `utils/rag_reset.py` without `--dry-run` and `scripts/sqlite-qdrant-snapshot.sh`
+     take it before their first write. `scripts/ragnart-ingest-run.sh` holds it
+     for the whole run (sync, daemon, WAL checkpoint, snapshot).
+   - Contention fails fast: a second writer exits 75 (`EXIT_LOCK_HELD`, sysexits
+     `EX_TEMPFAIL`) at once and prints the holder's pid, host, command and start
+     time, read from the lock file. It never waits.
+   - `rag.ingest_lock` is required in `ragnart.yaml`; there is no host-local fallback.
+   Test: `tests/test_lock.py` (contention between two processes, holder line,
+   no truncation by a contender, run-wide hold) and the per-writer lock tests.
+   Live: with a holder running, the sync, the daemon and the snapshot each exited
+   75 naming it; a timer run under the run-wide hold ended `Result=success`.
 
 6. **The ingest daemon waits for the slowest item of each batch.**
    `utils/rag_ingest_daemon.py` `run()` fetches 10 pending rows per loop
@@ -393,7 +405,9 @@ None of items 1–6 changes Qdrant data or the schema.
   project, so every file and every session has a `project_id` even with no
   `.ragnart/project.toml` anywhere above it (design §6.1).
 - Extend the scanner and `rag_sync_nfs.py` with marker discovery
-  (`.ragnart/project.toml`: `name`, `id`, `inherit_access`, `mode`, tags),
+  (`.ragnart/project.toml`: reserved keys `name`, `id`, `inherit_access`, `mode`,
+  `scope`, `grounding`, `capture`, `inbox_expiry_days`; every other key is a tag,
+  `docs/RAGNART-design.md` §4.5),
   move detection by `content_hash`, tombstones with a grace period, and
   plan-then-apply reconciliation (design §4.2, §10.2), on top of the mount
   guard and missing-sources threshold of fix-first item 1.
@@ -401,7 +415,7 @@ None of items 1–6 changes Qdrant data or the schema.
   parameter on `GET /v1/search` (project path, selection by paths and tags,
   `all`; resolved scope echoed in the response; design §8.8), and
   `GET /v1/projects`.
-- Attach sessions to projects by launch directory (design §7.4).
+- Attach sessions to projects by launch directory (`docs/RAGNART-design.md` §4.3, origin details).
 - Search: `max_hits_per_source` cap and collapse of identical copies by
   `content_hash` (design §9.1, §8.7), with the cap as a knob in `ragnart.yaml`
   and per request (echoed).
