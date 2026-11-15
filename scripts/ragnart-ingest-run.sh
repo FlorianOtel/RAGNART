@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # RAGNART ingestion wrapper.
 # Run by systemd ragnart-ingest.service or directly for manual/debug use.
-# The daemon acquires the NFS lock (rag.ingest_lock in ragnart.yaml) internally;
-# if another daemon is already running anywhere, it exits with a clear message.
+# This script holds the ingestion lock (rag.ingest_lock in ragnart.yaml) for the WHOLE
+# run: sync -> daemon -> WAL checkpoint -> snapshot. It takes the lock via a
+# `python -m ragnart.lock run` wrapper, re-invoking itself under that lock (see the
+# guard below the `cd`). The child steps (sync, daemon, snapshot) detect that their
+# ancestor holds the lock, so they do not try to take it again. If another writer
+# holds the lock, this run exits 75 (EXIT_LOCK_HELD) at once and names the holder.
 #
 # Env overrides:
 #   RAG_WORKERS      file-level parallelism (default 3, GPU embed; use 1 for CPU embed)
@@ -34,11 +38,29 @@ RAG_SYNC_USERS=("florian")
 mkdir -p "$(dirname "$LOGFILE")"
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  $*" | tee -a "$LOGFILE"; }
 
-log "=== RAG ingestion starting  workers=$WORKERS  batch=$BATCH ==="
-
 # shellcheck disable=SC1090
 source "$VENV"
 cd "$PROJECT"
+
+# --- Single-writer guard: hold the ingestion lock for the whole run ------------------
+# Why: sync, daemon, WAL checkpoint and snapshot all write the index. They must not
+# interleave with each other or with any other writer, so the whole run is one
+# lock-holding unit.
+#
+# How: when this process is not already under a lock holder, `held` fails and `exec`
+# replaces this process with the `run` wrapper. The wrapper takes the lock and
+# re-invokes this script with RAGNART_LOCK_HOLDER set, so the second invocation's
+# `held` check succeeds and the body runs. Child steps see the same holder through
+# their ancestor chain. The venv python is named explicitly.
+SELF="$(readlink -f "$0")"
+VENV_PY="$HOME/Gin-AI/.Gin-AI-python-3.12/bin/python"
+if ! "$VENV_PY" -m ragnart.lock held; then
+    exec "$VENV_PY" -m ragnart.lock run -- bash "$SELF" "$@"
+fi
+
+# Logged here, after the guard, so the start line is written once per run (by the
+# process that holds the lock), not once by the outer process and again by the wrapper.
+log "=== RAG ingestion starting  workers=$WORKERS  batch=$BATCH ==="
 
 # A failing sync (refused deletion, or a crash) must not stop the ingest daemon from
 # running. Its exit code is recorded here and returned at the very end, so systemd
@@ -61,8 +83,8 @@ for user in "${RAG_SYNC_USERS[@]}"; do
 done
 
 log "--- rag_ingest_daemon.py ---"
-# Daemon acquires the NFS lock (rag.ingest_lock in ragnart.yaml) internally.
-# If another daemon is running anywhere, it prints a message and exits cleanly.
+# The run script already holds the ingestion lock (see the header), so the daemon
+# runs under its ancestor's lock and does not take it again.
 # Do NOT tee here: --log-file writes directly to $LOGFILE; tee would double log lines.
 # stderr goes to journald via StandardError=journal in the service unit.
 python utils/rag_ingest_daemon.py \

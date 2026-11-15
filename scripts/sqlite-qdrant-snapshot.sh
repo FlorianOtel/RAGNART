@@ -24,6 +24,30 @@
 # Env:   RAGNART_DATA_ROOT  (default /mnt/nfs/__Backups/RAGNART--databases)
 set -euo pipefail
 
+# --- Single-writer guard: this script must run under the ingestion lock ---------------
+# Why: the SQLite WAL checkpoint, the Qdrant snapshot and the copy of rag_state.db
+# are one logical point-in-time pair. No other writer (sync, ingest daemon, purge,
+# reset) may change the index between those steps, so the whole body runs under the
+# single ingestion lock (ragnart/lock.py; path = rag.ingest_lock in ragnart.yaml).
+#
+# How: when the run script (scripts/ragnart-ingest-run.sh) already holds the lock, the
+# `held` check succeeds and the body runs. When this script is started standalone,
+# the check fails, so `exec` replaces this process with the `run` wrapper. The wrapper
+# takes the lock and re-invokes this script, and the second invocation finds the lock
+# held by its ancestor and runs the body.
+#
+# The project directory is resolved from this file's own location, so the guard works
+# both when called by the run script and when an operator runs it directly. The venv
+# python is named explicitly so that a bare python3 without pyyaml cannot be used.
+SELF="$(readlink -f "$0")"
+PROJECT_DIR="$(dirname "$SELF")/.."
+VENV_PY="$HOME/Gin-AI/.Gin-AI-python-3.12/bin/python"
+# `ragnart` is importable only from the project root, so run the guard from there.
+cd "$PROJECT_DIR"
+if ! "$VENV_PY" -m ragnart.lock held; then
+    exec "$VENV_PY" -m ragnart.lock run -- bash "$SELF" "$@"
+fi
+
 QDRANT_URL="http://192.168.1.93:6333"
 COLLECTION="documents"   # Qdrant alias -> documents_new
 DATA_ROOT="${RAGNART_DATA_ROOT:-/mnt/nfs/__Backups/RAGNART--databases}"

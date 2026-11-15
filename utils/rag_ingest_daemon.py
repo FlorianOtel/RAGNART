@@ -30,9 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -42,6 +40,7 @@ import yaml  # noqa: E402
 
 from ragnart.collection import ensure_collection, get_client
 from ragnart.ingest import ingest_file
+from ragnart.lock import acquire_or_exit, lock_path_from_config
 from ragnart.state import StateDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -151,35 +150,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Acquire exclusive NFS lock — prevents concurrent daemons on any machine.
-    # Lock path comes from ragnart.yaml rag.ingest_lock (NFSv4.1, local_lock=none).
+    # Load ragnart.yaml once. The lock path and the rest of the config both come from it.
     _config_path = Path(__file__).resolve().parent.parent / "ragnart.yaml"
     with open(_config_path) as _f:
-        _lock_cfg = yaml.safe_load(_f)
-    _lock_path = _lock_cfg.get("rag", {}).get("ingest_lock", "/tmp/rag-ingest.lock")
-    _lock_fd = open(_lock_path, "w")  # noqa: SIM115 — intentionally kept open for lock lifetime
-    try:
-        # lockf (F_SETLK) not flock() — flock(LOCK_NB) blocks on Synology NFSv4.1
-        fcntl.lockf(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(
-            f"Another rag_ingest_daemon is already running "
-            f"(lock held: {_lock_path}). Exiting."
-        )
-        _lock_fd.close()
-        return
+        config = yaml.safe_load(_f)
 
-    # Touch the lock file so mtime advances on every run.
-    # open("w") on an already-empty file is a VFS no-op on Synology NFS
-    # (O_TRUNC with size already 0 skips SETATTR), so mtime would otherwise
-    # stay frozen at the day the file was first created.
-    os.utime(_lock_path)
+    # Take the single-writer ingestion lock before any state or Qdrant write. This daemon
+    # writes rag_state.db rows and Qdrant points, so it must not run alongside sync, a
+    # purge, a reset or the snapshot. Contention exits at once with EXIT_LOCK_HELD (75)
+    # and names the holder; the daemon does not wait. When the run script already holds
+    # the lock (see ragnart/lock.py `run`), acquire_or_exit returns None and this process
+    # continues under that lock. The returned fd is kept in a named variable so the lock
+    # stays for the whole process lifetime.
+    _lock_fd = acquire_or_exit(lock_path_from_config(config))  # noqa: F841 — kept for lock lifetime
 
     if args.log_file:
         _add_file_handler(args.log_file)
-
-    with open(_config_path) as f:
-        config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})
     rag_cfg["opencode_api_url"] = config.get("opencode", {}).get("api_url", "http://localhost:4096")

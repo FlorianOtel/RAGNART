@@ -65,6 +65,8 @@ from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchVa
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 # The admission definitions are imported, not copied, so this tool cannot drift from ingest.
 from ragnart.ingest import fffd_ratio, is_text_like_path  # noqa: E402
+# Single-writer lock: --apply is a writer, so it takes the same lock as sync and the daemon.
+from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.ragignore import RagIgnoreMatcher  # noqa: E402
 from ragnart.scanner import is_includable  # noqa: E402
 from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_PATH  # noqa: E402
@@ -577,6 +579,17 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     # Writes go through StateDB only here, after the read-only scans are complete.
+    #
+    # This is the first point where the run writes, so the single-writer lock is taken
+    # here and nowhere earlier. Dry-runs returned above and never reach this line, so
+    # a dry-run never touches the lock file and never needs rag.ingest_lock.
+    #
+    # On contention, acquire_or_exit() prints the current holder to stderr and exits
+    # with EXIT_LOCK_HELD (75) before any Qdrant delete or SQLite write happens. It
+    # does not wait. The lock is held until this process exits, which covers the
+    # whole of apply_candidates().
+    acquire_or_exit(lock_path_from_config(config))
+
     state_db = StateDB(db_path)
     try:
         applied = apply_candidates(state_db, client, all_candidates)

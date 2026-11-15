@@ -45,6 +45,7 @@ import yaml  # noqa: E402  (after sys.path fix)
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue  # noqa: E402
 
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
+from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.scanner import is_includable, scan_claude_chats, scan_nfs_roots, scan_opencode_sessions  # noqa: E402
 from ragnart.schema import FIELD_SOURCE_PATH  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
@@ -233,6 +234,15 @@ def main() -> None:
 
     with open(Path(__file__).resolve().parent.parent / "ragnart.yaml") as f:
         config = yaml.safe_load(f)
+
+    # Take the single-writer ingestion lock before anything is written. This sync
+    # writes SQLite rows and Qdrant points, and it must not run alongside the daemon,
+    # a purge, a reset or the snapshot. Contention exits at once with EXIT_LOCK_HELD
+    # (75) and names the holder; the sync does not wait. The lock is taken before
+    # StateDB is opened, so a refused run never touches the queue database.
+    # When the run script already holds the lock (see ragnart/lock.py `run`),
+    # acquire_or_exit returns None and this process continues under that lock.
+    acquire_or_exit(lock_path_from_config(config))
 
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"

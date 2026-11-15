@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -226,7 +227,11 @@ def main_env(rag_reset, queue_db, monkeypatch, tmp_path):
     monkeypatch.setattr(
         rag_reset.yaml,
         "safe_load",
-        lambda f: {"rag": {"qdrant_url": "http://unused:6333"}, "db_base_path": str(tmp_path)},
+        # rag.ingest_lock is required by lock_path_from_config(), which main() calls before any write.
+        lambda f: {
+            "rag": {"qdrant_url": "http://unused:6333", "ingest_lock": str(tmp_path / "rag-ingest.lock")},
+            "db_base_path": str(tmp_path),
+        },
     )
     # Fail the test if a prompt is shown. Dry runs and --yes must never prompt.
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("unexpected prompt"))
@@ -265,3 +270,41 @@ def test_main_full_on_alias_exits_nonzero_without_delete(rag_reset, queue_db, ma
     main_env.delete_collection.assert_not_called()
     assert _statuses(queue_db) == ["completed", "completed", "completed"]
     assert "docs/RAG-strategy.md §9.3" in capsys.readouterr().err
+
+
+# --- single-writer lock -----------------------------------------------------
+# A non-dry-run reset is a writer, so it takes the lock after the confirmation gate.
+# A dry-run never does.
+
+def test_main_with_lock_held_exits_with_constant_and_resets_nothing(
+    rag_reset, queue_db, main_env, monkeypatch
+):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    # Simulate another writer holding the lock: main() must stop before any write.
+    def _held(lock_path):
+        sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(rag_reset, "acquire_or_exit", _held)
+    monkeypatch.setattr("sys.argv", ["rag_reset.py", "--user", "florian", "--yes"])
+
+    with pytest.raises(SystemExit) as exc:
+        rag_reset.main()
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    main_env.delete.assert_not_called()
+    main_env.delete_collection.assert_not_called()
+    # No SQLite write either: every row keeps its original status.
+    assert _statuses(queue_db) == ["completed", "completed", "completed"]
+
+
+def test_main_dry_run_never_touches_the_lock(rag_reset, queue_db, main_env, monkeypatch):
+    lock_mock = MagicMock(name="acquire_or_exit")
+    monkeypatch.setattr(rag_reset, "acquire_or_exit", lock_mock)
+    monkeypatch.setattr("sys.argv", ["rag_reset.py", "--dry-run"])
+
+    rag_reset.main()
+
+    lock_mock.assert_not_called()
+    main_env.delete_collection.assert_not_called()
+    assert _statuses(queue_db) == ["completed", "completed", "completed"]

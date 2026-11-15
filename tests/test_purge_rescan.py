@@ -13,6 +13,7 @@ import sys
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -297,3 +298,72 @@ def test_text_like_predicate_is_the_shared_ingest_definition():
     assert not ingest.is_text_like_path("/x/chat.jsonl")
     assert not ingest.is_text_like_path("opencode://ses_123")
     assert ingest.fffd_ratio("ab�") == pytest.approx(1 / 3)
+
+
+# ---------------------------------------------------------------------------
+# Single-writer lock: --apply takes it, dry-run never does.
+# ---------------------------------------------------------------------------
+
+def _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch) -> None:
+    """Point main() at a temporary ragnart.yaml that carries rag.ingest_lock."""
+    config = _config(nfs_root)
+    config["db_base_path"] = str(tmp_path / "db")
+    config["rag"]["ingest_lock"] = str(tmp_path / "rag-ingest.lock")
+    config_path = tmp_path / "ragnart.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(rescan, "CONFIG_PATH", config_path)
+
+
+def test_apply_with_lock_held_exits_with_constant_and_applies_nothing(
+    rescan, db, nfs_root, tmp_path, monkeypatch
+):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    pdf = str(nfs_root / "paper.pdf")
+    _add_completed(db, pdf)
+    qdrant = FakeQdrant({pdf: [GARBAGE]})
+    _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch)
+
+    monkeypatch.setattr(rescan, "get_client", lambda url, timeout=60: qdrant)
+
+    # Simulate another writer holding the lock: the apply branch must stop right here.
+    def _held(lock_path):
+        sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(rescan, "acquire_or_exit", _held)
+
+    # If the lock check were skipped, these would fire and fail the test.
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("lock held: must not reach StateDB or apply_candidates")
+
+    monkeypatch.setattr(rescan, "StateDB", _forbidden)
+    monkeypatch.setattr(rescan, "apply_candidates", _forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        rescan.main(["--apply"])
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    assert qdrant.deleted == []
+    assert _row(db, pdf)["status"] == "completed"
+
+
+def test_dry_run_never_touches_the_lock(rescan, db, nfs_root, tmp_path, monkeypatch):
+    pdf = str(nfs_root / "paper.pdf")
+    _add_completed(db, pdf)
+    qdrant = FakeQdrant({pdf: [GARBAGE]})
+    _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch)
+
+    monkeypatch.setattr(rescan, "get_client", lambda url, timeout=60: qdrant)
+    lock_mock = MagicMock(name="acquire_or_exit")
+    monkeypatch.setattr(rescan, "acquire_or_exit", lock_mock)
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("dry-run must not construct StateDB")
+
+    monkeypatch.setattr(rescan, "StateDB", _forbidden)
+
+    rescan.main([])
+
+    lock_mock.assert_not_called()
+    assert qdrant.deleted == []
+    assert _row(db, pdf)["status"] == "completed"

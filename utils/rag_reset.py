@@ -46,6 +46,7 @@ from ragnart.collection import (  # noqa: E402
     ensure_collection,
     get_client,
 )
+from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.schema import FIELD_OWNER  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
 
@@ -202,6 +203,16 @@ def main() -> None:
         state_db = None
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     else:
+        # This is the non-dry-run branch, reached only after the confirmation gate above
+        # has passed (either --yes, or an explicit "y" at the prompt). The single-writer
+        # lock is taken here, before StateDB opens the queue and before any Qdrant delete
+        # or collection drop.
+        #
+        # On contention, acquire_or_exit() prints the current holder to stderr and exits
+        # with EXIT_LOCK_HELD (75). It does not wait. Nothing is reset in that case.
+        # The lock is held until this process exits.
+        acquire_or_exit(lock_path_from_config(config))
+
         state_db = StateDB(db_path)
         conn = state_db._conn
 

@@ -33,6 +33,8 @@ import yaml  # noqa: E402
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client
+# Single-writer lock: --confirm deletes Qdrant points, so it takes the same lock as the other writers.
+from ragnart.lock import acquire_or_exit, lock_path_from_config
 from ragnart.schema import (
     FIELD_SOURCE_PATH,
     FIELD_PARENT_TEXT,
@@ -276,6 +278,15 @@ def main() -> None:
 
     # --confirm: delete from Qdrant
     if args.confirm:
+        # The single-writer lock is taken here, before the first delete. The report above
+        # has already printed, so a dry-run (no --confirm) never reaches this block and
+        # never touches the lock file or needs rag.ingest_lock.
+        #
+        # On contention, acquire_or_exit() prints the current holder to stderr and exits
+        # with EXIT_LOCK_HELD (75). It does not wait. No point is deleted in that case.
+        # The lock is held until this process exits, which covers the whole deletion loop.
+        acquire_or_exit(lock_path_from_config(config))
+
         print("Deleting corrupt points from Qdrant...")
         deleted_count = 0
         failed_count = 0
