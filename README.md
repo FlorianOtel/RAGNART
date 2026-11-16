@@ -39,11 +39,11 @@ three tiers of material with different lifetimes.
 | **Transient** | Material in flight for the current project: pages the assistant fetched, captured into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Captured as you work, by the assistant skill | Ephemeral: expires after 30 days unless you **keep** it (it then becomes a project resource, which the Archive indexes) or **drop** it |
 
 **Nested** means every chunk belongs to a project in a directory tree. A
-search can be scoped to one project, optionally including its sub-projects
-and linked projects, or run across everything you are allowed to see.
+search can be scoped to one ragnart project, optionally including its sub-projects,
+or run across everything you are allowed to see.
 
-> **Status:** Archive and Runtime exist today. Project nesting, the
-> Transient tier, a notebook UI and real authentication are planned. See [Roadmap](#roadmap).
+> **Status:** Archive and Runtime exist today, with ragnart projects, nesting and scoped
+> search. The Transient tier, a notebook UI and real authentication are planned. See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -106,13 +106,14 @@ llama-swap) for the reranker. Endpoints are set in `ragnart.yaml`.
 # from the repo root, in a Python 3.12 env with the dependencies from pyproject.toml
 uvicorn ragnart.service:app --host 0.0.0.0 --port 8100    # start the search service
 
-curl 'http://localhost:8100/v1/search?q=how+do+snapshots+work&top_k=5'
+curl 'http://localhost:8100/v1/search?q=how+do+snapshots+work&top_k=5&scope=all'
 curl 'http://localhost:8100/health'
 ```
 
-`GET /v1/search` parameters: `q` (query), `user` (owner scope), `top_k`,
-`file_types`, `score_threshold`, `rerank`, `max_hits_per_source` (per-source cap on this
-search's results).
+`GET /v1/search` parameters: `q` (query), `scope` (required, no default: `all`, a ragnart project
+path, `<path>/` for that project and its sub-projects, or `tag:<key>=<value>`; repeatable), `user`
+(owner scope), `top_k`, `file_types`, `score_threshold`, `rerank`, `max_hits_per_source` (per-source
+cap on this search's results). `GET /v1/projects` lists the ragnart projects and `global`.
 
 The `ragnart` command reads the NAS crawl and changes nothing. It is installed by
 `pip install -e .` in the project venv; `python -m ragnart` runs the same commands without
@@ -133,7 +134,7 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | Version | Scope |
 | --- | --- |
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
-| **v0.2 — Nested** | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
+| **v0.2 — Nested** (done) | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
 | **v0.3 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral |
 | **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
 | **v0.5 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |

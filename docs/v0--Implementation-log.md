@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated)
-updated_at: 2026-11-15--23-53
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`)
+updated_at: 2026-11-16--12-12
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -34,9 +34,127 @@ log records what happened, including what diverged.
 
 ---
 
-## v0.1 -- Spin-off
+## v0.2 -- Nested
 
-Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
+Plan: `docs/Implementation-plan.md` Section 6, v0.2. Status: **done** (see Plan Section 9).
+
+### 2026-11-16--01-31 to 2026-11-16--12-05 -- v0.2 session C: ragnart projects, scope, collapse, reconciliation; v0.2 closed
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6 v0.2,
+the sync, scope, retrieval and reconciliation work items and the Definition of done. Third and last of
+the v0.2 sessions (A, B, C). Closing session: v0.2 is done. Each phase was reviewed before the next began.
+
+#### What was done
+
+Commits: `64472db` (phase 1), `c7c4999` (phase 2), `49e03de` (phase 3), `7804877` (smoke test and
+endpoint comparison send `scope=all`), and the docs commit that adds this entry.
+
+- **Phase 1, `64472db` (sync and data):** ragnart project markers (`.ragnart/project.toml`) and attachment
+  (`docs/RAGNART-design.md` §4.5); move detection, tombstones with a 24 h grace period, a purge log line,
+  and plan-then-apply sync with `--dry-run` (§10.2); one sync call for all roots, including La-Familia
+  (§14 D16); ingestion computes `project_id`.
+- **Phase 2, `c7c4999` (retrieval):** scope grammar and required `scope` on `GET /v1/search`
+  (`ragnart/scope.py`; §8.1; §14 D12); `GET /v1/projects` (§8.8); collapse of identical copies (§9.1).
+  The two `/rag` command files are outside the repo and were updated to send `scope=all`.
+- **Phase 3, `49e03de` (reconciliation):** reconciliation after the ingestion daemon in every scheduled run,
+  under the run-wide lock (§10.3; §14 D17).
+- **Tests:** 368 pass before, 517 pass after.
+
+#### Deviations from the plan
+
+- **Dry-run on a copy:** the dry-run runs on a copy of the state DB, because the scanners write.
+- **Marker removal:** a ragnart project whose `project.toml` disappears is removed; its items then attach
+  by the attachment rule (§14 D15).
+- **Tools missed in phase 2:** the smoke test and the endpoint comparison had to send `scope=all`; the
+  docs pass found this, not the phase 2 review. Fixed in `7804877`.
+- **Search service DB access:** `docs/RAG-strategy.md` said the search service never opens the state DB.
+  It now holds a read-only connection on the same host as the writer.
+- **Scratch cleanup:** an Actor's scratch cleanup removed `/tmp/claude-555` (harness scratch). The operator
+  confirmed that deleting it is expected cleanup.
+
+#### Decisions
+
+Recorded in `docs/RAGNART-design.md` §14 D12 to D17, with §4.5, §4.6, §8.1, §8.8 and §9.1.
+
+1. **Scope grammar:** `scope` is a list of terms: `all`; `<path>` (exactly one ragnart project);
+   `<path>/` (that project and those below it); `tag:<key>=<value>`. Terms are unioned. The parameter is
+   required; a missing `scope` is HTTP 422, and so is a term that names no ragnart project. `project` is
+   resolved client-side to the current ragnart project's path; `none` is client-side and never sent. `all`
+   means global items (owner rule) plus all accessible ragnart projects. The response echoes the resolved
+   scope. (D12)
+2. **First ragnart project:** this repo, with a hand-written `.ragnart/project.toml` (name `RAGNART`, id
+   `2b29e12b-01cb-43e7-bc7b-8abb2f092eae`, mode `crawl`, grounding `open`, capture off per the init
+   invariant, D10). Its files and the sessions launched in it move from `global` into it. A malformed
+   `project.toml` (bad TOML, missing name or id) is logged loudly and ignored; the directory stays outside
+   ragnart projects. (§4.5)
+3. **Move rule:** within one sync, exactly one vanished item and exactly one new item share a non-empty
+   content hash. The empty-file MD5 and NULL never match. Any other case is a deletion plus a new item.
+   A move rewrites the key in SQLite, the `source_path` payload of its chunks and its link rows; no
+   re-embedding. Sessions never move. (D13)
+4. **Tombstones:** a vanished item gets `missing_since`; its points stay searchable for 24 h. The first sync
+   after 24 h purges its points and row and logs the purge (key, chunk count, reason, time). Reappearance
+   clears `missing_since`. The mass-delete guard gates new tombstones, not purges. (D14)
+5. **Plan-then-apply:** each sync computes moves, tombstones, purges and new items as a plan and logs it.
+   `--dry-run` prints the plan and writes nothing; otherwise the plan is applied. (§10.2)
+6. **Attachment:** re-evaluated on every sync for every completed item: the closest enclosing ragnart project
+   by path, or for sessions the `launch_dir` by verbatim prefix match, else `global`. A change updates SQLite
+   and the payload (`set_payload`). (D15)
+7. **Scheduled sync:** covers all configured roots in one run, including La-Familia. `--user` remains for
+   manual runs. (D16)
+8. **Reconciliation:** runs after the ingestion daemon in every scheduled run, under the run lock. It fills
+   NULL `chunk_count` from Qdrant; re-queues rows with fewer points than `chunk_count` (above zero); deletes
+   points whose key has no row, under the point-count guard. `chunk_count` 0 with 0 points is consistent.
+   Anomalies and a refused delete are logged as WARN; the run never fails. (D17; §10.3)
+9. **Collapse:** after rerank, before `max_hits_per_source` and `top_k`. Only copies at other paths collapse.
+   The empty-file hash and NULL never collapse. A collapsed hit lists every location. (§9.1)
+10. **`GET /v1/projects`:** lists the `global` row first (no path), then the ragnart projects, with id, path,
+    name, parent, owner, mode, tags and item count; filtered by `user` like search. (§8.8)
+
+#### Evidence
+
+- **Bench baseline:** 14 queries, top-5 sources, captured twice before any change; the two runs differed on
+  1 of 14 (known non-determinism).
+- **Snapshot pair:** 2026-11-16 10:25 UTC (3.0 GB Qdrant snapshot, 258 MB `rag_state.db`).
+- **Sync dry-run on a DB copy:** 1 project upsert, 135 attachments, nothing deleted.
+- **Real sync:** 135 items re-attached to RAGNART; its 2,559 points carry the project id; total points
+  347,865, unchanged; 44/44 sample vectors identical.
+- **Reconciliation, first run:** 433 chunk counts filled; 2 orphaned sources (307 points) deleted under the
+  guard (limit 34,786); 0 anomalies.
+- **Reconciliation after ingest:** 22 pending rows were ingested; a second check found zero differences
+  (13,415 ok, 1,269 ok with zero chunks, 0 anomalies, 0 orphans).
+- **Move test (throwaway ragnart project):** renaming its directory changed its `projects` row (path) and
+  detected both files as moves (same point ids, `project_id` unchanged, `source_path` rewritten, total
+  unchanged). Deleting it removed the project and tombstoned its 2 items; purge due about 2026-11-17 10:42 UTC
+  by the scheduled sync.
+- **Search:** missing `scope` and an unknown path -> 422; a scoped search returned only RAGNART files and
+  sessions (10/10), with the per-source cap respected.
+- **`/v1/projects`:** global 14,529 items; RAGNART 156.
+- **Bench, `scope=all` vs baseline:** 12/14 identical; the 2 differences are identical copies, now collapsed
+  into one hit with all locations.
+- **First scheduled run with the new code (10:42 UTC):** success; reconciliation 0 anomalies, 0 orphans;
+  snapshot correctly skipped.
+- **Smoke test:** passed.
+
+#### Open items
+
+- **Moved ragnart project, sessions:** sessions launched in a ragnart project fall back to `global` when the
+  project directory is moved, because `launch_dir` is verbatim. Operator decision pending.
+- **Hit fields:** hits do not yet carry `project`, `source_type` or `modified_at` (`docs/RAGNART-design.md` §8.7).
+- **Reconciliation alerts:** anomalies and a refused orphan delete only log a WARN; the systemd unit does not fail.
+- **Unwritten tables:** `project_links`, `source_links` and `grants` are not written.
+- **SoHoAI stub:** removal of SoHoAI's `/v1/rag/search` stub awaits the operator. The log check on 2026-11-16
+  found no calls since 2026-11-14. The stub forwards without `scope`, so it would get 422 anyway.
+- **Test items:** the purge of the two throwaway test items, due about 2026-11-17, is to be confirmed.
+
+#### Handover to v0.3
+
+- **Tree state:** RAGNART HEAD is the docs commit that adds this entry; its parent is `7804877`.
+- **v0.3 scope (Plan Section 6 v0.3):** `ragnart init`; the `/ragnart` skill and commands (scope resolved
+  client-side, `none` client-side, grounding); the session-start hook; the status line; capture and inbox.
+- **Reserved keys:** the `project.toml` keys `grounding`, `capture` and `inbox_expiry_days` are reserved and
+  read by the client (`docs/RAGNART-design.md` §4.5).
+- **Keep in step:** the two `/rag` command copies (`~/.claude/commands/rag.md` and
+  `~/.config/opencode/commands/rag.md`) live outside the repo. Any change to `scope` must update both.
 
 ### 2026-11-15--21-16 to 2026-11-15--23-42 -- v0.2 session B: baseline data model, Claude Code re-key, metadata backfill
 
@@ -332,6 +450,10 @@ explicit, including admission; version rule; D6-D8), `docs/Implementation-plan.m
 6. **Batch barrier observed, not fixed.** The re-parse run showed the docling batch barrier
    (Plan Section 6 v0.2 fix-first item 6).
 7. **Fix-first items 5 and 6 not delivered** in this session. Both are open (Handover to v0.2).
+
+## v0.1 -- Spin-off
+
+Plan: `docs/Implementation-plan.md` Section 6, v0.1. Status: **done** (see Plan Section 9).
 
 ### 2026-11-14--00-30 -- design review, design document, as-is docs, corpus analysis, v0.2 handover
 

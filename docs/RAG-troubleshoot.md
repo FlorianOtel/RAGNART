@@ -2,8 +2,8 @@
 title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: metadata backfill entry §2.14; automatic collision resolution §2.14; skipped-root message §2.6 and §2.12)
-updated_at: 2026-11-15--23-39
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: metadata backfill entry §2.14; automatic collision resolution §2.14; skipped-root message §2.6 and §2.12); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: sync plan, moves, tombstones and grace period §2.15; reconciliation anomalies and refused zombie deletes §2.16; GET /v1/search 422 §4.8 (smoke and compare tools send scope=all); sync message and La-Familia entries §1, §2.6, §2.12)
+updated_at: 2026-11-16--12-04
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -84,7 +84,7 @@ One run of `ragnart-ingest.service` (`scripts/ragnart-ingest-run.sh`) does, in o
 
 | Step | What | Typical duration |
 |---|---|---|
-| 1 | `rag_sync_nfs.py --user florian`: walk `/mnt/nfs/Florian`, `~/.claude/projects` and the OpenCode API; queue new/changed files; delete Qdrant points and queue rows of files that are gone | ~10 min |
+| 1 | `rag_sync_nfs.py`: walk every configured root (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`), `~/.claude/projects` and the OpenCode API; plan and apply: queue new/changed files, move renamed files, tombstone files that are gone, purge tombstones older than 24 h | ~10 min |
 | 2 | `rag_ingest_daemon.py --workers 3 --batch 20`: take the NFS lock, parse → chunk → embed → upsert every `pending` file | seconds to hours, depending on the backlog |
 | 3 | `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` | seconds |
 | 4 | `sqlite-qdrant-snapshot.sh --keep 7` if the newest NAS snapshot is older than 20 h (§3) | ~4–5 min |
@@ -280,16 +280,17 @@ sync exits.
 
 ### 2.6 Sync deletes far more than expected, or a source drops to 0
 
-`rag_sync_nfs.py` treats **every queue row of the owners it scanned whose path was not seen in
-this scan** as deleted, and removes its points. Anything that hides files from the scan
-therefore removes them from the index, unless a guard stops the deletion (§2.12).
+`rag_sync_nfs.py` tombstones **every completed queue row whose path was not seen in this scan**.
+Its points stay searchable for 24 hours, then the first sync after that purges them (§2.15).
+Anything that hides files from the scan therefore starts that clock for them, unless a guard stops
+the tombstoning (§2.12).
 
 | Symptom in the log | Cause | Fix |
 |---|---|---|
 | `Deletion phase SKIPPED: root(s) not scannable this run` (ERROR, exit 1) | NAS mount missing or stale during the sync. Nothing was deleted. | Check the mount (`ls /mnt/nfs/Florian` first), then run the sync again (§2.12). Only if an earlier sync already deleted points, restoring the last snapshot pair is faster (§8). |
 | `claude_chats root not accessible` | `~/.claude` symlink target unreachable | Same as above. |
 | `Opencode API unreachable — preserving N existing opencode session(s)` | OpenCode down or auth failed; existing `opencode://` rows are kept on purpose | See §2.7. |
-| `la-familia` content not updated after a timer run | The timer runs `--user florian` only, so it does not scan the shared root `/mnt/nfs/La-Familia` (owner `la-familia`). The timer never deletes `la-familia` rows. | Run `python utils/rag_sync_nfs.py` without `--user` by hand when shared content changes. The deletion guards in §2.12 apply to that run. |
+| `la-familia` content not updated after a timer run | Every sync scans the shared root `/mnt/nfs/La-Familia` (owner `la-familia`), so a miss means the root was not readable during that run. The run log then shows `Deletion phase SKIPPED` (§2.12), and no `la-familia` row is tombstoned in that run. | Check the mount (`ls /mnt/nfs/La-Familia`). The next scheduled run picks up the change. Run `python utils/rag_sync_nfs.py` by hand to do it sooner. |
 
 ### 2.7 OpenCode sessions missing
 
@@ -428,7 +429,7 @@ systemctl restart ollama`. Failed files are retried by the next runs.
 `WARN: sync exited 1 — deletions not applied`. Either:
 
 - `Deletion phase SKIPPED: root(s) not scannable this run: …`, or
-- `Deletion phase SKIPPED: N completed file(s) would be deleted, more than 10% of the M completed rows …`.
+- `Deletion phase SKIPPED: N completed file(s) would be tombstoned, more than 10% of the M completed rows …`.
 
 Nothing was deleted. Queueing of new and modified files still ran, and the ingest daemon
 still ran (`docs/RAG-strategy.md` §8.2). The ingestion unit ends failed.
@@ -442,12 +443,12 @@ ls /mnt/nfs/Florian
 ```
 
 **Skipped roots — cause and fix:** a root is missing, is not a directory, or (an NFS root) is empty
-while the queue holds rows under it. A `claude_chats` root that yields no transcripts while the queue holds rows under it counts the same way. The guard refuses deletion for the whole run, and
+while the queue holds rows under it. A `claude_chats` root that yields no transcripts while the queue holds rows under it counts the same way. The guard refuses moves and tombstones for the whole run, and
 `--allow-mass-delete` does not override it. Fix the mount or the root path, then run the sync by hand:
 `python utils/rag_sync_nfs.py --user florian`.
 
 **Mass delete — cause and fix:** more than `rag.sync.max_delete_fraction` (`0.10`) of the
-completed rows would be deleted. Usually a source vanished (a directory moved or renamed, a
+completed rows would be tombstoned. Usually a source vanished (a directory moved or renamed, a
 share unmounted in part), or a new `.ragignore` or `config/ragignore` rule covers a large part of
 the corpus. Find the cause before overriding. `ragnart check-ignore -v <path>` shows which rule
 excludes a sample path. If the deletion is intended, run the sync again with the override:
@@ -456,8 +457,12 @@ excludes a sample path. If the deletion is intended, run the sync again with the
 python utils/rag_sync_nfs.py --user florian --allow-mass-delete
 ```
 
-The run logs a WARNING with the counts before it deletes. Qdrant deletes are applied before
-the rows are removed, so an interrupted run is repeated by the next sync.
+The run logs a WARNING with the counts before it tombstones. A tombstone deletes nothing: the points stay
+until the grace period ends (§2.15). The purge that follows deletes Qdrant points before it removes the
+row, so an interrupted run is repeated by the next sync.
+
+If the guard trips, the same plan is printed by `python utils/rag_sync_nfs.py --dry-run`, which changes
+nothing (§2.15).
 
 ### 2.13 Items marked ignored with a reason
 
@@ -530,6 +535,89 @@ tail -3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/metadata_backfill.checkpoin
 
 It is for watching progress only. Nothing reads it back, so a stale file does not affect correctness. A
 file that stops growing means the run has stopped: check `systemctl --user show -p ActiveState --value ragnart-metadata-backfill.service`.
+
+### 2.15 Sync plan: moves, tombstones and the grace period
+
+A sync logs its plan before it applies it. `docs/RAG-strategy.md` §5.3 describes the plan and its
+guards. `--dry-run` prints the same plan and changes nothing. It takes no lock, so it is safe while
+the timer runs. Run it on Server 2:
+
+```bash
+cd /mnt/nfs/Florian/Gin-AI/projects/RAGNART && source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
+python utils/rag_sync_nfs.py --dry-run
+```
+
+The output starts with two header lines: `roots skipped` and `mass-delete guard tripped`. Then one
+block per kind, each with a count: `project upserts`, `project removals`, `moves` (`old -> new`),
+`newly missing (tombstoned, points kept)`, `reappeared`, `purge`, `stale queue rows removed`,
+`attachment changes`.
+
+**Move, or delete plus new.** A move is listed under `moves` as `old -> new`. Its points stay, and nothing
+is re-embedded. A move needs both paths in the same sync: one vanished completed row and one new file
+with the same non-empty `content_hash`, and each hash matches exactly once. The empty-file hash never
+matches. A session key never moves.
+
+If the old path appears under `newly missing` and the new path is ingested as a new file, the sync saw no
+move. Typical causes: the file was moved in one sync and seen again in a later one, the file was also
+edited while it moved, or two copies share the hash. The new copy is embedded again. To confirm, grep the
+sync log for the move line:
+
+```bash
+grep -E 'Moved |Tombstoned \(' /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log | tail -20
+```
+
+**Tombstones and the grace period.** A completed file that vanished is not deleted at once. Its row gets
+`missing_since`, and its points stay searchable for 24 hours. A later sync that still does not see it
+keeps the first `missing_since`. A tombstoned file that reappears has its tombstone cleared, and nothing is
+re-ingested. A vanished file that still shows in search within 24 hours is therefore expected. To list the
+tombstones (Server 2):
+
+```bash
+DB=/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
+sqlite3 "$DB" "SELECT file_path, missing_since, chunk_count FROM ingestion_queue
+  WHERE missing_since IS NOT NULL ORDER BY missing_since;"
+```
+
+**Purge.** The first sync that runs after the 24 hours removes the points and then the row. Each purge
+writes one log line: `purged <path> chunks=<n> reason=tombstone grace period expired missing_since=<time>`.
+Find them with `grep ' purged ' /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log`. A purge is not
+subject to the mass-delete guard, and it still runs when a root was skipped.
+
+**Mass tombstone refused.** More than `rag.sync.max_delete_fraction` (`0.10`) of the completed rows that
+are not moves would be tombstoned. The sync logs
+`Deletion phase SKIPPED: N completed file(s) would be tombstoned, more than 10% of the M completed rows …`,
+tombstones nothing, removes no stale rows and exits 1. Moves still apply. The `--dry-run` header then reads
+`mass-delete guard tripped (tombstones refused): yes`. Before overriding, find out why so many files vanished
+(§2.6, §2.12). If the change is intended, run the sync with `--allow-mass-delete`.
+
+### 2.16 Reconciliation reports an anomaly or refuses the orphan delete
+
+Reconciliation (`docs/RAG-strategy.md` §5.8) runs at the end of every scheduled run. Its output sits in
+the ingestion log, after `--- rag_reconcile.py --apply ---`. It never fails the unit. When it exits 1,
+the run script logs `WARN: reconciliation exited non-zero — see log above`.
+
+| Log line | Meaning | What to check |
+|---|---|---|
+| `Reconciliation anomaly, not repaired: <path> chunk_count=N points=M` (ERROR) | More points than the row records (M > N), or points under a `chunk_count` of 0. Nothing was changed. | Count the points under that key (below). Then re-queue the row (§2.10). Ingestion deletes every point under a key before it writes new ones, so the count comes back consistent. |
+| `Zombie points, no queue row: <key> points=N` (WARN) | Points exist under a key with no queue row of any status. For example, a row removed by hand or by a reset. | If the key is a file that should be indexed, `ragnart ls-files <path>` shows its state. Otherwise nothing is needed: the next run deletes these points. |
+| `Zombie delete REFUSED: N zombie point(s) exceed X% of the M total points (limit L). No points were deleted.` (ERROR) | The mass-delete guard for zombie points. Measured in points, not keys. | Read the `Zombie points` WARN lines to see which keys carry them. Do not delete by hand until the cause is clear. The row repairs in the same run still applied. |
+
+**Count the points under one key** (Server 2, read-only; the collection is `documents` on Server 1):
+
+```bash
+curl -s -X POST http://192.168.1.93:6333/collections/documents/points/count \
+  -H 'Content-Type: application/json' \
+  -d '{"exact": true, "filter": {"must": [{"key": "source_path", "match": {"value": "/exact/path/to/file"}}]}}'
+DB=/mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
+sqlite3 "$DB" "SELECT status, chunk_count, pipeline_version, missing_since FROM ingestion_queue
+  WHERE file_path = '/exact/path/to/file';"
+```
+
+**Re-run.** `python utils/rag_reconcile.py` (or `--dry-run`) reports every kind without writing, and it
+is safe while the timer runs. `--apply` takes the ingestion lock, so it exits 75 and names the holder
+while a run is active (§2.3). Anomalies are never repaired, so `--apply` alone does not clear one: it
+must be fixed as above. The exit code is `0` when no anomaly remains and the guard did not trip, and `1`
+otherwise.
 
 ---
 
@@ -637,16 +725,17 @@ writing to it.
 ## 4. Search
 
 The service (`ragnart.service:app`, `ragnart-search.service`, Server 2 `:8100`) serves
-`GET /v1/search?q=…&user=…&top_k=…&file_types=…&score_threshold=…&rerank=…` and
-`GET /health`. Each query: embed with bge-m3 → hybrid dense + sparse (`sparse_text`) query
-fused with RRF → cross-encoder rerank → top_k.
+`GET /v1/search?q=…&scope=…&user=…&top_k=…&file_types=…&score_threshold=…&rerank=…`, `GET /v1/projects`
+and `GET /health`. `scope` is required (§4.8). Each query: embed with bge-m3 → hybrid dense + sparse
+(`sparse_text`) query fused with RRF → cross-encoder rerank → collapse identical copies → per-source cap
+→ top_k.
 
 Two ways to run a query, useful to tell the service apart from the pipeline:
 
 ```bash
 # Through the HTTP service
 python utils/rag_smoke_test.py --query "your query" --user florian --expect "substring"
-curl -s 'http://192.168.1.95:8100/v1/search?q=your+query&user=florian&top_k=5' | python3 -m json.tool
+curl -s 'http://192.168.1.95:8100/v1/search?q=your+query&user=florian&top_k=5&scope=all' | python3 -m json.tool
 # In-process (same search code, bypasses the service)
 python utils/rag_search_cli.py --query "your query" --user florian
 python utils/rag_search_cli.py --query "your query" --user florian --no-rerank --file-types claude_chat
@@ -755,13 +844,39 @@ python utils/rag_compare_endpoints.py \
   --old-url http://192.168.1.95:8100/v1/search --new-url http://192.168.1.95:8100/v1/search
 ```
 
-It runs the queries in `utils/rag_bench_queries.txt`. Only a HARD-check failure (different
+It runs the queries in `utils/rag_bench_queries.txt`. Every request to a `/v1/search` URL sends `scope=all`, so the example needs no extra flag. A request to the legacy `/v1/rag/search` URL sends no scope. Only a HARD-check failure (different
 score multiset, or a different set of documents within a score group) is a real change.
 
 ### 4.7 A config change has no effect
 
 `ragnart-search.service` reads `ragnart.yaml` once at start. After editing it:
 `sudo systemctl restart ragnart-search.service`. Ingestion reads it at every run.
+
+### 4.8 `GET /v1/search` answers 422
+
+**Cause:** the `scope` parameter is required. There is no default. The service checks `scope` before any
+embedding or Qdrant call, so a 422 costs nothing and changes nothing. A 422 means one of the causes below.
+
+| Response `detail` | Cause | Fix |
+|---|---|---|
+| A FastAPI validation list with `"loc": ["query", "scope"]` and `"msg": "Field required"` | `scope` is missing | Add `scope=all`, or a project term from `GET /v1/projects`. |
+| `<term>: no ragnart project at this path` | An exact path names no ragnart project | Use a path from `GET /v1/projects`. For a whole subtree, end the term with `/`. |
+| `<term>: no ragnart project at or below this path` | A `<path>/` term matches no project | As above. |
+| `<term>: tag scope must be tag:<key>=<value> with a non-empty key and value` | Malformed tag term | Write `tag:<key>=<value>`. |
+| `<term>: no ragnart project carries this tag` | No project has that tag | `GET /v1/projects` lists each project's tags. |
+| `empty scope term: …` | A `scope=` with no value | Remove it, or use `all`. |
+
+Every term is validated, even when `all` is present. `scope=all&scope=/typo` is therefore a 422.
+
+**Clients must send `scope`.** Both copies of the `/rag` command must send `scope=all`. A copy that sends
+no `scope` gets this 422 on every search.
+
+**Check what was searched.** A 200 response echoes the resolved selection under `scope`: `all`, `global`, and
+the projects searched. A search that returns nothing is worth checking against that echo.
+
+**503 `Queue database unavailable`** is a different failure. The service could not open the queue database
+when it started, and the scope endpoints stay down until it restarts. Restart it once the database is
+reachable, on Server 2: `sudo systemctl restart ragnart-search.service`.
 
 ---
 

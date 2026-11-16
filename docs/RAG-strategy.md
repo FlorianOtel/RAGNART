@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7)
-updated_at: 2026-11-15--23-38
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2)
+updated_at: 2026-11-16--11-59
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -59,7 +59,7 @@ servers run the same code. The Python environment is the shared venv
  NAS files ──────┐
  Claude Code     ├─▶ rag_sync_nfs.py ──▶ rag_state.db (queue) ──▶ rag_ingest_daemon.py
  .jsonl sessions │     (scan, diff,        SQLite on NAS            parse → chunk →
- OpenCode API ───┘      delete gone)                                bge-m3 dense (Ollama)
+ OpenCode API ───┘      plan, tombstone, purge)                     bge-m3 dense (Ollama)
                                                                     + BM25 sparse (fastembed)
                                                                           │ upsert
                                                                           ▼
@@ -113,11 +113,11 @@ Configured in `ragnart.yaml`:
 | Section | Owner | Root | State |
 |---|---|---|---|
 | `users."florian.otel@gmail.com"` | `florian` | `/mnt/nfs/Florian` | active |
-| `shared` | `la-familia` | `/mnt/nfs/La-Familia` | configured; scanned only by a sync run without `--user` (§5.3) |
+| `shared` | `la-familia` | `/mnt/nfs/La-Familia` | active; scanned by every sync run, the scheduled one included (§5.3) |
 | `users` entries for `eva`, `annika`, `laura` | — | `/mnt/nfs/Eva`, `/mnt/nfs/Annika`, `/mnt/nfs/Laura` | commented out |
 
-To add a user, uncomment (or add) a `users:` block with `owner` and `nfs_roots`, and add the
-owner to `RAG_SYNC_USERS` in `scripts/ragnart-ingest-run.sh` (§8.2). The email key is only a
+To add a user, uncomment (or add) a `users:` block with `owner` and `nfs_roots`. The sync scans
+every configured root in one run, so the scheduled run needs no change. The email key is only a
 label; nothing authenticates against it (§10).
 
 ### 2.2 Inclusion and exclusion rules
@@ -159,8 +159,9 @@ Notes on the rules in `config/ragignore`:
 - `**/Microsoft--flotel/Documents/` holds IRM/DRM-encrypted presentations that no parser can read.
 
 To change a rule, edit `config/ragignore` (every root) or the `.ragignore` in the directory the
-rule governs. The next sync applies it. A newly excluded file counts as gone: the sync deletes
-its Qdrant points and its queue row (§5.3). No code change or manual Qdrant cleanup is needed.
+rule governs. The next sync applies it. A newly excluded file counts as gone: the sync tombstones it, and
+its Qdrant points and queue row are purged 24 hours later (§5.3). No code change or manual Qdrant cleanup
+is needed.
 
 ### 2.3 Symlink handling
 
@@ -202,9 +203,9 @@ Each transcript is queued under a session key, not its path. `claude_jsonl_key()
 | `<uuid>/subagents/workflows/wf_<w>/agent-<id>.jsonl` | `claude-session://<uuid>/agent-<id>` |
 | `<uuid>/subagents/workflows/wf_<w>/journal.jsonl` | not queued: a workflow orchestration log, not a conversation |
 
-A workflow `journal.jsonl` is never discovered, so a sync removes any row it had, subject to the
+A workflow `journal.jsonl` is never discovered, so a sync tombstones any row it had, subject to the
 guards in §5.3. A `claude_chats` root that is missing, or that yields no transcripts while the
-queue still holds rows under it, blocks deletion for the whole run (§5.3).
+queue still holds rows under it, blocks moves and tombstones for the whole run (§5.3).
 
 A session uuid can be found in more than one transcript file: for example in two Claude Code project folders after a session was copied, or in a git worktree. Within one scan, all copies of one key compete: the newest copy by modification time wins, and an exact tie goes to the greatest path. The key is queued once, from the winning copy, and `origin_path` follows the winner. The other copies are duplicate locations and are not indexed.
 
@@ -393,7 +394,7 @@ Field names are constants in `ragnart/schema.py`; no other module uses string li
 | `session_id` | session UUID / OpenCode id | `claude_chat`, `opencode` |
 | `project` | basename of the session's cwd | `claude_chat` only |
 | `session_title` | human-readable session title | `claude_chat`, `opencode` |
-| `project_id` | owning RAGNART project. Always `global` today: the item is outside every ragnart project, and no ragnart projects exist yet | all |
+| `project_id` | id of the closest enclosing ragnart project (§5.1), or `global` when no ragnart project encloses the item | all |
 | `source_type` | `file`, `claude_session` or `opencode_session` | all |
 | `modified_at` | ISO 8601 UTC of the queue row's `last_modified` (file mtime, or OpenCode `time.updated`) | all |
 | `ingested_at` | ISO 8601 UTC of the time the points were written; the same value as the row's `completed_at` | all |
@@ -444,24 +445,39 @@ CREATE TABLE ingestion_queue (
     first_seen_at    TEXT,                  -- ISO UTC, set on insert by discovery; rows completed before v2 take completed_at
     pipeline_version TEXT,                  -- 'p1' once written by ingest or the backfill; NULL = not migrated
     chunk_count      INTEGER,               -- points written
-    missing_since    TEXT,                  -- reserved: no code writes it yet
+    missing_since    TEXT,                  -- tombstone: set when the item vanished, cleared on reappearance, purged 24 h later (§5.3)
     launch_dir       TEXT                   -- session launch directory, verbatim; NULL for files
 );
 ```
 
-The five project tables are created by version 2. `projects` holds one reserved row, `global`
-(name `Global`, no path, no parent, `inherit_access` 0), inserted with `INSERT OR IGNORE`. The other
-four are empty:
+The five project tables are created by version 2. `projects` holds the reserved row `global`
+(name `Global`, no path, no parent, `inherit_access` 0), inserted with `INSERT OR IGNORE`, and one
+row per ragnart project, written by each sync (below). Only `projects` and `project_tags` are written
+by code today. The other three are created empty and no code writes them yet:
 
 | Table | Holds |
 |---|---|
-| `projects` | One row per ragnart project; only the reserved `global` row exists |
-| `project_tags` | `key = value` tags per project |
-| `project_links` | Links between projects |
-| `source_links` | Source paths attached to a project |
-| `grants` | Role per principal per project |
+| `projects` | The reserved `global` row, plus one row per ragnart project found by the last sync |
+| `project_tags` | `key = value` tags per project, from the non-reserved keys of its marker |
+| `project_links` | Links between projects (not written yet) |
+| `source_links` | Source paths attached to a project (not written yet; a rename moves its rows) |
+| `grants` | Role per principal per project (not written yet; grants are v0.5) |
 
 The purpose of the `global` project and of these tables is in `docs/RAGNART-design.md` §4.6.
+
+**ragnart projects and attachment.** A directory that holds `.ragnart/project.toml` is a ragnart
+project. The model is in `docs/RAGNART-design.md` §4.5 and §4.6. The NAS scan reads each marker
+during its walk (`ragnart/scanner.py`). A marker missing `name` or `id`, or not valid TOML, is
+logged at ERROR and ignored: its directory stays an ordinary directory (`ragnart/projects.py`). Each
+sync upserts the marker's project and tags. A project whose marker is gone is removed, unless a root
+was skipped in that run (§5.3). The first ragnart project is this repository (`.ragnart/project.toml`,
+name `RAGNART`).
+
+Every completed item carries a `project_id`: the closest enclosing ragnart project, or `global`. A file
+is matched by its key (its path). A session is matched by its `launch_dir`. Matching is verbatim string
+comparison, with no `realpath`, so a session launched through a symlinked path does not attach. Ingestion
+sets the value when it writes the points. Each sync re-evaluates it for every completed row and corrects
+both SQLite and the points (§5.3, step 7).
 
 The `StateDB()` constructor writes (`PRAGMA journal_mode=WAL`, `CREATE TABLE IF NOT EXISTS`,
 the migrations above, commit) — opening the DB with it is never read-only.
@@ -483,40 +499,82 @@ any code path; if set by hand, the next sync resets it to `pending` with zero re
 
 ### 5.3 Sync — `utils/rag_sync_nfs.py`
 
-One run reconciles the queue with the sources:
+One sync run scans every configured root, plans every change, logs the plan, then applies it.
+A file that vanishes is tombstoned, not deleted: its points stay searchable for 24 hours. The code is
+`utils/rag_sync_nfs.py` (the run) and `ragnart/sync_plan.py` (the plan and its apply order).
 
-1. Runs the three scanners (§2), each calling `discover_or_update()` per path: new → `pending`,
-   newer mtime → `pending`, otherwise no change. The NAS and `claude_chats` scans also report their skipped roots. A `claude_chats` scan queues one copy per session key: the newest copy wins (§2.4).
-2. Builds the set of paths seen in this run (plus all queued `opencode://` rows if the
-   OpenCode API could not be scanned) and calls `find_deleted()`, limited to the owners whose
-   sources were scanned. A queue row of those owners that is not in the set is gone: deleted
-   from disk, excluded by a `.ragignore` or `config/ragignore` rule, or with an extension
-   outside `include_extensions`. A `claude-session://` row is gone when no transcript with its key is
-   found in any `claude_chats` root. Each gone path is logged with its reason.
-3. Runs the guards below. If one trips, steps 4 and 5 do not run.
-4. For gone rows in `completed`, deletes their Qdrant points by `source_path` filter with
-   `wait=True`: the call returns only after Qdrant has applied the delete, so no points are left
-   without a queue row to retry them. Any exception aborts the run.
-5. Only then removes all gone rows from SQLite (`purge_deleted()`). A run killed between 4
-   and 5 leaves the rows in place, and the next sync repeats the deletes.
+**One call for all roots.** A run scans the NAS roots (`la-familia` included), the Claude Code
+transcripts and the OpenCode sessions, in one call. The scheduled run passes no `--user`. `--user OWNER`
+limits the scan and the plan to that owner's roots and rows: the plan never removes a project, tombstones
+or purges another owner's data.
 
-**Sync guards.** Two guards skip the whole deletion phase (steps 2 to 5 for deletion; the
-queueing of step 1 still stands). Each logs an ERROR and the run exits with code 1:
+1. **Scan.** The three scanners (§2) call `discover_or_update()` per path: new → `pending`,
+   newer mtime → `pending`, otherwise no change. A new NAS file is hashed here, so a move can be
+   recognised in the same run. Each scanner reports its skipped roots and any project markers (§5.1).
+   A `claude_chats` scan queues one copy per session key: the newest copy wins (§2.4).
+2. **Plan.** `build_sync_plan()` reads the queue and writes nothing. It works out:
+   - **Project upserts and removals.** Each marker is upserted with its tags. A project whose marker
+     is gone is removed, and its items are re-attached in the same plan.
+   - **Moves.** A completed row that vanished and a new file with the same non-empty `content_hash`,
+     one of each in this run. The key is rewritten; nothing is re-embedded. The empty-file hash never
+     pairs, and a session key never moves.
+   - **Newly missing.** Every other completed row that vanished. It gets `missing_since` and keeps its points.
+   - **Reappearances.** A tombstoned row that the scan found again. Its `missing_since` is cleared.
+   - **Purges.** A tombstone whose `missing_since` is more than 24 hours old and that is still gone.
+     Its points are deleted, then its row.
+   - **Stale rows.** Non-completed rows (pending, processing, failed, ignored) whose source is gone.
+     They have no points, so their queue row is removed.
+   - **Attachment.** Each completed row whose `project_id` differs from its closest enclosing ragnart
+     project (§5.1). Moves are applied first, so the change is keyed by the new key.
+
+   Every vanished item is classified with its reason (for example "file missing on disk" or "extension
+   no longer in rag.scanner.include_extensions"). The reason is printed with the plan.
+3. **Apply.** `apply_sync_plan()` runs in this order: projects, moves, reappearances, tombstones,
+   purges, stale rows, attachment. Each Qdrant write waits for Qdrant (`wait=True`) before the SQLite
+   change that records it. A crash between the two is repaired by the next sync.
+
+**Guards.** Each guard refuses one part of the plan. Each logs an ERROR, and the run exits 1.
 
 - **Skipped roots.** An NFS root that is not a directory, or that is empty while the queue holds
-  rows under it, counts as unmounted. A `claude_chats` root gets the same treatment: one that is
-  not a directory, or that yields zero transcripts while the queue holds rows under it, is skipped.
-  If any in-scope root is skipped, nothing is deleted.
-- **Mass delete.** If the completed rows to delete exceed `rag.sync.max_delete_fraction`
-  (`ragnart.yaml`, `0.10`) of all completed rows, nothing is deleted. `--allow-mass-delete`
-  proceeds anyway and logs a WARNING with the counts.
+  rows under it, counts as unmounted. A `claude_chats` root that is not a directory, or that yields zero
+  transcripts while the queue holds rows under it, is skipped too. If any root is skipped, the plan
+  makes no moves, no tombstones and no project removals. Project upserts and attachment still run, and so
+  do the purges: those rows were tombstoned by an earlier sync that saw every root.
+- **Mass delete.** If the vanished completed rows that are not moves exceed `rag.sync.max_delete_fraction`
+  (`ragnart.yaml`, `0.10`) of all completed rows, the run makes no tombstones and removes no stale
+  rows. Moves are not counted and still apply. Purges still run. `--allow-mass-delete` proceeds anyway,
+  and logs a WARNING with the counts.
 
-Diagnosis and recovery for both guards are in `docs/RAG-troubleshoot.md` §2.12.
+Diagnosis and recovery are in `docs/RAG-troubleshoot.md` §2.12 (guards) and §2.15 (plan, moves,
+tombstones).
 
-`--user OWNER` limits the scan to that owner's NFS roots and `claude_chats` roots (and
-OpenCode if `opencode.owner` matches), and limits deletion to that owner's rows: a `--user`
-run never deletes another owner's rows, including `la-familia`'s. Without `--user` the deletion
-check covers every owner. The scheduled run uses `--user florian` (§8.2).
+**Dry run.** `python utils/rag_sync_nfs.py --dry-run` runs the scan and the plan on a private copy of
+the live database, made with SQLite's backup API from a read-only connection. It prints the plan and
+exits 0. It takes no lock, makes no Qdrant client, and writes nothing to the live database. The copy is
+removed afterwards.
+
+**The printed plan.** The sync logs the plan before it applies it, and `--dry-run` prints the same text.
+It opens with two header lines: whether roots were skipped, and whether the mass-delete guard tripped.
+Then one block per kind, each with its count and one entry per item: project upserts, project removals,
+moves (`old -> new`), newly missing (tombstoned, points kept), reappeared, purge, stale queue rows removed,
+attachment changes.
+
+**Log lines** (applied changes, `ragnart/sync_plan.py`):
+
+| Line | Meaning |
+|---|---|
+| `Moved <old> -> <new> (content unchanged, no re-embed)` | Key rewritten |
+| `Tombstoned (<reason>), points kept until the grace period ends: <path>` | `missing_since` set |
+| `Reappeared, tombstone cleared: <path>` | Tombstone cleared |
+| `purged <path> chunks=<n> reason=tombstone grace period expired missing_since=<time>` | Points and row removed; this is the purge record |
+| `Queue row removed (<reason>): <path>` | Stale row removed |
+
+**Exit codes.** `0`: the sync applied its plan, or a dry run finished. `1`: the deletion phase was
+refused, by a skipped root or by the mass-delete guard. The queueing of the scan still stands in that
+case. `75`: another writer holds the ingestion lock (§5.6), and the run did nothing.
+
+**Grace period.** 24 hours, `DEFAULT_GRACE_HOURS` in `ragnart/sync_plan.py`. It is measured from the
+first sync that saw the item missing. A later sync that still does not see it keeps that first time.
 
 ### 5.4 Worker loop — `ingest_file()`
 
@@ -544,7 +602,7 @@ Any exception → `mark_failed()` (retry or `ignored`, §5.2), and the daemon mo
 (`ragnart/hashing.py`: size and MD5). For NAS files it hashes `file_path`. For `claude-session://`
 keys it hashes `origin_path`, because the key is not a path, and it parses the transcript from
 `origin_path` too. OpenCode sessions are not hashed: their content lives only in OpenCode's database,
-so `size_bytes`, `content_hash` and `hashed_at` stay NULL. Every point carries `project_id` (`global`),
+so `size_bytes`, `content_hash` and `hashed_at` stay NULL. Every point carries `project_id` (§5.1),
 `source_type`, `modified_at` (the row's `last_modified` as ISO UTC), `ingested_at` (the row's
 `completed_at`) and `content_hash`. Step 7 writes the matching SQLite columns with `pipeline_version = 'p1'`,
 plus `size_bytes`, `hashed_at`, `chunk_count`, `file_type` and `launch_dir`. `launch_dir` is the
@@ -627,7 +685,16 @@ snapshot script, `rag_status.py`, `rag_reset.py`, `rag_purge_corrupt.py`, `rag_p
 ad-hoc `sqlite3` sessions all run on Server 2. Of these, the sync, the daemon, the snapshot script,
 the run script, `rag_reset.py` (without `--dry-run`), `rag_purge_corrupt.py --confirm` and
 `rag_purge_rescan.py --apply` take the ingestion lock. `rag_status.py`, the dry runs and the
-read-only `ragnart` CLI never take it. The search service never opens the state DB.
+read-only `ragnart` CLI never take it.
+
+**The search service opens the state DB too, read-only, on Server 2 only.** `ragnart/service.py` holds
+one `StateDB(..., read_only=True)` connection for the whole process, opened at startup. It reads the
+projects and tags for scope resolution and for `GET /v1/projects` (§6.4), and it never writes. This is
+safe for the same reason the writer is safe: both processes run on Server 2, so both map the same
+`rag_state.db-shm` in one kernel, and the WAL index is coherent. The rule above still applies to every
+other host: a second host must never open the state DB, read-only or not. If the file cannot be opened
+when the service starts, the service still runs, and the scope-dependent endpoints answer 503
+`Queue database unavailable` until the service is restarted.
 
 ### 5.7 Metadata backfill — `utils/rag_metadata_backfill.py`
 
@@ -704,6 +771,39 @@ appended to, and the counts restart at 0 on each run. It is for the operator to 
 
 Checks: point count in `documents` before and after, and the payload of a sample of points.
 
+### 5.8 Reconciliation — `utils/rag_reconcile.py`
+
+Reconciliation makes `chunk_count` in the queue and the points in Qdrant agree. It also finds points
+whose key has no queue row. It runs at the end of every scheduled ingestion run, after the daemon and
+before the WAL checkpoint and the snapshot (§8.2). A non-zero exit is logged as
+`WARN: reconciliation exited non-zero` and does not change the unit's result.
+
+- **One facet, not one count per row.** A single Qdrant `facet` call on `source_path` with `exact=True`
+  returns the number of points under every key. The run stops if the facet returns `FACET_LIMIT`
+  (1,000,000) values, because a truncated answer would make real rows look empty.
+- **Row kinds.** Each completed row is classified by `classify_row()` against its points:
+
+| Kind | Meaning | Action |
+|---|---|---|
+| `fill_null_chunk_count` | `chunk_count` is NULL | Set to the number of points |
+| `tombstoned` | `missing_since` is set | None. Points stay for the grace period (§5.3). Never requeued, never an anomaly |
+| `ok` | `chunk_count` > 0 and the points equal it | None |
+| `ok_zero` | `chunk_count` 0 and no points | None. An empty document |
+| `requeue` | `chunk_count` > 0 and fewer points than that | `reset_to_pending()`. The next ingest deletes the leftover points and writes new ones |
+| `anomaly` | More points than `chunk_count`, or points under a `chunk_count` of 0 | Logged as an ERROR. Not repaired |
+| `not_completed` | Pending, processing, failed or ignored | Not reconciled |
+
+- **Zombie points.** Keys with points and no queue row of any status. They are deleted, unless the
+  mass-delete guard trips. The guard is the sync's arithmetic (`rag.sync.max_delete_fraction` × the total),
+  but it counts **points**, not keys. A tripped guard refuses only the zombie deletes. The row repairs
+  still run.
+- **Dry run by default.** `python utils/rag_reconcile.py` (or `--dry-run`) reads SQLite through a
+  read-only connection and reads Qdrant. It takes no lock and writes nothing. It prints the tally, and
+  says "would be" for each repair. `--apply` takes the ingestion lock before it opens the database. Under
+  the scheduled run the lock is already held by the run script, so it is not taken again.
+- **Exit codes.** `0`: no anomaly remains and the guard did not trip. `1`: an anomaly was found (never
+  repaired) or the guard refused the zombie deletes.
+
 ---
 
 ## 6. Retrieval
@@ -719,16 +819,30 @@ query
                                                                         ▼
                                    cross-encoder rerank on child `text` (bge-reranker-v2-m3)
                                                                         ▼
+                                   collapse identical copies by content_hash (each hit: locations)
+                                                                        ▼
+                                   per-source cap (max_hits_per_source)
+                                                                        ▼
                                                                first top_k results
 ```
 
 1. Embed the query (dense; plus sparse in hybrid mode).
 2. Filter: `owner IN [user, "la-familia"]` when `user` is given; `file_type IN file_types`
-   when given; no filter otherwise.
+   when given; `project_id IN <the projects selected by scope>` (§6.4) on every query, unless
+   `scope` includes `all`, which applies no project filter.
 3. Query Qdrant — hybrid (two prefetches fused with `FusionQuery(fusion=Fusion.RRF)`) when
    hybrid is enabled and the collection has `sparse_text`; dense-only otherwise.
 4. Rerank the pool when reranking is enabled.
-5. Return the first `top_k`.
+5. Collapse identical copies. Hits with the same `content_hash` from different `source_path` values
+   become one hit. The kept hit is the best-ranked copy, because collapse runs after rerank. Its
+   `locations` lists its own path, then the paths of the copies it absorbed. Chunks of one file share
+   a hash, but they are not copies: each is kept. A NULL hash or the empty-file hash never collapses.
+6. Apply the per-source cap (`max_hits_per_source`, default 3): at most that many hits per `source_path`,
+   counted after collapse.
+7. Return the first `top_k` results.
+
+The order is rerank, then collapse, then cap, then `top_k`. A collapsed copy therefore never uses up a
+cap slot, and the `top_k` cut is taken from the capped list.
 
 Pool sizes:
 
@@ -777,26 +891,38 @@ mode it is accepted and ignored. Callers that want one ranking key use
 | Parameter | Type | Default | Notes |
 |---|---|---|---|
 | `q` | string | required | query text |
+| `scope` | repeated string | required, no default | `all`, `<path>` (the ragnart project at exactly that path), `<path>/` (that project, if any, and every ragnart project below it), or `tag:<key>=<value>` (every ragnart project with that tag). Repeats are unioned. `all` also searches `global` items. Each term is validated, even with `all`. A missing `scope`, an empty term, a malformed tag, or a path or tag that matches no ragnart project is **422**, before any embedding or Qdrant call. The resolved selection is echoed in `scope` |
 | `user` | string | none | owner scope (§10); none = search everything |
 | `top_k` | int 1–100 | 5 | |
 | `file_types` | repeated string | none | e.g. `&file_types=pdf&file_types=claude_chat` |
 | `score_threshold` | float 0–1 | 0.0 | dense-only path only |
 | `rerank` | bool | config (`true`) | `rerank=false` skips the cross-encoder |
-| `max_hits_per_source` | int ≥1 | config (`3`) | per-source cap, applied after rerank, before top_k; echoed in the response |
+| `max_hits_per_source` | int ≥1 | config (`3`) | per-source cap, applied after collapse, before top_k; echoed in the response |
 
-Response: `{"query", "user", "max_hits_per_source", "results": [...]}`, each result with `content` (parent text),
-`source_path`, `score`, `file_name`, `file_type`, `session_title` (empty for NAS files),
-`text` (child chunk) and, when reranked, `rerank_score`. When Qdrant is unreachable a search
+Response: `{"query", "user", "scope", "max_hits_per_source", "results": [...]}`. `scope` is
+`{"all": bool, "global": bool, "projects": [{"id", "path", "name"}]}`: the projects that were searched,
+and whether `global` was included. Each result has `content` (parent text), `source_path`, `locations`,
+`score`, `file_name`, `file_type`, `session_title` (empty for NAS files), `text` (child chunk) and, when
+reranked, `rerank_score`. `locations` lists every `source_path` the hit stands for: its own path, then the
+paths of identical copies collapsed into it (§6.1, step 5). When Qdrant is unreachable a search
 answers **503** `Qdrant unavailable`. The next search after
 Qdrant recovers answers normally, with no service restart. Qdrant errors with a 4xx status are
-not mapped to 503.
+not mapped to 503. When the queue database could not be opened at service start, a search answers
+**503** `Queue database unavailable` until the service is restarted (§5.6).
+
+**`GET /v1/projects`** lists `global` and every ragnart project, with tags and item counts. Each entry
+has `id`, `path` (`null` for `global`), `name`, `parent`, `owner`, `mode`, `tags` (an object) and
+`item_count` (completed queue items attached to the project). `global` is always listed first; the other
+entries follow in `path` order. With `user`, a project is listed when its owner is that user or
+`la-familia`; without `user`, every project is listed.
 
 **`GET /health`** → `{"status": "ok" | "degraded", "qdrant": true | false}`. It probes Qdrant's
 `/healthz` with a 2 s timeout, so it answers within about 2 s, with `degraded` when Qdrant is down.
 
 ```bash
-curl 'http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian&top_k=5'
-curl 'http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian&rerank=false'
+curl 'http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian&top_k=5&scope=all'
+curl 'http://192.168.1.95:8100/v1/search?q=AWS+certifications&user=florian&rerank=false&scope=all'
+curl 'http://192.168.1.95:8100/v1/projects?user=florian'
 curl 'http://192.168.1.95:8100/health'
 ```
 
@@ -893,16 +1019,21 @@ Qdrant on Server 1 has its own installer, `scripts/qdrant/install-qdrant.sh` (§
 
 ### 8.2 What one ingestion run does — `scripts/ragnart-ingest-run.sh`
 
-1. `rag_sync_nfs.py --user <u>` for each entry of `RAG_SYNC_USERS` (`("florian")`).
+1. `rag_sync_nfs.py` with no `--user`: one sync that scans every configured root, La-Familia included,
+   and applies its plan (§5.3).
 2. `rag_ingest_daemon.py --workers $RAG_WORKERS --batch $RAG_BATCH --log-file $LOGFILE`
    (runs under the ingestion lock that the wrapper holds for the whole run, §5.6).
-3. `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` (non-fatal on failure).
-4. Snapshot (§9) if the newest `.snapshot` on the NAS is older than
+3. `rag_reconcile.py --apply`: repairs `chunk_count` and requeues short rows, and deletes zombie
+   points under the guard (§5.8). Non-fatal: a non-zero exit is logged as
+   `WARN: reconciliation exited non-zero — see log above`, and the unit's result does not change.
+4. `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` (non-fatal on failure).
+5. Snapshot (§9) if the newest `.snapshot` on the NAS is older than
    `RAG_SNAPSHOT_MIN_AGE_H` hours, if none exists, or if `RAG_FORCE_SNAPSHOT=1`.
 
 A sync that exits non-zero (a guard in §5.3 tripped, or a crash) is logged as
-`WARN: sync exited <rc>`. Steps 2 to 4 still run, and the unit ends failed with the first
-non-zero sync exit code.
+`WARN: sync exited <rc>`. Steps 2 to 5 still run, and the unit ends failed with the first
+non-zero sync exit code. Reconciliation runs after the daemon, so the ingestion it requeues is picked
+up on the next run, and before the snapshot, so the snapshot holds the repaired state.
 
 The wrapper takes the ingestion lock before step 1 and holds it until the run ends (§5.6). If
 another writer holds the lock, the run exits 75 before any step starts. The wrapper is the single
@@ -1264,9 +1395,8 @@ What is implemented:
 - **OpenCode is single-tenant.** One OpenCode server with one constant owner; per-user
   isolation of OpenCode content would need an owner per session or per server, which does not
   exist.
-- **Coverage.** Only `florian` is an active user. `la-familia` content enters the index only
-  through a sync run without `--user`, and the scheduled `--user florian` sync removes
-  `la-familia` rows and points (§5.3), so in practice the shared root is not indexed.
+- **Coverage.** Only `florian` is an active user. The scheduled sync scans every configured root,
+  so `la-familia` content is indexed like any other owner's (§2.1, §5.3).
 - **Clients.** Clients call `GET /v1/search` directly and manage their own retrieval loops.
   SoHoAI's gateway on Server 1 answers its own `GET /v1/rag/search` with a 307 redirect to
   this service.

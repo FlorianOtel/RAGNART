@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6)
-updated_at: 2026-11-15--23-53
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed)
+updated_at: 2026-11-16--12-11
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -24,7 +24,8 @@ context: >
 ## 1. Purpose and how to use this plan
 
 This plan implements the design in `docs/RAGNART-design.md` in five versions,
-each sized to one Claude Code `/brain` session (v0.2 may take two). The design
+each sized to one Claude Code `/brain` session, except v0.2, which takes five
+(the bridge session, the item 5 session, and v0.2 sessions A, B and C). The design
 document says *what* RAGNART is and why; this plan says in which order it is
 built and how each step is accepted. Each version section is meant to be
 self-contained: a session reads this document, its own version section, and the
@@ -63,7 +64,7 @@ commit message and in the implementation log.
 | Projects | Addressed by path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
 | Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
-| Number of versions / sessions | Five versions, one `/brain` session each; v0.2 may take two | operator |
+| Number of versions / sessions | Five versions; v0.2 takes five sessions (bridge, item 5, A, B, C), the others one each | operator |
 | Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, session-start hook, capture, collateral) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
@@ -105,8 +106,8 @@ repository and the live services; operational detail is in
    | `.yaml` | 338 | 81 |
    | `.yml` | 294 | 155 |
 
-   Queue: 14,660 `completed`, 268 `ignored`, 0 `pending`. Completed rows without points are the v0.2
-   reconciliation findings (§6 v0.2). The pre-purge history is in `docs/v0--Implementation-log.md`.
+   Queue: 14,660 `completed`, 268 `ignored`, 0 `pending`. Completed rows without points are consistent:
+   they have `chunk_count` 0 (empty documents, no chunks), and reconciliation treats them as consistent. The pre-purge history is in `docs/v0--Implementation-log.md`.
    No migration step may require re-embedding or rewriting vectors.
 2. **`documents` is an alias.** `documents` → `documents_new`. Every
    reference to "the `documents` collection" below means the alias; the
@@ -172,10 +173,12 @@ These are hard rules that every version from v0.2 onward obeys.
   once, in ascending order; a statement that fails with an `OperationalError` is skipped, so a run that
   crashed part-way can be repeated. Never rename or drop a column, and never change
   `ingestion_queue.file_path`'s role as primary key.
-- **Search without new parameters is unchanged.** Until the `/ragnart` client
-  replaces `/rag` (v0.3), `GET /v1/search` called without `scope` must return
-  the same ranking it returns today; from v0.3 `scope` is required
-  (`docs/RAGNART-design.md` §8.8). The regression
+- **Search outside ragnart projects keeps today's results.** `GET /v1/search`
+  requires `scope`, with no server-side default: a request without it answers
+  HTTP 422 (`docs/RAGNART-design.md` §8.8). The `/rag` command copies send
+  `scope=all`. A query whose matches are all outside ragnart projects returns
+  today's results, except that identical copies now collapse into one hit that
+  lists every location (§6 v0.2). The regression
   test is the 14 queries in `utils/rag_bench_queries.txt`, run before and
   after every version's data migration (tie-aware, as search ordering is not
   fully deterministic; `docs/RAG-strategy.md` §6.5).
@@ -299,15 +302,17 @@ None of items 1–6 changes Qdrant data or the schema.
 2. **`--user florian` deletes other owners' rows.** The scanners honour
    `user_filter`, but `find_deleted()` selects all rows of `ingestion_queue`, so
    rows of any other owner (including the shared `la-familia` root) look gone on
-   every scheduled run (`scripts/ragnart-ingest-run.sh` syncs only
-   `RAG_SYNC_USERS=("florian")`). No live impact while `/mnt/nfs/La-Familia` is
+   a run that scans only one owner. No live impact while `/mnt/nfs/La-Familia` is
    empty.
-   Delivered by the bridge session.
+   Delivered by the bridge session (owner restriction) and by v0.2 session C
+   (the scheduled sync is one call over every configured root, La-Familia
+   included; there is no per-owner loop).
    Fix:
    - `find_deleted(existing_paths, owners)` restricts to `WHERE owner IN (...)`
      (the `owner` column already exists); `rag_sync_nfs.py` passes the owners
      whose sources were actually scanned.
-   - The scheduled sync covers every configured root (see Decisions to confirm).
+   - The scheduled sync covers every configured root in one call (settled at
+     kickoff; `scripts/ragnart-ingest-run.sh`).
    Test: a `la-familia` row whose file is on disk survives a `--user florian` sync,
    with its points.
 
@@ -419,41 +424,52 @@ None of items 1–6 changes Qdrant data or the schema.
   project, or the reserved `global` value for an item outside any ragnart
   project (`docs/RAGNART-design.md` §4.6, §6.1). There is no root-level project
   and no per-owner `sessions` project; a crawl root is only a traversal starting
-  point plus the owner mapping.
+  point plus the owner mapping. Delivered by v0.2 session B (items outside ragnart
+  projects carry `global`) and v0.2 session C (attachment to ragnart projects).
 - Extend the scanner and `rag_sync_nfs.py` with marker discovery
   (`.ragnart/project.toml`: reserved keys `name`, `id`, `inherit_access`, `mode`,
   `scope`, `grounding`, `capture`, `inbox_expiry_days`; every other key is a tag,
   `docs/RAGNART-design.md` §4.5),
   move detection by `content_hash`, tombstones with a grace period, and
   plan-then-apply reconciliation (design §10.2, §10.3), on top of the mount
-  guard and missing-sources threshold of fix-first item 1.
+  guard and missing-sources threshold of fix-first item 1. Delivered by v0.2
+  session C, including attachment of every item to its closest enclosing
+  ragnart project, re-evaluated on every sync.
 - Add `ragnart/scope.py` (`resolve_scope`, `authorize`, per §5), the `scope`
   parameter on `GET /v1/search` (project path, selection by paths and tags,
   `all`; resolved scope echoed in the response; design §8.8), and
   `GET /v1/projects`. `scope` is required on `GET /v1/search`, with no server-side
   default (design §8.8). The two `/rag` command copies (`~/.claude/commands/rag.md`,
   `~/.config/opencode/commands/rag.md`) are updated in the same change.
+  Delivered by v0.2 session C. The `scope` terms are `all`, a ragnart project
+  path, a path with a trailing `/` (that project and its subtree), and
+  `tag:<key>=<value>`; the terms are repeatable and form a union.
 - Record each session's launch directory verbatim in `launch_dir`, including a
-  stale or deleted directory: never normalised, resolved or matched. A session
-  launched outside a ragnart project is an ordinary RAG item
-  (`docs/RAGNART-design.md` §4.6). Attaching sessions to ragnart projects by
-  launch directory happens only when ragnart projects exist
-  (`docs/RAGNART-design.md` §4.5); that is session C's work.
+  stale or deleted directory: never normalised or resolved. A session launched
+  outside a ragnart project is an ordinary RAG item
+  (`docs/RAGNART-design.md` §4.6). Delivered by v0.2 session C: a session
+  attaches to the closest ragnart project whose path is a verbatim prefix of its
+  `launch_dir` (`docs/RAGNART-design.md` §4.5). A launch directory reached
+  through a symlink does not attach.
 - Search: `max_hits_per_source` cap and collapse of identical copies by
   `content_hash` (design §9.1, §8.7), with the cap as a knob in `ragnart.yaml`
-  and per request (echoed). Delivered by v0.2 session A (the cap). Collapse by
-  `content_hash` remains open: it needs `content_hash` in the payload.
+  and per request (echoed). Delivered by v0.2 session A (the cap) and v0.2
+  session C (collapse: after rerank, before the cap and `top_k`; a collapsed hit
+  lists every location; empty-file and NULL hashes never collapse).
 - Reconciliation: a scheduled check of `chunk_count` against Qdrant and of
   Qdrant keys against rows; repairs under the deletion rules and fails loudly
-  in the log (design §10.3). Its first run must also resolve these current
-  findings:
+  in the log (design §10.3). Delivered by v0.2 session C (`utils/rag_reconcile.py`,
+  run at the end of every scheduled ingestion run, under the run-wide lock).
+  It resolves these findings (measured results in the Definition of done):
   - **Zombie paths.** Two paths under `Gin-AI/dot.claude-Linux` (an AYA session
     `.jsonl` and `memory/aya-v06a-phased.md`, 307 points) have points but no
     queue row. Rationale: the check compares Qdrant keys with rows, so it must
     report and resolve points without a row.
-  - **Completed rows without points.** About 1,270 `completed` rows have zero
-    Qdrant points. Rationale: a `completed` row whose points are missing is the
-    divergence this check exists to find.
+  - **Completed rows without points.** 1,269 `completed` rows have zero Qdrant
+    points and `chunk_count` 0; the check treats that as consistent (empty
+    documents, no chunks) and leaves them alone. Rationale: a `completed` row
+    with a non-zero `chunk_count` whose points are missing is the divergence
+    this check exists to find.
   - **Crash in the purge.** A crash between the Qdrant delete and the row update
     in `utils/rag_purge_rescan.py` leaves a `completed` row without points.
     Rationale: the same divergence, with a known cause.
@@ -497,17 +513,28 @@ to the old code and are left in place by design, not removed.
   temporary restore of the pre-migration snapshot: 12 of 14 queries had identical top-5 source sets;
   the 2 differences were identical-content copies. The pre-migration collection itself varied between
   two runs of the same query (known non-determinism, `docs/RAG-strategy.md` §6.5, which covers rank
-  ties and reranker shifts, not set-level variation between runs). The `scope=all` form of this
-  criterion is re-checked in session C, once `scope` exists.
+  ties and reranker shifts, not set-level variation between runs). Verified
+  (session C): against a pre-change baseline captured twice, 12 of 14 queries
+  are identical with `scope=all`; the 2 differ only because identical copies
+  now collapse into one hit with all locations.
 - A scoped search (`scope=<ragnart project path>`) returns only that ragnart
   project's sources, and the response names the ragnart projects searched.
-  Session C.
+  Verified (session C): `scope=/mnt/nfs/Florian/Gin-AI/projects/RAGNART`
+  returned only RAGNART files and sessions (10/10) and echoed the project.
 - Moving a ragnart project directory changes one `projects` row and zero Qdrant
-  points. Session C (no ragnart projects exist after session B).
+  points. Verified (session C, live, on a throwaway ragnart project that was
+  renamed): one `projects` row changed (path), item `project_id` unchanged, both
+  files detected as moves (`source_path` rewritten, same point ids, no
+  re-embedding), total points unchanged; deleting the project removed it and
+  tombstoned its 2 items.
 - Fix-first item 0 verified; items 1–5 pass their tests.
-- Reconciliation reports zero unexplained differences on the clean corpus. Session C.
+- Reconciliation reports zero unexplained differences on the clean corpus.
+  Verified (session C): the first run filled 433 chunk counts and deleted the 2
+  orphaned sources (307 points); after that, zero differences (13,415 ok, 1,269
+  ok with zero chunks, 0 anomalies, 0 orphans).
 - A result list never contains more than `max_hits_per_source` passages from
-  one item.
+  one item. Verified (session C, after collapse): a scoped search returned 3 hits
+  from each of two sessions.
 
 **Risks.** Backfill runtime measured: 14,681 rows, 13.5 GB hashed, about 20 minutes for the full pass on Server 2. Re-deriving session `cwd`/`location.directory` at
 backfill time may disagree with what a later ingestion run derives if
@@ -534,7 +561,6 @@ Kickoff decisions of v0.2 session B (operator, 2026-11-15), each documented in `
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
-
 ### v0.3 — Project mode
 
 **Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3 to
@@ -831,7 +857,7 @@ improvements stay `p1`.
 | Version | Status | Session(s) | Commit(s) |
 | --- | --- | --- | --- |
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
-| v0.2 Nested | in progress | 4 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A), `8a0f6b3` (session B) |
+| v0.2 Nested | done | 5 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A), `8a0f6b3` (session B), `64472db` (session C phase 1), `c7c4999` (session C phase 2), `49e03de` (session C phase 3) |
 | v0.3 Project mode | planned | — | — |
 | v0.4 Kotaemon | planned | — | — |
 | v0.5 Tenancy & authentication | planned | — | — |
