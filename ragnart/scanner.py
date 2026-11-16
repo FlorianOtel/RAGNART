@@ -20,13 +20,21 @@ from __future__ import annotations
 import logging
 import os
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .hashing import hash_file
 from .opencode_client import get_json, load_password
+from .projects import parse_project_toml
 from .ragignore import RagIgnoreMatcher
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
+
+# The directory that marks a ragnart project, and the marker file inside it.
+# The directory is never walked as content: its files are configuration, not documents.
+RAGNART_DIRNAME = ".ragnart"
+PROJECT_MARKER_FILENAME = "project.toml"
 
 
 # The ragnart.yaml keys that exclusions used to live in. Exclusions now live in
@@ -114,6 +122,63 @@ def nfs_roots_from_config(
     return roots_to_scan
 
 
+def _dirpath_is_excluded(matcher: RagIgnoreMatcher, root: str, dirpath: str) -> bool:
+    """
+    True if the walked directory `dirpath` is excluded by the ignore rules.
+
+    The crawl root itself cannot be excluded: RagIgnoreMatcher refuses paths equal to
+    its root, and nothing above the root is consulted. Every other directory the walk
+    yields has already survived its parent's pruning, so this check normally returns
+    False. It is kept so a marker can never be read from an excluded directory even if
+    the pruning step changes.
+    """
+    if os.path.normpath(dirpath) == os.path.normpath(root):
+        return False
+    return matcher.is_dir_excluded(os.path.dirname(dirpath), os.path.basename(dirpath))
+
+
+def _read_project_marker(dirpath: str, owner: str) -> dict | None:
+    """
+    Return the project marker of `dirpath` as a dict, or None.
+
+    The marker is `<dirpath>/.ragnart/project.toml`. A missing file returns None
+    silently. A present but invalid file returns None, and parse_project_toml has
+    already logged the reason at ERROR. The directory then stays an ordinary
+    directory and its files are still scanned.
+
+    On success the dict is {path, owner, name, id, inherit_access, mode, tags}.
+    `path` is the directory with any trailing separator removed, so it matches the
+    paths that file rows carry.
+    """
+    toml_path = os.path.join(dirpath, RAGNART_DIRNAME, PROJECT_MARKER_FILENAME)
+    if not os.path.isfile(toml_path):
+        return None
+    parsed = parse_project_toml(toml_path)
+    if parsed is None:
+        return None
+    return {
+        "path": dirpath.rstrip(os.sep) or os.sep,
+        "owner": owner,
+        **parsed,
+    }
+
+
+def _hash_new_file(filepath: str) -> tuple[int | None, str | None, str | None]:
+    """
+    Hash a genuinely new file and return (size_bytes, content_hash, hashed_at).
+
+    A file that cannot be read is admitted without a hash rather than dropped. A
+    missing hash only means the file cannot be a move target or source, and the
+    ingestion worker hashes it again before ingesting. The failure is logged.
+    """
+    try:
+        size_bytes, content_hash = hash_file(filepath)
+    except OSError as exc:
+        logger.warning("could not hash new file %s, admitting it without a hash: %s", filepath, exc)
+        return None, None, None
+    return size_bytes, content_hash, datetime.now(timezone.utc).isoformat()
+
+
 def scan_nfs_roots(
     state_db: StateDB,
     config: dict,
@@ -138,11 +203,25 @@ def scan_nfs_roots(
         config:      Full config dict (reads 'users' + 'shared' sections).
         user_filter: If set (e.g. "florian"), only scan that owner's NFS roots.
 
+    Project markers:
+        A directory holding `.ragnart/project.toml` is a ragnart project. The marker is
+        read before the directory's children are pruned, so a marker is never missed
+        because of a rule on its children. A directory excluded by .ragignore is not a
+        project, so its marker is skipped. The `.ragnart` directory itself is never
+        walked as content.
+
+    New-file hashing:
+        A file with no queue row yet is hashed here, so a move can be detected in the
+        same sync that finds the old path vanished. Files that already have a row are
+        not hashed.
+
     Returns:
         {
           'scanned': N,                  # files admitted to the queue this scan
           'existing_paths': set[str],    # every admitted path, for find_deleted()
           'skipped_roots': list[str],    # roots that could not be trusted this scan
+          'project_markers': list[dict], # {path, owner, name, id, inherit_access, mode, tags}
+          'new_hashes': dict[str, str],  # file_path -> content_hash, for genuinely new files only
         }
 
         A root is skipped when it is not a directory, or when it is a directory that
@@ -164,6 +243,8 @@ def scan_nfs_roots(
     scanned = 0
     existing_paths: set[str] = set()
     skipped_roots: list[str] = []
+    project_markers: list[dict] = []
+    new_hashes: dict[str, str] = {}
     visited_real_dirs: set[str] = set()   # global — prevents re-walking the same real dir via different symlinks
     visited_real_files: set[str] = set()  # global — prevents ingesting the same real file via different symlink paths
 
@@ -189,12 +270,22 @@ def scan_nfs_roots(
                 continue
             visited_real_dirs.add(real_dirpath)
 
+            # Project marker. Read before the pruning below, so a marker directory is
+            # never missed because of a rule on its own children. An excluded directory
+            # is not a project, so its marker is skipped.
+            if RAGNART_DIRNAME in dirnames and not _dirpath_is_excluded(matcher, root, dirpath):
+                marker = _read_project_marker(dirpath, owner)
+                if marker is not None:
+                    project_markers.append(marker)
+
             # Prune excluded subtrees in-place — prevents os.walk from descending.
             # Because an excluded directory is never entered, a .ragignore inside it
             # is never read, so nothing under it can be re-included.
+            # The .ragnart marker directory is pruned unconditionally: it holds
+            # configuration, not content.
             dirnames[:] = [
                 d for d in dirnames
-                if not matcher.is_dir_excluded(dirpath, d)
+                if d != RAGNART_DIRNAME and not matcher.is_dir_excluded(dirpath, d)
             ]
 
             for filename in filenames:
@@ -212,6 +303,15 @@ def scan_nfs_roots(
                     mtime = os.path.getmtime(filepath)
                 except OSError:
                     continue
+
+                # Hash only a file with no queue row yet. A file already in the queue keeps
+                # the hash it was given at discovery, so no existing file is re-read here.
+                size_bytes = content_hash = hashed_at = None
+                if not state_db.row_exists(filepath):
+                    size_bytes, content_hash, hashed_at = _hash_new_file(filepath)
+                    if content_hash is not None:
+                        new_hashes[filepath] = content_hash
+
                 state_db.discover_or_update(
                     filepath,
                     owner,
@@ -219,6 +319,9 @@ def scan_nfs_roots(
                     origin_path=filepath,
                     source_type="file",
                     file_type=Path(filepath).suffix.lstrip(".").lower(),
+                    size_bytes=size_bytes,
+                    content_hash=content_hash,
+                    hashed_at=hashed_at,
                 )
                 existing_paths.add(filepath)
                 scanned += 1
@@ -240,6 +343,8 @@ def scan_nfs_roots(
         "scanned": scanned,
         "existing_paths": existing_paths,
         "skipped_roots": skipped_roots,
+        "project_markers": project_markers,
+        "new_hashes": new_hashes,
     }
 
 

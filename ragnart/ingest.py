@@ -61,6 +61,7 @@ from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_
 from .embeddings import embed_batch, embed_sparse
 from .hashing import hash_file
 from .opencode_client import get_json, load_password
+from .projects import project_id_for_path
 from .scanner import claude_dot_claude_dir
 from .schema import (
     FIELD_CHUNK_INDEX,
@@ -917,10 +918,36 @@ async def ingest_file(
         if chat_meta.get(FIELD_SESSION_TITLE):
             file_name = chat_meta[FIELD_SESSION_TITLE]
 
+        # ------------------------------------------------------------------
+        # Project attachment, computed once per item and written to every point and
+        # to SQLite. The match is by path, against the registered projects.
+        #   - NAS files: matched by their own item key (file_path).
+        #   - claude-session:// and opencode:// items: matched by the directory the
+        #     session was launched from (launch_dir, as extracted at parse time).
+        # A missing launch_dir means the item attaches to the global project.
+        # Matching is verbatim, so a symlinked launch path does not attach.
+        # ------------------------------------------------------------------
+        if file_path.startswith(("claude-session://", "opencode://")):
+            match_path = launch_dir
+        else:
+            match_path = file_path
+        if match_path:
+            # Rows without a path (the reserved 'global' row) cannot attach anything.
+            registered_paths = [
+                (project["id"], project["path"])
+                for project in state_db.list_projects()
+                if project["path"]
+            ]
+            project_id = project_id_for_path(match_path, registered_paths, GLOBAL_PROJECT_ID)
+        else:
+            project_id = GLOBAL_PROJECT_ID
+
         if not text.strip():
             logger.warning("Empty document, skipping: %s", file_path)
             # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
-            state_db.mark_completed(file_path, chunk_count=0, pipeline_version="p1")
+            state_db.mark_completed(
+                file_path, chunk_count=0, pipeline_version="p1", project_id=project_id,
+            )
             return
 
         # Skip documents whose parsed text is mostly binary/garbage characters.
@@ -959,7 +986,9 @@ async def ingest_file(
         if not pairs:
             logger.warning("No chunks produced, skipping: %s", file_path)
             # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
-            state_db.mark_completed(file_path, chunk_count=0, pipeline_version="p1")
+            state_db.mark_completed(
+                file_path, chunk_count=0, pipeline_version="p1", project_id=project_id,
+            )
             return
 
         # ------------------------------------------------------------------
@@ -1043,7 +1072,7 @@ async def ingest_file(
                         FIELD_CHUNK_INDEX: chunk_idx,
                         FIELD_TAG:         tag,
                         # Identity and freshness fields, on every point.
-                        FIELD_PROJECT_ID:   GLOBAL_PROJECT_ID,
+                        FIELD_PROJECT_ID:   project_id,
                         FIELD_SOURCE_TYPE:  source_type,
                         FIELD_MODIFIED_AT:  modified_at,
                         FIELD_INGESTED_AT:  now_iso,
@@ -1088,6 +1117,7 @@ async def ingest_file(
             hashed_at=hashed_at,
             completed_at=now_iso,
             launch_dir=launch_dir,
+            project_id=project_id,
         )
         logger.info(
             "Ingested %s: %d points  owner=%s  tag=%s",

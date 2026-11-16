@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -61,8 +62,8 @@ def _config(root, max_delete_fraction: float = 0.10) -> dict:
     }
 
 
-def _args(allow_mass_delete: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(user=OWNER, allow_mass_delete=allow_mass_delete)
+def _args(allow_mass_delete: bool = False, dry_run: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(user=OWNER, allow_mass_delete=allow_mass_delete, dry_run=dry_run)
 
 
 def _make_files(root: Path, count: int) -> list[str]:
@@ -89,11 +90,31 @@ def _rows(state_db: StateDB) -> dict[str, str]:
     }
 
 
+def _missing(state_db: StateDB) -> set[str]:
+    """Paths of every tombstoned row (missing_since set)."""
+    return {
+        row["file_path"]
+        for row in state_db._conn.execute(
+            "SELECT file_path FROM ingestion_queue WHERE missing_since IS NOT NULL"
+        ).fetchall()
+    }
+
+
+def _age_tombstones(state_db: StateDB, hours: int) -> None:
+    """Move every tombstone's missing_since back by `hours`, as if that much time had passed."""
+    aged = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    state_db._conn.execute(
+        "UPDATE ingestion_queue SET missing_since = ? WHERE missing_since IS NOT NULL", (aged,)
+    )
+    state_db._conn.commit()
+
+
 def _first_sync_completed(sync_module, state_db, config, qdrant) -> None:
     """Run a clean sync over the tree, then mark everything it queued as completed."""
     assert sync_module.sync(config, state_db, _args()) == 0
     _complete_all(state_db)
     qdrant.delete.reset_mock()
+    qdrant.set_payload.reset_mock()
 
 
 # ----------------------------------------------------------------------------
@@ -200,19 +221,21 @@ def test_mass_delete_guard_blocks_deletion_until_allowed(sync_module, state_db, 
     with caplog.at_level(logging.ERROR, logger="rag_sync_nfs"):
         assert sync_module.sync(config, state_db, _args(allow_mass_delete=False)) == sync_module.EXIT_DELETION_REFUSED
 
+    # Refused: no tombstones, no deletes.
     assert _rows(state_db) == before
+    assert _missing(state_db) == set()
     qdrant.delete.assert_not_called()
     assert "Deletion phase SKIPPED" in caplog.text
 
-    # The operator re-runs with the flag: the same deletions now go ahead.
+    # The operator re-runs with the flag: the two vanished files are tombstoned, not deleted.
     assert sync_module.sync(config, state_db, _args(allow_mass_delete=True)) == 0
-    assert set(_rows(state_db)) == set(paths[2:])
-    deleted = sorted(call.kwargs["points_selector"].filter.must[0].match.value for call in qdrant.delete.call_args_list)
-    assert deleted == sorted(paths[:2])
+    assert set(_rows(state_db)) == set(paths)
+    assert _missing(state_db) == set(paths[:2])
+    qdrant.delete.assert_not_called()
 
 
 def test_deletion_at_exactly_the_limit_is_allowed(sync_module, state_db, qdrant, tmp_path) -> None:
-    """The guard is strictly greater-than: 1 of 10 at a 10% limit goes ahead."""
+    """The guard is strictly greater-than: 1 of 10 at a 10% limit is tombstoned."""
     root = tmp_path / "nas"
     paths = _make_files(root, 10)
     config = _config(root, max_delete_fraction=0.10)
@@ -221,11 +244,13 @@ def test_deletion_at_exactly_the_limit_is_allowed(sync_module, state_db, qdrant,
     os.remove(paths[0])
 
     assert sync_module.sync(config, state_db, _args()) == 0
-    assert str(paths[0]) not in _rows(state_db)
-    assert qdrant.delete.call_count == 1
+    assert _missing(state_db) == {str(paths[0])}
+    assert str(paths[0]) in _rows(state_db)
+    qdrant.delete.assert_not_called()
 
 
-def test_every_qdrant_delete_waits_for_confirmation(sync_module, state_db, qdrant, tmp_path) -> None:
+def test_vanished_file_is_purged_only_after_the_grace_period(sync_module, state_db, qdrant, tmp_path) -> None:
+    """Tombstone on the first sync (points kept). Purge with a wait=True delete once 24 h have passed."""
     root = tmp_path / "nas"
     paths = _make_files(root, 4)
     config = _config(root, max_delete_fraction=1.0)
@@ -233,9 +258,44 @@ def test_every_qdrant_delete_waits_for_confirmation(sync_module, state_db, qdran
 
     os.remove(paths[0])
     assert sync_module.sync(config, state_db, _args()) == 0
+    assert _missing(state_db) == {str(paths[0])}
+    qdrant.delete.assert_not_called()
+
+    # Still inside the grace period on an immediate re-sync: nothing is purged.
+    assert sync_module.sync(config, state_db, _args()) == 0
+    qdrant.delete.assert_not_called()
+    assert str(paths[0]) in _rows(state_db)
+
+    # 25 h later, the next sync purges the points and then the row.
+    _age_tombstones(state_db, hours=25)
+    assert sync_module.sync(config, state_db, _args()) == 0
 
     assert qdrant.delete.call_count == 1
     assert qdrant.delete.call_args.kwargs["wait"] is True
+    assert qdrant.delete.call_args.kwargs["points_selector"].filter.must[0].match.value == str(paths[0])
+    assert str(paths[0]) not in _rows(state_db)
+
+
+def test_moved_file_keeps_its_points_and_is_rekeyed_on_disk(sync_module, state_db, qdrant, tmp_path) -> None:
+    """A real rename on disk: the old key's points are re-keyed, nothing is deleted, nothing re-queued."""
+    root = tmp_path / "nas"
+    paths = _make_files(root, 3)
+    config = _config(root, max_delete_fraction=1.0)
+    _first_sync_completed(sync_module, state_db, config, qdrant)
+
+    old = paths[0]
+    new = str(root / "moved.md")
+    os.rename(old, new)
+
+    assert sync_module.sync(config, state_db, _args()) == 0
+
+    rows = _rows(state_db)
+    assert old not in rows
+    assert rows[new] == "completed"
+    qdrant.delete.assert_not_called()
+    assert [call.kwargs["payload"] for call in qdrant.set_payload.call_args_list] == [{"source_path": new}]
+    filter_value = qdrant.set_payload.call_args.kwargs["points"].must[0].match.value
+    assert filter_value == old
 
 
 def test_deletion_log_states_reason(sync_module, state_db, qdrant, tmp_path, caplog) -> None:
@@ -270,9 +330,11 @@ def test_user_sync_leaves_other_owners_rows_alone(sync_module, state_db, qdrant,
     os.remove(paths[0])
     assert sync_module.sync(config, state_db, _args()) == 0
 
+    # This user's vanished file is tombstoned. The other owner's row is neither tombstoned nor purged.
     rows = _rows(state_db)
     assert rows[shared_path] == "completed"
-    assert str(paths[0]) not in rows
+    assert _missing(state_db) == {str(paths[0])}
+    assert str(paths[0]) in rows
 
 
 def test_find_deleted_scopes_to_owners(state_db) -> None:
@@ -305,3 +367,40 @@ def test_count_with_prefix_counts_rows_under_the_prefix_only(state_db) -> None:
 
     assert state_db.count_with_prefix("/nas/a/") == 2
     assert state_db.count_with_prefix("/nas/x/") == 0
+
+
+# ----------------------------------------------------------------------------
+# Dry run: prints the plan, takes no lock, writes nothing to the live database
+# ----------------------------------------------------------------------------
+
+
+def test_dry_run_prints_the_plan_and_writes_nothing(sync_module, state_db, qdrant, tmp_path, monkeypatch, capsys) -> None:
+    root = tmp_path / "nas"
+    paths = _make_files(root, 3)
+    config = _config(root, max_delete_fraction=1.0)
+    _first_sync_completed(sync_module, state_db, config, qdrant)
+    live_db = str(tmp_path / "state" / "rag_state.db")
+
+    # The sync would now tombstone one file and queue a new one. The dry run must show
+    # the tombstone and must not leave the new file queued in the live database.
+    os.remove(paths[0])
+    new_file = root / "brand-new.md"
+    new_file.write_text("brand new", encoding="utf-8")
+    before = _rows(state_db)
+    before_missing = _missing(state_db)
+
+    # A dry run neither takes the lock nor builds a Qdrant client.
+    monkeypatch.setattr(sync_module, "acquire_or_exit", lambda *a, **k: pytest.fail("dry run took the lock"))
+    monkeypatch.setattr(sync_module, "get_client", lambda *a, **k: pytest.fail("dry run built a Qdrant client"))
+
+    exit_code = sync_module.run_dry_run(config, live_db, _args(dry_run=True))
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Sync plan" in output
+    assert f"{paths[0]}  (file missing on disk)" in output
+    assert str(new_file) not in _rows(state_db)
+    assert _rows(state_db) == before
+    assert _missing(state_db) == before_missing
+    qdrant.set_payload.assert_not_called()
+    qdrant.delete.assert_not_called()

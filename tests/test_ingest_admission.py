@@ -204,7 +204,9 @@ class TestAdmission:
         # Assert: the file reached chunking and was not rejected by the ratio check.
         select.assert_called_once()
         state_db.mark_ignored.assert_not_called()
-        state_db.mark_completed.assert_called_once_with(str(file_path), chunk_count=0, pipeline_version="p1")
+        state_db.mark_completed.assert_called_once_with(
+            str(file_path), chunk_count=0, pipeline_version="p1", project_id=GLOBAL_PROJECT_ID,
+        )
 
     def test_chunk_cap_rejects_before_embedding(self, monkeypatch, tmp_path, _no_live_services):
         # Arrange: three chunks against a cap of one.
@@ -473,3 +475,141 @@ class TestPlainJsonlOutsideClaudeLayout:
 
         state_db.mark_failed.assert_not_called()
         state_db.mark_completed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Project attachment: project_id on every point and in mark_completed
+# ---------------------------------------------------------------------------
+
+def _real_state_db(tmp_path, projects: dict[str, str]) -> StateDB:
+    """
+    Return a real StateDB in tmp_path with the given {project_id: path} rows registered.
+
+    The 'global' row is seeded by the schema migrations, so it is present as well,
+    which exercises the path-less row being skipped during matching.
+    """
+    state_db = StateDB(str(tmp_path / "rag_state.db"))
+    for project_id, project_path in projects.items():
+        state_db.upsert_project(
+            project_id, project_path, project_id, None, "tester", True, None,
+        )
+    # Spy on mark_completed while keeping the real behaviour.
+    state_db.mark_completed = MagicMock(wraps=state_db.mark_completed)
+    return state_db
+
+
+def _ingest_with_points(file_path, state_db, origin_path=None):
+    """Run ingest_file with a fake embedding and return the Qdrant mock that received the points."""
+    qdrant_client = MagicMock()
+    asyncio.run(
+        ingest.ingest_file(
+            file_path=str(file_path),
+            origin_path=str(origin_path) if origin_path else None,
+            owner="tester",
+            rag_cfg={},
+            state_db=state_db,
+            qdrant_client=qdrant_client,
+        )
+    )
+    return qdrant_client
+
+
+def _all_points(qdrant_client) -> list:
+    return [p for call in qdrant_client.upsert.call_args_list for p in call.kwargs["points"]]
+
+
+class TestProjectAttachment:
+    """Each item gets the id of the registered project its path (or launch_dir) sits under."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_embeddings(self, _no_live_services, monkeypatch):
+        # Real embeddings are replaced by one dummy vector per chunk; no sparse vectors.
+        _no_live_services.side_effect = _one_vector_per_text
+        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
+
+    def test_nas_file_under_registered_project_gets_its_id(self, tmp_path):
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        file_path = project_dir / "notes" / "plan.md"
+        file_path.parent.mkdir()
+        file_path.write_text("Quarterly plan for the backup rotation.", encoding="utf-8")
+        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+
+        qdrant_client = _ingest_with_points(file_path, state_db)
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_PROJECT_ID] == "alpha" for p in points)
+        assert state_db.mark_completed.call_args.kwargs["project_id"] == "alpha"
+
+    def test_nas_file_outside_every_project_gets_global(self, tmp_path):
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        file_path = tmp_path / "elsewhere" / "plan.md"
+        file_path.parent.mkdir()
+        file_path.write_text("Unrelated notes.", encoding="utf-8")
+        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+
+        qdrant_client = _ingest_with_points(file_path, state_db)
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
+        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
+
+    def test_claude_session_launched_under_project_gets_its_id(self, tmp_path):
+        project_dir = tmp_path / "proj"
+        launch_dir = project_dir / "sub"
+        transcript = _write_claude_transcript(
+            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(launch_dir),
+        )
+        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+
+        qdrant_client = _ingest_with_points(
+            "claude-session://abc", state_db, origin_path=transcript,
+        )
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_PROJECT_ID] == "alpha" for p in points)
+        kwargs = state_db.mark_completed.call_args.kwargs
+        assert kwargs["project_id"] == "alpha"
+        # launch_dir still goes to SQLite verbatim, and never into the payload.
+        assert kwargs["launch_dir"] == str(launch_dir)
+
+    def test_claude_session_with_no_launch_dir_gets_global(self, tmp_path):
+        # An empty cwd gives launch_dir None, which must attach to global, not match anything.
+        transcript = _write_claude_transcript(
+            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="",
+        )
+        state_db = _real_state_db(tmp_path, {"alpha": str(tmp_path)})
+
+        qdrant_client = _ingest_with_points(
+            "claude-session://abc", state_db, origin_path=transcript,
+        )
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
+        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
+
+    def test_symlinked_launch_path_does_not_attach(self, tmp_path):
+        # The project is registered at the real directory. The session was launched
+        # through a symlink to it. Matching is verbatim, so the session stays global.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link_dir = tmp_path / "link"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        transcript = _write_claude_transcript(
+            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(link_dir / "sub"),
+        )
+        state_db = _real_state_db(tmp_path, {"alpha": str(real_dir)})
+
+        qdrant_client = _ingest_with_points(
+            "claude-session://abc", state_db, origin_path=transcript,
+        )
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
+        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID

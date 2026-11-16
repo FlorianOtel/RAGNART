@@ -31,10 +31,6 @@ BATCH="${RAG_BATCH:-20}"
 SNAPSHOT_MIN_AGE_H="${RAG_SNAPSHOT_MIN_AGE_H:-20}"
 SNAPSHOT_KEEP=7   # NAS retention: 7 daily restore pairs (~150 GB)
 
-# Users to sync — add entries here to run rag_sync_nfs.py for additional users.
-# Each user is synced sequentially before the ingestion daemon starts.
-RAG_SYNC_USERS=("florian")
-
 mkdir -p "$(dirname "$LOGFILE")"
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  $*" | tee -a "$LOGFILE"; }
 
@@ -68,19 +64,18 @@ log "=== RAG ingestion starting  workers=$WORKERS  batch=$BATCH ==="
 # the first non-zero code otherwise.
 SYNC_RC=0
 
-for user in "${RAG_SYNC_USERS[@]}"; do
-    log "--- rag_sync_nfs.py --user $user ---"
-    # `|| rc=$?` stops set -e from aborting on a failing sync. pipefail makes the
-    # pipeline's status the sync's own exit code, not the exit code of tee.
-    rc=0
-    python utils/rag_sync_nfs.py --user "$user" 2>&1 | tee -a "$LOGFILE" || rc=$?
-    if (( rc != 0 )); then
-        log "WARN: sync exited $rc — deletions not applied; see log above"
-        if (( SYNC_RC == 0 )); then
-            SYNC_RC=$rc
-        fi
+# One sync call scans every configured root (La-Familia included), so no per-user loop.
+log "--- rag_sync_nfs.py ---"
+# `|| rc=$?` stops set -e from aborting on a failing sync. pipefail makes the
+# pipeline's status the sync's own exit code, not the exit code of tee.
+rc=0
+python utils/rag_sync_nfs.py 2>&1 | tee -a "$LOGFILE" || rc=$?
+if (( rc != 0 )); then
+    log "WARN: sync exited $rc — deletions not applied; see log above"
+    if (( SYNC_RC == 0 )); then
+        SYNC_RC=$rc
     fi
-done
+fi
 
 log "--- rag_ingest_daemon.py ---"
 # The run script already holds the ingestion lock (see the header), so the daemon

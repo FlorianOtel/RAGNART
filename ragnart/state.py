@@ -221,15 +221,20 @@ class StateDB:
         origin_path: str | None = None,
         source_type: str | None = None,
         file_type: str | None = None,
+        size_bytes: int | None = None,
+        content_hash: str | None = None,
+        hashed_at: str | None = None,
     ) -> None:
         """
         Register a newly discovered file or re-queue it for ingestion.
 
-        The identity fields (origin_path, source_type, file_type) and first_seen_at
-        are written only on insert: they are set once, at discovery. The update
-        branches below leave them alone.
+        The identity fields (origin_path, source_type, file_type), the optional
+        size_bytes/content_hash/hashed_at, and first_seen_at are written only on
+        insert: they are set once, at discovery. The update branches below leave
+        them alone. The hash is computed by the scanner for new rows only, so a
+        later call with different hash values never changes the stored ones.
 
-        - New file:    inserted as 'pending' with the identity fields and first_seen_at = now.
+        - New file:    inserted as 'pending' with the identity fields, hash fields and first_seen_at = now.
         - Winner moved: a given origin_path that differs from the stored one (a different
                        copy of the same claude-session key now wins the scan) → origin_path
                        is updated and the row reset to 'pending', with last_modified set to
@@ -263,9 +268,13 @@ class StateDB:
         if row is None:
             self._conn.execute(
                 "INSERT INTO ingestion_queue "
-                "(file_path, owner, last_modified, status, origin_path, source_type, file_type, first_seen_at) "
-                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
-                (file_path, owner, last_modified, origin_path, source_type, file_type, _now()),
+                "(file_path, owner, last_modified, status, origin_path, source_type, file_type, "
+                " size_bytes, content_hash, hashed_at, first_seen_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    file_path, owner, last_modified, origin_path, source_type, file_type,
+                    size_bytes, content_hash, hashed_at, _now(),
+                ),
             )
         elif origin_changed:
             # A different copy of the same key now wins. Its own mtime is stored, and the row
@@ -418,6 +427,258 @@ class StateDB:
         return completed_gone
 
     # ------------------------------------------------------------------
+    # Sync support: existence checks, projects, attachment, moves, tombstones.
+    #
+    # These methods are called by the sync planner (ragnart/sync_plan.py). They
+    # only read or write SQLite. Qdrant work stays in the caller.
+
+    def row_exists(self, file_path: str) -> bool:
+        """Return True if a queue row exists for file_path (any status). Cheap primary-key lookup."""
+        row = self._conn.execute(
+            "SELECT 1 FROM ingestion_queue WHERE file_path = ? LIMIT 1",
+            (file_path,),
+        ).fetchone()
+        return row is not None
+
+    def upsert_project(
+        self,
+        project_id: str,
+        path: str | None,
+        name: str | None,
+        parent: str | None,
+        owner: str | None,
+        inherit_access: bool,
+        mode: str | None,
+    ) -> None:
+        """
+        Insert a ragnart project, or update the existing row with the same id.
+
+        inherit_access is stored as 0/1, the column's INTEGER form. Never call this
+        for the reserved 'global' id: its row is seeded by migration 2 and is not
+        a marker project.
+        """
+        self._conn.execute(
+            "INSERT INTO projects (id, path, name, parent, owner, inherit_access, mode) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "    path = excluded.path, name = excluded.name, parent = excluded.parent, "
+            "    owner = excluded.owner, inherit_access = excluded.inherit_access, "
+            "    mode = excluded.mode",
+            (project_id, path, name, parent, owner, int(inherit_access), mode),
+        )
+        self._conn.commit()
+
+    def replace_project_tags(self, project_id: str, tags: dict[str, str]) -> None:
+        """
+        Replace the whole tag set of one project with `tags`.
+
+        Deletes every existing tag for the project, then inserts the new set, in one
+        transaction. A tag removed from the marker file therefore disappears here too.
+        """
+        self._conn.execute("DELETE FROM project_tags WHERE project_id = ?", (project_id,))
+        self._conn.executemany(
+            "INSERT INTO project_tags (project_id, key, value) VALUES (?, ?, ?)",
+            [(project_id, key, value) for key, value in tags.items()],
+        )
+        self._conn.commit()
+
+    def list_projects(self) -> list[dict]:
+        """
+        Return every row of the projects table, including the reserved 'global' row.
+
+        Each dict has id, path, name, parent, owner, inherit_access (bool) and mode.
+        """
+        cur = self._conn.execute(
+            "SELECT id, path, name, parent, owner, inherit_access, mode "
+            "FROM projects ORDER BY id"
+        )
+        return [
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "name": row["name"],
+                "parent": row["parent"],
+                "owner": row["owner"],
+                "inherit_access": bool(row["inherit_access"]),
+                "mode": row["mode"],
+            }
+            for row in cur.fetchall()
+        ]
+
+    def project_tags(self, project_id: str) -> dict[str, str]:
+        """Return the tag set of one project as a {key: value} dict. Empty dict if it has none."""
+        cur = self._conn.execute(
+            "SELECT key, value FROM project_tags WHERE project_id = ? ORDER BY key",
+            (project_id,),
+        )
+        return {row["key"]: row["value"] for row in cur.fetchall()}
+
+    def set_project_id(self, file_path: str, project_id: str) -> None:
+        """Set the project_id of one queue row. Called after the matching Qdrant payload is updated."""
+        self._conn.execute(
+            "UPDATE ingestion_queue SET project_id = ? WHERE file_path = ?",
+            (project_id, file_path),
+        )
+        self._conn.commit()
+
+    def rows_for_attachment(self) -> list[dict]:
+        """
+        Return the fields the planner needs to re-evaluate project attachment.
+
+        Only status='completed' rows are returned: a pending row has no Qdrant
+        points yet, so there is nothing to re-attach. Each dict has file_path,
+        project_id, source_type and launch_dir (NULL for files).
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, project_id, source_type, launch_dir "
+            "FROM ingestion_queue WHERE status = 'completed' ORDER BY file_path"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def mark_missing(self, file_path: str, when: str) -> None:
+        """
+        Tombstone a vanished row by setting missing_since to `when`.
+
+        Only rows with no missing_since yet are updated. A row that is still
+        missing on a later sync keeps its first timestamp, so the 24h grace is
+        measured from the first time the file was seen missing.
+        """
+        self._conn.execute(
+            "UPDATE ingestion_queue SET missing_since = ? "
+            "WHERE file_path = ? AND missing_since IS NULL",
+            (when, file_path),
+        )
+        self._conn.commit()
+
+    def clear_missing(self, file_path: str) -> None:
+        """Clear the tombstone of a row that has reappeared on disk."""
+        self._conn.execute(
+            "UPDATE ingestion_queue SET missing_since = NULL "
+            "WHERE file_path = ? AND missing_since IS NOT NULL",
+            (file_path,),
+        )
+        self._conn.commit()
+
+    def rows_missing_since_before(self, cutoff_iso: str) -> list[str]:
+        """
+        Return the paths of tombstoned rows whose missing_since is strictly before cutoff_iso.
+
+        Both sides are ISO-8601 strings written with the same format, so the string
+        comparison orders them in time.
+        """
+        cur = self._conn.execute(
+            "SELECT file_path FROM ingestion_queue "
+            "WHERE missing_since IS NOT NULL AND missing_since < ? ORDER BY file_path",
+            (cutoff_iso,),
+        )
+        return [row["file_path"] for row in cur.fetchall()]
+
+    def rename_key(
+        self,
+        old_path: str,
+        new_path: str,
+        last_modified: float,
+        origin_path: str | None,
+    ) -> None:
+        """
+        Rewrite a queue row's key after a move, keeping its status and chunk_count.
+
+        The caller must already have removed any row at new_path (the scan's pending
+        row). Otherwise the primary-key UPDATE fails. Nothing is re-embedded: the
+        content is unchanged, only the path moved.
+        """
+        self._conn.execute(
+            "UPDATE ingestion_queue SET file_path = ?, origin_path = ?, last_modified = ? "
+            "WHERE file_path = ?",
+            (new_path, origin_path, last_modified, old_path),
+        )
+        self._conn.commit()
+
+    def rename_source_links(self, old_path: str, new_path: str) -> None:
+        """
+        Move every source_links row from old_path to new_path.
+
+        OR REPLACE handles a project that already links new_path: the old row is
+        rewritten onto the same (project_id, new_path) key, so the link survives once.
+        """
+        self._conn.execute(
+            "UPDATE OR REPLACE source_links SET source_path = ? WHERE source_path = ?",
+            (new_path, old_path),
+        )
+        self._conn.commit()
+
+    def completed_rows_with_content_hash(self) -> dict[str, str]:
+        """
+        Return {file_path: content_hash} for completed rows that have a usable hash.
+
+        NULL and empty hashes are excluded: they cannot identify content, so they
+        must never match a moved file. This is a full read of the queue and is only
+        run once per sync.
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, content_hash FROM ingestion_queue "
+            "WHERE status = 'completed' AND content_hash IS NOT NULL AND content_hash != ''"
+        )
+        return {row["file_path"]: row["content_hash"] for row in cur.fetchall()}
+
+    def delete_pending_row(self, file_path: str) -> float | None:
+        """
+        Delete the pending row at file_path and return its last_modified.
+
+        Used by a move: the scan queued the new path as a pending row, and the moved
+        item's completed row takes its place. Returns None, and deletes nothing, when
+        there is no pending row at file_path.
+        """
+        row = self._conn.execute(
+            "SELECT last_modified FROM ingestion_queue WHERE file_path = ? AND status = 'pending'",
+            (file_path,),
+        ).fetchone()
+        if row is None:
+            return None
+        self._conn.execute(
+            "DELETE FROM ingestion_queue WHERE file_path = ? AND status = 'pending'",
+            (file_path,),
+        )
+        self._conn.commit()
+        return float(row["last_modified"])
+
+    def tombstoned_rows(self) -> dict[str, dict]:
+        """
+        Return every tombstoned row (missing_since set) as {file_path: details}.
+
+        Each details dict has owner, missing_since and chunk_count. The sync planner reads
+        it for the purge log line and to tell already-tombstoned rows from newly vanished ones.
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, owner, missing_since, chunk_count FROM ingestion_queue "
+            "WHERE missing_since IS NOT NULL"
+        )
+        return {
+            row["file_path"]: {
+                "owner": row["owner"],
+                "missing_since": row["missing_since"],
+                "chunk_count": row["chunk_count"],
+            }
+            for row in cur.fetchall()
+        }
+
+    def remove_project(self, project_id: str) -> None:
+        """
+        Delete a project row and every row keyed on it: tags, project links and source links.
+
+        Items attached to the project are not touched here. The sync planner re-attaches
+        them in the same run. Never call this for the reserved 'global' id.
+        """
+        self._conn.execute("DELETE FROM project_tags WHERE project_id = ?", (project_id,))
+        self._conn.execute(
+            "DELETE FROM project_links WHERE project_id = ? OR linked_project_id = ?",
+            (project_id, project_id),
+        )
+        self._conn.execute("DELETE FROM source_links WHERE project_id = ?", (project_id,))
+        self._conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
     # Worker state transitions
 
     def fetch_pending(self, limit: int = 10, owner: str | None = None) -> list[str]:
@@ -497,6 +758,7 @@ class StateDB:
         hashed_at: str | None = None,
         completed_at: str | None = None,
         launch_dir: str | None = None,
+        project_id: str | None = None,
     ) -> None:
         """
         Transition processing → completed; record completion timestamp.
@@ -517,6 +779,7 @@ class StateDB:
             "content_hash": content_hash,
             "hashed_at": hashed_at,
             "launch_dir": launch_dir,
+            "project_id": project_id,
         }
         set_clauses = [
             "status = 'completed'",

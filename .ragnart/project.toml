@@ -1,0 +1,7 @@
+# ragnart project marker (docs/RAGNART-design.md §4.5).
+# Hand-written because `ragnart init` is v0.3; `id` is immutable, never edit it.
+name = "RAGNART"
+id = "2b29e12b-01cb-43e7-bc7b-8abb2f092eae"
+mode = "crawl"
+grounding = "open"
+capture = false
