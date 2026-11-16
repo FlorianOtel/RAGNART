@@ -24,7 +24,9 @@ def _get(url: str, timeout: int) -> dict:
 
 def phase1_retrieval(args) -> bool:
     """GET /v1/search and optionally assert --expect substring."""
-    params: dict = {"q": args.query, "top_k": args.top_k}
+    # `scope` is required on GET /v1/search (no default). `all` searches every
+    # ragnart project and the global scope, which is what this smoke test needs.
+    params: dict = {"q": args.query, "top_k": args.top_k, "scope": "all"}
     if args.user and not args.no_filter:
         params["user"] = args.user
     if args.file_type:

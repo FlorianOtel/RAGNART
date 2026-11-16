@@ -74,6 +74,10 @@ DEFAULT_NEW_URL = "http://192.168.1.95:8100/v1/search"      # RAGNART (new)
 DEFAULT_USER = "florian"
 DEFAULT_TOP_K = 5
 
+# Scope sent with every RAGNART GET /v1/search request. `all` covers every ragnart
+# project and the global scope; the endpoint rejects a request without a scope (HTTP 422).
+SEARCH_SCOPE = "all"
+
 # Reranked calls can be slow (cross-encoder over the candidate pool), so the
 # timeout is generous compared with a plain Qdrant query.
 TIMEOUT_SECONDS = 120
@@ -108,13 +112,22 @@ def fetch_results(base_url: str, query: str, user: str, top_k: int, rerank: bool
 
     Both endpoints accept the `rerank` boolean query parameter; it is always sent
     explicitly so the comparison never depends on the server-side config default.
+
+    RAGNART's GET /v1/search requires `scope` (no default; without it the service
+    answers 422), so every request to a `/v1/search` URL carries `scope=all`. The
+    legacy SoHoAI `/v1/rag/search` takes no scope and its request is left unchanged.
+    The rule follows the URL path, not the role (old or new), so the tool also
+    works when both URLs point at RAGNART.
     """
-    params = urllib.parse.urlencode({
+    query_params = {
         "q": query,
         "user": user,
         "top_k": top_k,
         "rerank": "true" if rerank else "false",
-    })
+    }
+    if urllib.parse.urlsplit(base_url).path.endswith("/v1/search"):
+        query_params["scope"] = SEARCH_SCOPE
+    params = urllib.parse.urlencode(query_params)
     url = f"{base_url}?{params}"
     with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as resp:
         body = json.loads(resp.read())
