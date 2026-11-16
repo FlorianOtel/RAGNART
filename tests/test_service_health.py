@@ -5,6 +5,8 @@ No live Qdrant or model is used:
   - get_client() and ensure_collection() are replaced in the service module,
     so the lifespan does not contact Qdrant and does not load any model.
   - httpx.get() is replaced, so /health never makes a real HTTP call.
+  - The lifespan opens the queue database read-only; an empty tmp StateDB is
+    used instead of the NAS database (see the `service_state_db` fixture).
 """
 
 from __future__ import annotations
@@ -29,6 +31,12 @@ def qdrant_client(monkeypatch):
     client = MagicMock(name="qdrant_client")
     monkeypatch.setattr(service, "get_client", lambda url, timeout=60: client)
     return client
+
+
+@pytest.fixture(autouse=True)
+def _queue_db(service_state_db):
+    """Every test here starts the service, whose lifespan opens the queue DB; use a tmp one."""
+    return service_state_db
 
 
 @pytest.fixture
@@ -181,7 +189,7 @@ def test_search_returns_503_when_qdrant_is_unreachable(qdrant_client, ensure_ok,
     # qdrant_client wraps a refused connection (or timeout) in ResponseHandlingException.
     fake_search.error = ResponseHandlingException(httpx.ConnectError("connection refused"))
     with TestClient(service.app) as client:
-        response = client.get("/v1/search", params={"q": "hello"})
+        response = client.get("/v1/search", params={"q": "hello", "scope": "all"})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Qdrant unavailable"}
@@ -190,7 +198,7 @@ def test_search_returns_503_when_qdrant_is_unreachable(qdrant_client, ensure_ok,
 def test_search_returns_503_when_qdrant_answers_5xx(qdrant_client, ensure_ok, fake_search):
     fake_search.error = _qdrant_http_error(503)
     with TestClient(service.app) as client:
-        response = client.get("/v1/search", params={"q": "hello"})
+        response = client.get("/v1/search", params={"q": "hello", "scope": "all"})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Qdrant unavailable"}
@@ -201,7 +209,7 @@ def test_search_passes_qdrant_4xx_through(qdrant_client, ensure_ok, fake_search)
     fake_search.error = _qdrant_http_error(400)
     with TestClient(service.app) as client:
         with pytest.raises(UnexpectedResponse):
-            client.get("/v1/search", params={"q": "hello"})
+            client.get("/v1/search", params={"q": "hello", "scope": "all"})
 
 
 def test_search_does_not_blame_qdrant_for_embedder_errors(qdrant_client, ensure_ok, fake_search):
@@ -210,18 +218,19 @@ def test_search_does_not_blame_qdrant_for_embedder_errors(qdrant_client, ensure_
     fake_search.error = httpx.ConnectError("ollama down")
     with TestClient(service.app) as client:
         with pytest.raises(httpx.ConnectError):
-            client.get("/v1/search", params={"q": "hello"})
+            client.get("/v1/search", params={"q": "hello", "scope": "all"})
 
 
 def test_search_success_still_returns_results(qdrant_client, ensure_ok, fake_search):
     with TestClient(service.app) as client:
-        response = client.get("/v1/search", params={"q": "hello"})
+        response = client.get("/v1/search", params={"q": "hello", "scope": "all"})
 
     assert response.status_code == 200
     # max_hits_per_source is echoed with the config default (ragnart.yaml: 3).
     assert response.json() == {
         "query": "hello",
         "user": None,
+        "scope": {"all": True, "global": True, "projects": []},
         "max_hits_per_source": 3,
         "results": [],
     }
@@ -231,9 +240,9 @@ def test_search_echoes_max_hits_per_source_default_and_override(qdrant_client, e
     # Without the parameter the echoed value is the ragnart.yaml default (3).
     # With ?max_hits_per_source=7 the request value wins and is echoed back.
     with TestClient(service.app) as client:
-        default_body = client.get("/v1/search", params={"q": "hello"}).json()
+        default_body = client.get("/v1/search", params={"q": "hello", "scope": "all"}).json()
         override_body = client.get(
-            "/v1/search", params={"q": "hello", "max_hits_per_source": 7}
+            "/v1/search", params={"q": "hello", "scope": "all", "max_hits_per_source": 7}
         ).json()
 
     assert default_body["max_hits_per_source"] == 3

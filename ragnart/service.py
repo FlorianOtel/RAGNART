@@ -21,8 +21,12 @@ from fastapi import FastAPI, HTTPException, Query
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from ragnart import search_rag
+from ragnart.cli import FatalError, open_queue_read_only
 from ragnart.collection import ensure_collection, get_client
+from ragnart.schema import GLOBAL_PROJECT_ID
+from ragnart.scope import ScopeError, resolve_scope
 from ragnart.search import resolve_max_hits_per_source
+from ragnart.state import StateDB
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,8 +47,34 @@ _DEFAULT_QDRANT_URL = "http://192.168.1.93:6333"
 # client timeout used by the qdrant_client calls.
 _HEALTH_TIMEOUT_S = 2.0
 
+# The owner value that every search also includes (shared La-Familia content).
+_SHARED_OWNER = "la-familia"
+
 with open(_CONFIG_PATH) as f:
     _config = yaml.safe_load(f)
+
+
+def _open_state_db() -> StateDB | None:
+    """
+    Open the queue database read-only for scope resolution and /v1/projects.
+
+    A missing or unreadable database is logged loudly and returns None, so the
+    service still starts (the same tolerance as Qdrant). The scope-dependent
+    endpoints then answer 503 instead of guessing a scope.
+    """
+    try:
+        return open_queue_read_only(_config)
+    except FatalError as exc:
+        logger.warning("Queue database unavailable at startup — scope endpoints will answer 503: %s", exc)
+        return None
+
+
+def _require_state_db() -> StateDB:
+    """Return the startup-opened StateDB, or answer 503 when it could not be opened."""
+    state_db = app.state.state_db
+    if state_db is None:
+        raise HTTPException(status_code=503, detail="Queue database unavailable")
+    return state_db
 
 
 @asynccontextmanager
@@ -68,8 +98,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Qdrant unavailable at startup — collection not verified: %s", exc)
 
+    # One read-only StateDB for the whole process, opened here with the same
+    # lifecycle as qdrant_client. Reads are cheap local SQLite queries, so no
+    # per-request connection is made. Every handler runs on the event loop
+    # thread, which is why check_same_thread=False is safe. The connection is
+    # read-only and holds no write lock. In WAL mode each read statement sees
+    # the latest committed data, so changes the sync process commits show up
+    # on the next request.
+    app.state.state_db = _open_state_db()
+
     yield
 
+    if app.state.state_db is not None:
+        app.state.state_db.close()
     logger.info("RAGNART search service shut down cleanly.")
 
 
@@ -84,6 +125,11 @@ app = FastAPI(
 @app.get("/v1/search")
 async def search(
     q: str,
+    # Required on purpose: there is no server-side default. A missing scope is
+    # answered with HTTP 422 by FastAPI before this handler runs. Repeated values
+    # are unioned (see ragnart/scope.py).
+    scope: list[str] = Query(...,
+                             description="Required. 'all', '<path>', '<path>/', or 'tag:<key>=<value>'; repeatable"),
     user: str | None = Query(None),
     top_k: int = Query(5, ge=1, le=100),
     file_types: list[str] | None = Query(None),
@@ -101,6 +147,14 @@ async def search(
     # Resolve the cap here, not only inside search_rag(), so the value echoed in the
     # response is exactly the value that was applied.
     effective_cap = resolve_max_hits_per_source(max_hits_per_source, app.state.rag_cfg)
+
+    # Resolve the scope before any embedding or Qdrant call, so a bad scope fails
+    # fast. The echo says exactly which projects were searched.
+    try:
+        project_filter, scope_echo = resolve_scope(scope, _require_state_db())
+    except ScopeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     try:
         results = await search_rag(
             query=q,
@@ -112,6 +166,7 @@ async def search(
             score_threshold=score_threshold,
             rerank=rerank,
             max_hits_per_source=effective_cap,
+            project_filter=project_filter,
         )
     except ResponseHandlingException as exc:
         # qdrant_client wraps every transport failure raised by its HTTP layer
@@ -132,7 +187,51 @@ async def search(
         "RAG search: q=%r user=%s top_k=%d score_threshold=%.2f rerank=%s → %d result(s)",
         q, user, top_k, score_threshold, rerank, len(results),
     )
-    return {"query": q, "user": user, "max_hits_per_source": effective_cap, "results": results}
+    return {
+        "query": q,
+        "user": user,
+        "scope": scope_echo,
+        "max_hits_per_source": effective_cap,
+        "results": results,
+    }
+
+
+@app.get("/v1/projects")
+async def projects(user: str | None = Query(None)):
+    """
+    List the RAGNART projects plus the reserved `global` row.
+
+    Each entry has id, path, name, parent, owner, mode, tags and item_count.
+    `global` has no path and is always listed. Other projects are listed only
+    when their owner is `user` or `la-familia`; with no `user`, every project is
+    listed. Order: `global` first, then by path.
+    """
+    state_db = _require_state_db()
+    item_counts = state_db.item_counts_by_project()
+
+    visible = [
+        p for p in state_db.list_projects()
+        if user is None
+        or p["id"] == GLOBAL_PROJECT_ID
+        or p["owner"] in (user, _SHARED_OWNER)
+    ]
+    visible.sort(key=lambda p: (p["id"] != GLOBAL_PROJECT_ID, p["path"] or ""))
+
+    return {
+        "projects": [
+            {
+                "id": p["id"],
+                "path": p["path"],
+                "name": p["name"],
+                "parent": p["parent"],
+                "owner": p["owner"],
+                "mode": p["mode"],
+                "tags": state_db.project_tags(p["id"]),
+                "item_count": item_counts.get(p["id"], 0),
+            }
+            for p in visible
+        ]
+    }
 
 
 def _qdrant_healthy(qdrant_url: str) -> bool:

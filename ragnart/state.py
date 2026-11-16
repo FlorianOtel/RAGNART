@@ -513,6 +513,33 @@ class StateDB:
         )
         return {row["key"]: row["value"] for row in cur.fetchall()}
 
+    def project_ids_by_tag(self, key: str, value: str) -> list[str]:
+        """
+        Return the ids of every ragnart project whose tag `key` equals `value`.
+
+        The result is sorted and empty when no project carries that exact tag.
+        Used by scope resolution for `tag:<key>=<value>` terms.
+        """
+        cur = self._conn.execute(
+            "SELECT project_id FROM project_tags WHERE key = ? AND value = ? ORDER BY project_id",
+            (key, value),
+        )
+        return [row["project_id"] for row in cur.fetchall()]
+
+    def item_counts_by_project(self) -> dict[str, int]:
+        """
+        Return the number of completed queue items per project_id.
+
+        Only status='completed' rows are counted, because only those have Qdrant
+        points. A project with no completed items is absent from the dict; callers
+        should treat a missing key as 0.
+        """
+        cur = self._conn.execute(
+            "SELECT project_id, COUNT(*) AS item_count FROM ingestion_queue "
+            "WHERE status = 'completed' GROUP BY project_id"
+        )
+        return {row["project_id"]: row["item_count"] for row in cur.fetchall()}
+
     def set_project_id(self, file_path: str, project_id: str) -> None:
         """Set the project_id of one queue row. Called after the matching Qdrant payload is updated."""
         self._conn.execute(

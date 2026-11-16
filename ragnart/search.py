@@ -23,8 +23,10 @@ from qdrant_client.models import (
 
 from .collection import DOCUMENTS_COLLECTION, collection_has_sparse, ensure_collection
 from .embeddings import embed_sparse, embed_text
+from .moves import EMPTY_FILE_MD5
 from .rerank import rerank as _rerank_candidates
 from .schema import (
+    FIELD_CONTENT_HASH,
     FIELD_FILE_NAME,
     FIELD_FILE_TYPE,
     FIELD_OWNER,
@@ -64,6 +66,53 @@ def resolve_max_hits_per_source(value: int | None, rag_cfg: dict) -> int:
     return rag_cfg.get("search", {}).get("max_hits_per_source", DEFAULT_MAX_HITS_PER_SOURCE)
 
 
+def _collapse_by_content_hash(results: list[dict]) -> list[dict]:
+    """
+    Collapse identical copies of a document into one hit that lists every location.
+
+    Walks the list once, in input (rank) order. Every hit gets a "locations" list.
+
+      - A hit with no content_hash (None or "") or with the empty-file MD5 never
+        collapses: it is kept with locations = [its own source_path]. Empty files are
+        all identical, so grouping them would be meaningless.
+      - The first hit with a given content_hash represents its group and is kept.
+      - A later hit with the same hash from a different source_path is an identical
+        copy: it is dropped, and its source_path is appended to the representative's
+        locations (once).
+      - A later hit with the same hash from the SAME source_path is another chunk of
+        the same file, not a copy: it is kept as its own hit. content_hash is per
+        file, so every chunk of one file carries the same hash.
+
+    Input dicts are not mutated; kept hits are shallow copies.
+    """
+    kept: list[dict] = []
+    # content_hash -> the kept hit that represents that group of identical copies.
+    representatives: dict[str, dict] = {}
+    for hit in results:
+        content_hash = hit.get("content_hash")
+        source = hit["source_path"]
+
+        # Empty-file hash and NULL hash never collapse.
+        if not content_hash or content_hash == EMPTY_FILE_MD5:
+            kept.append({**hit, "locations": [source]})
+            continue
+
+        representative = representatives.get(content_hash)
+        if representative is None:
+            # First hit with this hash: it represents the group.
+            representative = {**hit, "locations": [source]}
+            representatives[content_hash] = representative
+            kept.append(representative)
+        elif source == representative["source_path"]:
+            # Another chunk of the representative's own file: not a copy, keep it.
+            kept.append({**hit, "locations": [source]})
+        elif source not in representative["locations"]:
+            # An identical copy from a new location: list it, drop the hit.
+            representative["locations"].append(source)
+        # else: this copy's location is already listed; drop the hit.
+    return kept
+
+
 def _cap_hits_per_source(results: list[dict], max_hits_per_source: int) -> list[dict]:
     """
     Keep at most max_hits_per_source hits for each source_path, in input order.
@@ -94,16 +143,20 @@ async def search_rag(
     rerank_cfg: dict | None = None,
     hybrid: bool | None = None,
     max_hits_per_source: int | None = None,
+    project_filter: Filter | None = None,
 ) -> list[dict]:
     """
     Semantic search over the user's documents + shared (la-familia) content.
 
     Steps:
       1. Embed the query via Ollama (bge-m3); optionally compute sparse vectors (BM25).
-      2. Build a Qdrant filter scoped to user_id + "la-familia".
+      2. Build a Qdrant filter scoped to user_id + "la-familia", ANDed with the
+         optional project_filter and file_types conditions.
       3. query_points() → ranked ScoredPoint list (hybrid RRF or dense-only).
       4. Optionally rerank via cross-encoder.
-      5. Return parent_text (richer context for the LLM) + provenance metadata.
+      5. Collapse identical copies by content_hash (each kept hit lists every location).
+      6. Apply the per-source cap, then the limit slice.
+      7. Return parent_text (richer context for the LLM) + provenance metadata.
 
     If user_id is None (pre-auth / dev mode), no ownership filter is applied
     and all documents are searched.
@@ -120,8 +173,11 @@ async def search_rag(
         rerank:          Enable cross-encoder reranking; None = read from rag_cfg default.
         rerank_cfg:      Rerank config dict; None = read from rag_cfg default.
         hybrid:          Enable hybrid dense+sparse search; None = read from rag_cfg default.
-        max_hits_per_source: Per-source cap applied after rerank and before the limit
+        max_hits_per_source: Per-source cap applied after collapse and before the limit
                          slice; None = read from rag_cfg default (see resolve_max_hits_per_source).
+        project_filter:  Optional Qdrant Filter for project scoping. Only its `must`
+                         conditions are read; they are ANDed with the owner and file_types
+                         conditions. None = no project scoping.
 
     Returns:
         List of dicts with keys:
@@ -131,6 +187,10 @@ async def search_rag(
           rerank_score    — (optional) cross-encoder relevance score
           file_name       — filename for display
           file_type       — pdf | md | ipynb | etc.
+          content_hash    — MD5 of the source content, or None when the point has none
+          locations       — every source_path this hit stands for: [source_path] alone for
+                            a unique hit; the kept hit's own path followed by the paths of
+                            the identical copies it absorbed
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
@@ -150,7 +210,7 @@ async def search_rag(
     # -- 1. Embed the query ------------------------------------------------
     vector = await embed_text(query, model=model, ollama_url=ollama_url)
 
-    # -- 2. Build filter (ownership + optional file_types) ------------------
+    # -- 2. Build filter (ownership + optional file_types + optional project) ----
     must: list = []
     if user_id:
         must.append(
@@ -166,6 +226,9 @@ async def search_rag(
                 match=MatchAny(any=file_types),
             )
         )
+    # Project scoping is ANDed in: every project condition must hold as well.
+    if project_filter is not None and project_filter.must:
+        must.extend(project_filter.must)
     query_filter: Filter | None = Filter(must=must) if must else None
 
     # -- 3. Search ---------------------------------------------------------
@@ -250,6 +313,7 @@ async def search_rag(
             "file_name":     (hit.payload or {}).get(FIELD_FILE_NAME, ""),
             "file_type":     (hit.payload or {}).get(FIELD_FILE_TYPE, ""),
             "session_title": (hit.payload or {}).get(FIELD_SESSION_TITLE, ""),
+            "content_hash":  (hit.payload or {}).get(FIELD_CONTENT_HASH),
             FIELD_TEXT:      (hit.payload or {}).get(FIELD_TEXT, ""),
         }
         for hit in result.points
@@ -259,11 +323,15 @@ async def search_rag(
     if effective_rerank and results_full:
         results_full = await _rerank_candidates(query, results_full, effective_rerank_cfg)
 
-    # -- 6. Apply per-source cap (after rerank, before the limit slice) ----
+    # -- 6. Collapse identical copies (after rerank, before the per-source cap) ----
+    # Fixed shaping order (docs/RAGNART-design.md §9.1): rerank, collapse, cap, top_k.
+    results_full = _collapse_by_content_hash(results_full)
+
+    # -- 7. Apply per-source cap (after collapse, before the limit slice) ----
     # Runs on the full reranked pool so that the top_k cut is taken from the capped list.
     results_full = _cap_hits_per_source(results_full, effective_max_hits_per_source)
 
-    # -- 7. Slice to limit ----
+    # -- 8. Slice to limit ----
     results = results_full[:limit]
 
     logger.debug(
