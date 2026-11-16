@@ -135,16 +135,17 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | --- | --- |
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
 | **v0.2 — Nested** (done) | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
-| **v0.3 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral |
-| **v0.4 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
-| **v0.5 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
+| **v0.3 — Sources** | Multi-point ingestion: connectors and sources, a central index fed by ingestion hosts through an ingestion API, a central registry of sources and projects, source-qualified search scope |
+| **v0.4 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral |
+| **v0.5 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
+| **v0.6 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
 
 Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md); design: [`docs/RAGNART-design.md`](docs/RAGNART-design.md).
 
 ## Documentation
 
 - [`docs/RAGNART-design.md`](docs/RAGNART-design.md): the design: data model, pipeline, access model, tiers, scope and grounding, open issues
-- [`docs/Implementation-plan.md`](docs/Implementation-plan.md): versioned plan (v0.1 to v0.5), decisions and invariants
+- [`docs/Implementation-plan.md`](docs/Implementation-plan.md): versioned plan (v0.1 to v0.6), decisions and invariants
 - [`docs/RAG-strategy.md`](docs/RAG-strategy.md): design and operation of the RAG pipeline (corpus, chunking, hybrid search, reranking, ingestion, backup and recovery)
 - [`docs/RAG-troubleshoot.md`](docs/RAG-troubleshoot.md): troubleshooting guide (symptom, check, fix)
 - [`docs/v0--Implementation-log.md`](docs/v0--Implementation-log.md): session log for the v0.x versions

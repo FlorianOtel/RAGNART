@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed)
-updated_at: 2026-11-16--12-11
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design of docs/RAGNART-design.md §2.3, §4.7, §4.8: new v0.3 Sources, later versions renumbered (project mode v0.4, Kotaemon v0.5, tenancy v0.6); §2 decisions, §4 invariants, §7 terms, §8 parameters, §9 status)
+updated_at: 2026-11-16--17-13
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -23,9 +23,10 @@ context: >
 
 ## 1. Purpose and how to use this plan
 
-This plan implements the design in `docs/RAGNART-design.md` in five versions,
+This plan implements the design in `docs/RAGNART-design.md` in six versions,
 each sized to one Claude Code `/brain` session, except v0.2, which takes five
-(the bridge session, the item 5 session, and v0.2 sessions A, B and C). The design
+(the bridge session, the item 5 session, and v0.2 sessions A, B and C), and
+v0.3, which takes two (sessions A and B). The design
 document says *what* RAGNART is and why; this plan says in which order it is
 built and how each step is accepted. Each version section is meant to be
 self-contained: a session reads this document, its own version section, and the
@@ -56,16 +57,16 @@ commit message and in the implementation log.
 | --- | --- | --- |
 | Where RAG work happens | The RAGNART repo and service only; SoHoAI carries no RAG code | operator |
 | Design basis | `docs/RAGNART-design.md`; its decision register (§14) is binding for every version | operator |
-| Item identity | Natural key per type; `content_hash` (MD5) as attribute; no surrogate `source_id` | design D1 (§4.2) |
+| Item identity | The pair (source, natural key); the key's format is its connector's; `content_hash` (MD5) as attribute; no surrogate item id | design D1, D18 (§4.2, §4.7) |
 | Versions of data | Schema version (data model) and per-item pipeline version (`p1`) | design D1b (§4.1, §5) |
 | Pipeline version | `p1` is the working name of the current pipeline. A version change is a major event: an incompatibility or a significant change of behaviour (e.g. a different embedding model, reranking, a results-changing pipeline change). Fixes and improvements stay `p1` | operator |
 | ragnart ↔ git parallel | RAGNART mimics git as closely as possible for ingestion, exclusion and lifecycle: git command names where the mapping is one-to-one, RAGNART terms otherwise; deviations from git are named (A–G). Full mapping and deviations: `docs/RAGNART-design.md` §1.2 | operator; design §1.2 |
 | Access model | Every item belongs to exactly one project: a ragnart project, or the reserved `global` project. Grants apply on ragnart projects; the owner rule applies to `global` items | design §4.6, §6.1, §6.5 |
-| Projects | Addressed by path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
+| Projects | Addressed by source and path; `project.toml` with required `name`, immutable `id`, free tags | design D2b (§4.5) |
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, static and curated policies; `curated` default | design D3 (§7) |
 | Retrieval | Scope × grounding, defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
-| Number of versions / sessions | Five versions; v0.2 takes five sessions (bridge, item 5, A, B, C), the others one each | operator |
-| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 project mode (CLI, skill, session-start hook, capture, collateral) · v0.4 Kotaemon · v0.5 tenancy & authentication | operator |
+| Number of versions / sessions | Six versions; v0.2 takes five sessions (bridge, item 5, A, B, C), v0.3 takes two (A, B), the others one each | operator |
+| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 sources (connectors, central and the ingestion side, central registry, ingestion API) · v0.4 project mode (CLI, skill, session-start hook, capture, collateral) · v0.5 Kotaemon · v0.6 tenancy & authentication | operator |
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symlink rule | Real path is the key; an alias in another project is a link | design §4.5, §13.4 |
@@ -73,11 +74,21 @@ commit message and in the implementation log.
 | v0.2 migration mechanism | Payload-only `set_payload` backfill on the live collection; no new collection, no re-embedding | operator; §3 items 1 and 4 |
 | Baseline data model | Items outside ragnart projects (today: all items) follow the single-user RAG data model and retrieval semantics, now and later; the ragnart model applies only inside a ragnart project | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
 | `global` project_id | Every item carries `project_id`; items outside ragnart projects carry the reserved `global` (one, not per owner); placing an item in a ragnart project changes only its `project_id`, never re-embeds | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
-| Two access rules | Grants govern items inside ragnart projects (v0.5); the owner rule (owner may read; anyone may read `la-familia` items) governs `global` items, permanently | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
+| Two access rules | Grants govern items inside ragnart projects (v0.6); the owner rule (owner may read; anyone may read `la-familia` items) governs `global` items, permanently | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
 | No root or sessions projects | No root-level projects, no per-owner `sessions` project, no common-ancestor attachment; a crawl root is only a traversal starting point plus the owner mapping | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6 |
 | Path selection outside ragnart projects | Not scheduled: a path term in a `<selection>` names ragnart projects only, resolved through `projects.path` | operator, v0.2 session B; `docs/RAGNART-design.md` §4.6, §8.1 |
 | Workflow journals | Excluded as orchestration logs, not conversation; subagent and workflow-agent transcripts are keyed `claude-session://<uuid>/agent-<id>` | operator, v0.2 session B; `docs/RAGNART-design.md` §4.2 |
 | Duplicate session copies | One session uuid is one item. When several transcript files carry it, the newest copy by modification time (an exact tie goes to the greatest path) is the item's origin; the other copies are duplicate locations and are not indexed | operator, v0.2 session B; `docs/RAGNART-design.md` §4.2, §14 D11 |
+| Connectors and sources | A connector is a type; a source is a configured instance of one. Key, locator and display formats are the connector's own, and a key is unique within its source only | operator; design D18 (§4.2, §4.7) |
+| Central and the ingestion side | Each ingestion side owns its bookkeeping and the lifecycle of its items. Central parses, chunks, embeds, stores and searches; it is the only writer of the index and keeps nothing of an item beyond its chunks | operator; design D19 (§2.3) |
+| Three stores | The Qdrant payload and the central registry in central; a state database on each ingestion host | operator; design D20 (§4.8) |
+| Sharing | A ragnart project has one home, on a source RAGNART can write to. Sharing is a grant on a ragnart project homed on a central source, never a replica. A project id published by a second source is refused and reported | operator; design D21 (§4.5) |
+| Write-time gates | Central checks that a source is known, presents its secret, stays within its own items, and publishes no project id homed elsewhere. One secret per source. Removing a dead source's items is a break-glass operator tool | operator; design D22 (§10.2, §12) |
+| Submission form | Bytes for a general document format, parsed by central; text for a connector's native format, rendered by the connector | operator; design D23 (§4.7, §5.1) |
+| Scope path terms | `<source>:<path>`; the API has no default source; the client's default source is explicit, visible and changeable | operator; design D24 (§8.2, §8.8) |
+| Result origin | A hit names `source_id`, key and display label, with no promise that the caller can open the item | operator; design D25 (§8.7) |
+| The NAS as a source | One source; its crawl roots are traversal starting points inside it; `global` stays one value | operator; design D26 (§4.6, §4.7) |
+| Sequencing of sources | The multi-source data model (v0.3) is built before project mode (v0.4), so that project mode is not built on tables and scope terms that then change | operator |
 | `multi_query` / `rag_mmr_bench.py` | Not part of RAGNART | operator |
 
 ## 3. Current baseline
@@ -172,7 +183,10 @@ These are hard rules that every version from v0.2 onward obeys.
   the `projects`, `project_tags`, `project_links`, `source_links` and `grants` tables). A migration runs
   once, in ascending order; a statement that fails with an `OperationalError` is skipped, so a run that
   crashed part-way can be repeated. Never rename or drop a column, and never change
-  `ingestion_queue.file_path`'s role as primary key.
+  `ingestion_queue.file_path`'s role as primary key. One exception, in v0.3: the ragnart project
+  tables move to the central registry (`docs/RAGNART-design.md` §4.8) and are removed from
+  `rag_state.db` by a numbered migration, after the registry copy is verified and with a restore
+  pair taken first.
 - **Search outside ragnart projects keeps today's results.** `GET /v1/search`
   requires `scope`, with no server-side default: a request without it answers
   HTTP 422 (`docs/RAGNART-design.md` §8.8). The `/rag` command copies send
@@ -186,14 +200,19 @@ These are hard rules that every version from v0.2 onward obeys.
   `documents` → `documents_new` and the file name `rag_state.db` stay the
   same at every version. The recovery procedures in `docs/RAG-strategy.md`
   §9 refer to both by name.
-- **One database host, one writer.** `rag_state.db` is opened from Server 2
-  only, and one writer of the index runs at a time, enforced by the NFS
-  `lockf` lock that every writer takes (`docs/RAG-strategy.md` §5.6). If the search service ever
-  needs the SQLite file directly rather than just Qdrant, it opens it
-  read-only.
+- **One writer of the index, one host per state database.** Central is the
+  only writer of the index (`docs/RAGNART-design.md` §2.3). A state database is
+  opened by its own ingestion host only: `rag_state.db` is opened from Server 2
+  only. On Server 2 one writer runs at a time, enforced by the NFS
+  `lockf` lock that every writer takes (`docs/RAG-strategy.md` §5.6). The search service opens
+  `rag_state.db` read-only, for scope resolution and the project listing, until
+  it reads the central registry (v0.3).
 - **Snapshot before scale.** A matching Qdrant snapshot and `rag_state.db`
   copy is taken before any step that touches payload or schema at scale
   (v0.2's backfill, in particular), in the data root of §3 item 7.
+- **A source id is metadata, never a re-key.** Existing rows and points receive
+  `source_id` by an additive column and a `set_payload` backfill. No key changes
+  and nothing is re-embedded (`docs/RAGNART-design.md` §4.4, §14 D26).
 
 ## 5. Access-control model
 
@@ -214,9 +233,10 @@ touch a project.
 | --- | --- |
 | v0.1 | No seam. `GET /v1/search` applies the owner-only filter (§3 item 5). |
 | v0.2 | Projects, `project_tags`, `grants` (shaped for persons and groups, roles `read`/`admin`) and the seam. Items outside ragnart projects (`project_id` `global`) keep the owner rule; the result equals today's owner filter. |
-| v0.3 | Project-mode actions (capture, add, add --wait, drop, note, rm, gc) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
-| v0.4 | Kotaemon's login is mapped to a principal; still no authentication. |
-| v0.5 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
+| v0.3 | No change to access: the owner rule and the seam are unchanged. A source's secret gates writes to the index; it is not a principal and gives no read access (`docs/RAGNART-design.md` §12). |
+| v0.4 | Project-mode actions (capture, add, add --wait, drop, note, rm, gc) go through the CLI and the skill, and take the ingestion lock (`docs/RAGNART-design.md` §10.3). |
+| v0.5 | Kotaemon's login is mapped to a principal; still no authentication. |
+| v0.6 | Authentication (per-client tokens first, OAuth with group claims optional); `authorize()` enforces grants; grant management through CLI and API. |
 
 ## 6. Versions
 
@@ -561,7 +581,125 @@ Kickoff decisions of v0.2 session B (operator, 2026-11-15), each documented in `
 
 **Estimated sessions.** 2 (the migration script and the reconciliation/
 scoping work are each large enough to warrant a session).
-### v0.3 — Project mode
+### v0.3 — Sources
+
+**Goal.** Make ingestion multi-point (`docs/RAGNART-design.md` §2.3, §4.7,
+§4.8): name the connectors and sources that already exist, give every item and
+chunk its source, separate central from the ingestion side behind an ingestion
+API, and bring up one source on another host. Retrieval for existing callers is
+unchanged.
+
+**Entry criteria.** v0.2's Definition of done met. `ragnart-ingest.timer` is
+stopped for each migration step.
+
+**Why before project mode.** v0.4 writes project state. Built first, it would
+rest on the ragnart project tables in `rag_state.db`, which this version moves
+to the central registry, and on bare path terms, which this version qualifies
+by source.
+
+**Work items, session A: one host, no change in behaviour.**
+- `source_id` on every queue row (an additive column) and on every point (a
+  `set_payload` backfill, with a keyword index), for the three existing
+  sources. A restore pair is taken first (§4).
+- Register the three existing sources: the NAS files (filesystem connector),
+  the Claude Code sessions and the OpenCode sessions. Their ids are an operator
+  decision (§8 item 16).
+- Restate the three scanners and the two session parsers as connectors behind
+  the contract of design §4.7: key, locator, display, enumeration with its
+  completeness signal, fetch, capabilities and duplicate rule.
+- The central registry: a database of its own, holding the sources and the five
+  ragnart project tables, where `projects` records each ragnart project's home
+  source. The sync publishes project records to it. `ragnart/scope.py` and
+  `ragnart/service.py` read it. The project tables leave `rag_state.db` (the one
+  exception of §4).
+- Scope grammar (design §8.8): a path term is `<source>:<path>` or
+  `<source>:<path>/`; a path term without a source is HTTP 422; `tag` is
+  reserved; the echo names each project's source. The `/rag` command copies and
+  the `utils/` callers send `scope=all` and are unaffected. Any caller that
+  sends a path term is updated in the same change.
+- Hits carry `source_id` (design §8.7).
+- Deleting and replacing an item's points filters on `source_id` and
+  `source_path` (design §4.4, §5.4). Reconciliation and the purge tools follow.
+- The restore pair includes the registry (design §10.4). The recovery
+  procedures of `docs/RAG-strategy.md` §9 follow; that document is the
+  operator's, so the edit is proposed, not made.
+
+**Work items, session B: the ingestion API and a source on another host.**
+- Ingestion API on central (design §12): upsert an item, as bytes with a file
+  type or as text; delete an item; list the source's own items (key, content
+  hash, chunk count); read the status of a submitted item; publish ragnart
+  project records; read the current pipeline version and the accepted file
+  types.
+- Write-time gates and one secret per source (design §14 D22): the source is
+  known, a request touches its own items only, and a project id is not homed on
+  another source.
+- Content in transit is held until its item is ingested, then deleted (design
+  §2.3).
+- Admission results are returned to the source, which records `ignored` and the
+  reason (design §5.2).
+- The ingestion side as an installable part without docling and without the
+  embedder: scanners, `.ragignore`, hashing, sync and plan, state database, and
+  the API client.
+- The NAS ingestion on Server 2 submits through the same API, so that there is
+  one write path.
+- A source re-submits its items after a pipeline version or rendering version
+  change (design §4.1).
+- A source on another host reconciles against central's listing of its items,
+  and rebuilds a lost state database from it (design §2.3, §10.3).
+- An operator tool on central that removes every item of one `source_id`
+  (design §10.2): dry-run by default, taking the ingestion lock in write mode,
+  as the existing purge tools do.
+- One endpoint source on a second host, end to end: a filesystem source and a
+  Claude Code source of one owner.
+
+**Data migration & rollback.** Session A: one additive column and one payload
+backfill (`source_id`), then the move of the ragnart project tables. Each step
+is preceded by a restore pair and can be re-run. The backfill needs no
+rollback, because an unread payload field changes no result. The rollback of
+the table move is the restore pair. Session B adds no migration to `documents`:
+the items of a source on another host are new points, and the per-source tool
+removes them.
+
+**Definition of done.**
+- Session A:
+  - The 14 bench queries return the same results before and after (tie-aware,
+    §4).
+  - Every point and every completed row has a `source_id`, and for each source
+    the point count equals the sum of its rows' `chunk_count`.
+  - `GET /v1/projects`, and a search with a `<source>:<path>` term, return what
+    the bare path returned before. A bare path term is HTTP 422.
+  - A scheduled ingestion run completes, including reconciliation and a restore
+    pair that holds the registry.
+- Session B:
+  - An item of the endpoint source is found by a `scope=all` search, with its
+    `source_id`. An edit replaces its chunks. A deletion tombstones it and then
+    purges it.
+  - With the endpoint host switched off, its items are still returned, and no
+    run on central touches them.
+  - A request with a wrong secret, and a request for another source's item, are
+    refused.
+  - A `project.toml` copied from the NAS to the endpoint is refused and
+    reported, and the files under it are indexed as `global` items.
+  - The per-source removal tool, in dry-run, lists exactly that source's items.
+  - With the NAS ingestion on the API, the 14 bench queries return the same
+    results.
+
+**Risks.** Session B moves the NAS ingestion onto a new write path. A
+regression there affects the whole corpus, so the bench comparison and one full
+scheduled run gate it. Large files are uploaded over whatever link the endpoint
+has. The registry and `rag_state.db` could disagree during the table move, so
+the move runs with the timer stopped. Until tenancy (v0.6), the secret per
+source is the only protection of the write path.
+
+**Decisions to confirm at kickoff.** The ids of the three existing sources
+(§8 item 16). The registry's file name and place (§8 item 17). How the
+ingestion side is installed and scheduled on the endpoint host. Whether the NAS
+ingestion moves onto the API in session B or in a follow-up session, if
+session B runs long.
+
+**Estimated sessions.** 2.
+
+### v0.4 — Project mode
 
 **Goal.** Make projects usable as notebooks (`docs/RAGNART-design.md` §7.3 to
 §7.5, §8): the `ragnart` CLI as plumbing, the `/ragnart` skill with the action
@@ -570,7 +708,7 @@ ambient capture into the inbox, keep and drop, collateral, and `add --wait`.
 The Transient tier is an ephemeral cache of files; nothing in this version
 creates a second vector index.
 
-**Entry criteria.** v0.2's Definition of done met.
+**Entry criteria.** v0.3's Definition of done met.
 
 **Work items.**
 - `ragnart` CLI, built on the git mapping (`docs/RAGNART-design.md` §1.2):
@@ -579,7 +717,7 @@ creates a second vector index.
   `capture`, `drop`, `note`, `where`, `expect`, `calibrate`, `grant`, `revoke`,
   `transfer`, which have no git equivalent. Plus the metadata listing (`ls`
   with type and time filters, answered from the state database).
-  `status`, `ls-files` and `check-ignore` are not v0.3 work: they were
+  `status`, `ls-files` and `check-ignore` are not v0.4 work: they were
   delivered with v0.2 item 0. `ls-files` gains the project-scoped listing and
   the inbox listing under `--others` (design §7.4).
 - `init` by its invariant (design §4.5): it never changes what is indexed. It
@@ -591,7 +729,8 @@ creates a second vector index.
 - Capture (design §7.3): `ragnart capture <url>` fetches the page itself and
   writes Markdown with front matter to the inbox.
 - Operator add, keep and note (design §7.3): files placed in
-  `.ragnart/resources/`, or a link row for a file already under an NFS root,
+  `.ragnart/resources/`, or a link row for a file already under a root of the
+  ragnart project's source,
   then `add --wait`, which takes the ingestion lock.
 - Collateral (design §7.3): written to `.ragnart/collateral/`, indexed with
   `source_type = collateral`; the inbox items it lists are kept.
@@ -602,10 +741,12 @@ creates a second vector index.
   three levels (design §8.2), the status line, the "no good hits in this scope"
   stop, one-off `ask`, verbose translation of natural-language requests.
   `/rag` becomes an alias (design §8.9).
-- Session-start hook and harness status line (design §7.4): project detection,
+- Session-start hook and harness status line (design §7.4): project detection
+  among the sources of the session's own host,
   and the project name, scope, grounding and a capped listing in every session.
-- `scope` becomes required on `GET /v1/search` once both clients use
-  `/ragnart` (§4).
+- The client's default source (design §8.2): a setting of the `/ragnart`
+  skill, shown by `/ragnart status` and changed by `/ragnart source`. The
+  skill completes a bare path term with it and shows the completed term.
 - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
   `.ragnart/inbox/`, `.ragnart/dropped/`, `.opencode/` and `.agents/` to
   `config/ragignore` (or to a `.ragignore`), so the NAS crawl excludes them
@@ -641,13 +782,13 @@ hook, is unverified (§8).
 
 **Decisions to confirm at kickoff.** The open items of
 `docs/RAGNART-design.md` §13.3 that this version depends on: the write path
-for project actions from hosts other than Server 2; where a session's scope
-and grounding are stored; how a capture that is not Markdown records its
+for project actions from a host other than the ragnart project's ingestion
+host; where a session's scope, grounding and default source are stored; how a capture that is not Markdown records its
 origin.
 
 **Estimated sessions.** 1–2.
 
-### v0.4 — Kotaemon
+### v0.5 — Kotaemon
 
 **Goal.** Give RAGNART a browser UI that reads it through its own index
 plugin, for asking across a project's sources with citations, without
@@ -655,21 +796,22 @@ driving the CLI.
 
 **Entry criteria.** None strict for the stock-Kotaemon spike, which can be
 done any time. The plugin needs v0.2's `scope` parameter and
-`GET /v1/projects`, and v0.3's `add --wait`.
+`GET /v1/projects`, and v0.4's `add --wait`.
 
 **Work items.**
 - Spike (any time before this version, if useful): run stock Kotaemon
   against SoHoAI's `/proxy/v1`, confirm one chat turn works; change the
   default `admin` login immediately — LAN-only is not a reason to skip this.
 - Write the index plugin: retriever over `GET /v1/search`, project picker
-  from `GET /v1/projects` as the scope, project and `source_type` shown on
+  from `GET /v1/projects` as the scope (sent as source-qualified path terms,
+  design §8.8), project and `source_type` shown on
   each citation, librarian (strict) prompt by default (design §8.8). Registers
   through `KH_INDEX_TYPES`/`KH_INDICES` in `flowsettings.py`, modelled on
   Kotaemon's bundled GraphRAG index (`libs/ktem/ktem/index/file/graph`).
 - Uploads become resources of the selected project (an operator add),
   followed by `add --wait` (design §7.4).
-- Map the Kotaemon login to a principal and pass it on every call (§5, v0.4
-  row). RAGNART still trusts the passed value until v0.5.
+- Map the Kotaemon login to a principal and pass it on every call (§5, v0.5
+  row). RAGNART still trusts the passed value until v0.6.
 - Pin the Kotaemon version used; deploy as one container on Server 1, port
   7860 (NAS mounted read-only if citation previews need source files).
 
@@ -696,13 +838,14 @@ be deferred.
 
 **Estimated sessions.** 1.
 
-### v0.5 — Tenancy & authentication
+### v0.6 — Tenancy & authentication
 
 **Goal.** Make the principal non-spoofable, enforce grants, add grant
 management, and validate the two desktop clients end to end.
 
-**Entry criteria.** v0.2's `grants` table and `authorize()` seam exist;
-v0.3/v0.4 give something worth protecting.
+**Entry criteria.** The `grants` table (in the central registry since v0.3)
+and the `authorize()` seam exist;
+v0.4/v0.5 give something worth protecting.
 
 **Work items.**
 - Per-client API tokens first; OIDC retained as an option, not required for
@@ -717,6 +860,10 @@ v0.3/v0.4 give something worth protecting.
   request parameter the caller sets.
 - Grant management (`read`, `admin`) through the CLI and API; groups from
   the token's groups claim (design §6.2–§6.4).
+- Decide how sources enter the access model (design §13.3): whether access is
+  also scoped by source, and how a source's secret relates to a person's
+  token. A client token authenticates a reader; a source's secret authorises
+  writes for one source. The two stay distinct.
 - Validate OpenCode Desktop against the Server 2 OpenCode server
   (`192.168.1.95:4096`) — confirm the skill and commands load there (not
   stated in OpenCode's docs).
@@ -747,7 +894,8 @@ short side investigation before the Runtime-tier check can be written.
 
 **Decisions to confirm at kickoff.** Tokens vs OIDC (or both, tokens
 first); whether an invalid/missing token means "rejected" (HTTP 401) or
-"anonymous, no grants" — these are different failure modes.
+"anonymous, no grants" — these are different failure modes; whether access
+is scoped by source.
 
 **Estimated sessions.** 1.
 
@@ -791,6 +939,15 @@ ingestion policies (§7.2), the project workflow (§7.3), scope and
 grounding (§8.1). The project marker directory is `.ragnart/`; inside it,
 `inbox/` is the Transient cache, `resources/` holds the project's kept and
 added material, and `collateral/` holds the documents produced from it.
+
+A **connector** is a type of store RAGNART can read. A **source** is one
+configured instance of a connector, identified by `source_id`. **Central** is
+the pipeline, the index and the search API. The **ingestion side** is an
+ingestion host with its sources and its state database. The **central
+registry** holds the sources and the published ragnart project records
+(`docs/RAGNART-design.md` §2.3, §4.7, §4.8). In the names `source_path`,
+`source_type`, `source_links` and `max_hits_per_source`, "source" refers to an
+item: `source_path` is the item's key within its source.
 
 ### Future work (unscheduled)
 
@@ -840,17 +997,20 @@ improvements stay `p1`.
 | 2 | Grace period before purging missing Archive sources | 24 hours | settled |
 | 3 | Missing-sources threshold that aborts a sync | 10% | settled |
 | 4 | RAGNART service port on Server 2 | 8100 | settled |
-| 5 | Token vs OIDC detail (format, issuer, storage) | per-client tokens first, OIDC optional later | v0.5 kickoff |
-| 6 | Invalid/missing-token behaviour | not pre-decided — rejected (401) vs anonymous-no-grants | v0.5 kickoff |
-| 7 | Docker on Server 1 (for Kotaemon's container) | unverified — check before v0.4 kickoff | v0.4 kickoff |
-| 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.3 kickoff |
-| 9 | Claude Desktop Code session transcript location | unverified — needed before the Runtime-tier check can be written | v0.5 kickoff |
+| 5 | Token vs OIDC detail (format, issuer, storage) | per-client tokens first, OIDC optional later | v0.6 kickoff |
+| 6 | Invalid/missing-token behaviour | not pre-decided — rejected (401) vs anonymous-no-grants | v0.6 kickoff |
+| 7 | Docker on Server 1 (for Kotaemon's container) | unverified — check before v0.5 kickoff | v0.5 kickoff |
+| 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.4 kickoff |
+| 9 | Claude Desktop Code session transcript location | unverified — needed before the Runtime-tier check can be written | v0.6 kickoff |
 | 10 | Backfill batch size / pilot scope (one owner first?) | checkpoint every 100 items; pilot on one subtree first | settled |
 | 11 | Notifications (channel, events: failed run, guard tripped, snapshot failed, reconciliation problems) | not scheduled; ntfy on Server 1 available | open |
 | 12 | Corpus-hygiene policy: CSV and data files, size and chunk caps, mirrored trees | decided in fix-first item 0 | bridge session |
 | 13 | Default `max_hits_per_source` | 3 | settled |
 | 14 | OpenCode backup copies kept | 7 | settled |
 | 15 | Scheduled sync scope | all configured roots in one run | settled |
+| 16 | Ids of the three existing sources (NAS files, Claude Code sessions, OpenCode sessions) | short names chosen by the operator | v0.3 kickoff |
+| 17 | Central registry: file name and place | its own SQLite file in the data root, beside `rag_state.db` | v0.3 kickoff |
+| 18 | Whether access is scoped by source | open; part of the tenancy design | v0.6 kickoff |
 
 ## 9. Version status table
 
@@ -858,9 +1018,10 @@ improvements stay `p1`.
 | --- | --- | --- | --- |
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
 | v0.2 Nested | done | 5 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A), `8a0f6b3` (session B), `64472db` (session C phase 1), `c7c4999` (session C phase 2), `49e03de` (session C phase 3) |
-| v0.3 Project mode | planned | — | — |
-| v0.4 Kotaemon | planned | — | — |
-| v0.5 Tenancy & authentication | planned | — | — |
+| v0.3 Sources | planned | — | — |
+| v0.4 Project mode | planned | — | — |
+| v0.5 Kotaemon | planned | — | — |
+| v0.6 Tenancy & authentication | planned | — | — |
 
 Each version's session updates its own row (`planned` → `in progress` →
 `done`) and fills in the session count and commit hash(es) when it finishes.
