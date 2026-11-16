@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`)
-updated_at: 2026-11-16--12-12
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry)
+updated_at: 2026-11-16--23-55
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -31,6 +31,87 @@ session of v0.1; `Plan Section 6 v0.1` means the v0.1 work-item list in that doc
 
 **Log, not status.** The status table is `docs/Implementation-plan.md` Section 9. This
 log records what happened, including what diverged.
+
+---
+
+## v0.3 -- Sources
+
+Plan: `docs/Implementation-plan.md` Section 6, v0.3. Status: **planned** (see Plan Section 9).
+
+### 2026-11-16--17-47 to 2026-11-16--23-55 -- design review session: pipeline scope, ingestion requests, the notebook model, the librarian's guarantee
+
+Design review with the operator (Claude Fable 5.2, in a claude.ai session, not Claude Code),
+documentation only. Starting question: a checkpoint evaluation of the design and the concept, and
+whether the design is over-architected. The session read `docs/RAGNART-design.md` and the plan in
+full and spot-checked the code. It raised five items, and the operator and the session then settled
+them one at a time. The purpose, in the operator's words, is to iterate until the mental model is
+sound and the design document expresses it consistently. No code was changed, and nothing was run
+against the live services.
+
+#### What was done
+
+Commit: the docs commit that adds this entry.
+
+- **`docs/RAGNART-design.md`**: §4.1 rewritten (what a pipeline is, the two kinds of version
+  change); §4.5 rewritten (the notebook model, membership, references, marker guards, `init`); §2.3
+  and §12 (four ingestion requests, the listing carries the pipeline version); §4.4, §4.7 and §4.8
+  (`pipeline_version` on chunks, connector rendering moved out of §5.1); §5 and §5.5 (retrieval is
+  not part of `p1`); §6.1, §7.2 to §7.5 (an add always copies, no ingestion mode, references); §8.1,
+  §8.3, §8.7, §8.8, §9.2 and §9.3 (the librarian's guarantee, the relevance verdict, calibration);
+  deviation I in §1.2; open items in §13.3; D8, D10, D15 and D19 amended, D27 to D31 added.
+- **`docs/Implementation-plan.md`**: §2 decisions, §4 invariants, the v0.3 and v0.4 work items and
+  definitions of done, the Terms paragraph, the future-work version rule, and open decisions 19 to
+  21.
+- **`README.md`**: the definition of "nested", and the v0.4 and v0.5 roadmap rows.
+
+#### Decisions
+
+| # | Decision | Design |
+| --- | --- | --- |
+| 1 | A pipeline is what central does to a submitted item, from parsing to embedding. There is one, for every source. Retrieval is not part of it | D30 |
+| 2 | The pipeline version is recorded per item, and central stamps it on every chunk. A change of parsing, admission or chunking is applied per item as sources re-submit. A change of embedding model is applied to the whole collection by central, and is never mixed | D30, D8 |
+| 3 | The ingestion API has four requests per item: upsert, delete, change of key, change of metadata. The last two re-embed nothing | D19 |
+| 4 | A session is assigned once to the closest enclosing ragnart project of its launch directory, and keeps it until that ragnart project is removed. `launch_dir` is metadata, not an identifier | D15 |
+| 5 | A ragnart project is a notebook: the content of one `.ragnart/` directory. The directory that holds it is not the ragnart project, and the files beside `.ragnart/` are `global`. One directory holds one ragnart project. There is no `mode`; "crawl" names the static policy only | D27 |
+| 6 | An add always copies the file into the ragnart project's `resources/`. The redundancy is accepted for robustness and simplicity | D28 |
+| 7 | "Reference" replaces "link". References point at ragnart projects, widen scope and never access. A symbolic link is a filesystem construct and never creates a reference | D28 |
+| 8 | A missing or malformed `project.toml` is guarded as an item is: last good record, or a 24-hour tombstone | D29 |
+| 9 | `ragnart init` never changes what is indexed, by construction, and refuses a directory that already has a `.ragnart/` | D10 |
+| 10 | The directory keeps the name `.ragnart`. `.ragnart-project` was considered and dropped, for the stutter in `.ragnart-project/project.toml` | D27 |
+| 11 | The librarian's guarantee is split by who can keep it: the search API reports the evidence and its verdict, the client's command prints the status line, and staying within the evidence in free conversation is best-effort | D31 |
+| 12 | `min_relevance` is applied by the API, with one global value. The labelled set includes questions that should not be answered, and `ragnart calibrate` finds `min_relevance` only | D31 |
+
+#### Applied as proposed, for the operator to confirm
+
+These were proposed in the session and not contested, but not confirmed in so many words.
+
+- The pipeline item as a whole (decisions 1 and 2). The operator's questions were answered, and the
+  session moved to the next item.
+- References are not transitive.
+- The form of `.ragnart/references`: one `id` per line, with the name in a comment.
+- The client resolves scope `project` from the references in `GET /v1/projects`; the scope grammar of
+  the API is unchanged.
+- `mode` stays a reserved, ignored key, so that an existing `project.toml` does not gain a tag.
+
+#### Not decided
+
+- The evaluation also recommended a smaller v0.3 and building project mode before the ingestion
+  API. That was not discussed. The order and the scope of the versions are unchanged.
+- The open items are in `docs/RAGNART-design.md` §13.3: the mechanism of an embedding change,
+  `ignored` items on a version change, a fix inside a version on another host, the spelling of the
+  launch path, references to items, the command that adds a reference, attached folders.
+
+#### Not changed
+
+- **Code.** The v0.2 code follows the earlier model. The design document marks each difference as
+  "built today", and Plan Section 6 v0.4 lists the work.
+- **`docs/RAG-strategy.md`, `docs/RAG-troubleshoot.md`, `docs/design-history.md`.** They are the
+  operator's documents. `docs/RAG-strategy.md` describes the built behaviour and stays accurate
+  until the code changes. Its table of state tables still calls `project_links` "links between
+  projects".
+- **`.ragnart/project.toml` of this repository.** It still carries `mode = "crawl"`,
+  `grounding = "open"` and `capture = false`. The code reads `mode` today, so the file is left as
+  it is.
 
 ---
 

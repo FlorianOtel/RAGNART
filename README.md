@@ -38,9 +38,12 @@ three tiers of material with different lifetimes.
 | **Runtime** | AI-assistant sessions: Claude Code chat logs (`.jsonl`) and OpenCode sessions (through its HTTP API) | The same periodic ingestion | Long-lived; one record per session |
 | **Transient** | Material in flight for the current project: pages the assistant fetched, captured into the project's `.ragnart/inbox/`. A working cache of files, read directly by the assistant; not indexed | Captured as you work, by the assistant skill | Ephemeral: expires after 30 days unless you **keep** it (it then becomes a project resource, which the Archive indexes) or **drop** it |
 
-**Nested** means every chunk belongs to a project in a directory tree. A
-search can be scoped to one ragnart project, optionally including its sub-projects,
-or run across everything you are allowed to see.
+**Nested** means every chunk belongs to a project. A ragnart project is a
+notebook: a `.ragnart/` directory that holds the material kept for one purpose,
+together with the assistant sessions held in the directory around it.
+Everything else belongs to the shared `global` project. Ragnart projects nest by
+directory. A search can be scoped to one ragnart project, optionally including
+its sub-projects, or run across everything you are allowed to see.
 
 > **Status:** Archive and Runtime exist today, with ragnart projects, nesting and scoped
 > search. The Transient tier, a notebook UI and real authentication are planned. See [Roadmap](#roadmap).
@@ -136,8 +139,8 @@ rotation config. Qdrant has its own installer, `scripts/qdrant/install-qdrant.sh
 | **v0.1 — Spin-off** (done) | Standalone repo, search service and ingestion timer |
 | **v0.2 — Nested** (done) | Project tree, data model and access model in the state DB and Qdrant payload (payload-only backfill, no re-embedding); scoped search |
 | **v0.3 — Sources** | Multi-point ingestion: connectors and sources, a central index fed by ingestion hosts through an ingestion API, a central registry of sources and projects, source-qualified search scope |
-| **v0.4 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral |
-| **v0.5 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as references |
+| **v0.4 — Project mode** | `ragnart` CLI (`init`, `capture`, `add`, `add --wait`, `drop`, `rm`, …), the `/ragnart` assistant skill with scope and grounding, capture into the Transient cache, project resources and collateral, references between ragnart projects |
+| **v0.5 — Kotaemon** | Browser notebook UI via a [Kotaemon](https://github.com/Cinnamon/kotaemon) index plugin: project picker as scope, cited answers, uploads as resources |
 | **v0.6 — Tenancy & auth** | Authentication (per-client tokens, optional OAuth with group claims), enforced grants, grant management |
 
 Details: [`docs/Implementation-plan.md`](docs/Implementation-plan.md); design: [`docs/RAGNART-design.md`](docs/RAGNART-design.md).
