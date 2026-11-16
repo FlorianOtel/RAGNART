@@ -592,6 +592,7 @@ class StateDB:
 
         Both sides are ISO-8601 strings written with the same format, so the string
         comparison orders them in time.
+        Invariant: all timestamps are datetime.now(timezone.utc).isoformat(), so string order is time order.
         """
         cur = self._conn.execute(
             "SELECT file_path FROM ingestion_queue "

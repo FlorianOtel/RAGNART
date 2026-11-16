@@ -350,6 +350,8 @@ def build_sync_plan(
     # Purge. The grace period is measured from missing_since, and the purge is not
     # guarded by skipped roots or by the mass-delete guard: those rows were vetted when
     # they were tombstoned. A row found again is excluded (it is in all_existing).
+    # Invariant: every timestamp is written by datetime.now(timezone.utc).isoformat(), so the
+    # string order used by rows_missing_since_before() is time order.
     cutoff = (datetime.fromisoformat(now_iso) - timedelta(hours=grace_hours)).isoformat()
     plan.purge_ready = [
         path

@@ -85,6 +85,14 @@ log "--- rag_ingest_daemon.py ---"
 python utils/rag_ingest_daemon.py \
     --workers "$WORKERS" --batch "$BATCH" --log-file "$LOGFILE"
 
+# Reconciliation (docs/RAGNART-design.md §10.3): repairs chunk_count and requeues short rows, and
+# deletes zombie points under the mass-delete guard. It runs after the daemon so that the
+# ingestion it might requeue is picked up on the next run, and before the snapshot so the snapshot
+# holds the repaired state. Non-fatal: a failure is logged as a WARN and does not change SYNC_RC.
+# The run holds the lock, so rag_reconcile.py finds it held by its ancestor and does not re-acquire.
+log "--- rag_reconcile.py --apply ---"
+python utils/rag_reconcile.py --apply 2>&1 | tee -a "$LOGFILE" || log "WARN: reconciliation exited non-zero — see log above"
+
 log "--- SQLite WAL checkpoint ---"
 DB_PATH="${DATA_ROOT}/sqlite/rag_state.db"
 sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | tee -a "$LOGFILE" || \
