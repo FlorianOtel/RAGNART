@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added)
-updated_at: 2026-11-16--23-55
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review)
+updated_at: 2026-11-17--14-32
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -63,17 +63,18 @@ a **Status** line. Summary:
 | Parallel with git (§1.2): ignore rules and the read-only `ragnart` commands `check-ignore`, `ls-files`, `status` | Built. `add`, `rm`, `mv`, `diff`, `fsck`, `gc`: v0.4 |
 | Item identity for NAS files, `opencode://` and `claude-session://` keys, content hash (§4.2) | Built. Move detection: v0.2 |
 | State-database metadata and payload fields and their indexes (§4.3, §4.4), schema version (§4.1), per-item pipeline version (§4.1) | Built. `pipeline_version` on every chunk and in the listing of a source's items: v0.3 |
-| Projects data model: the `projects`, `project_tags`, `project_links` and `grants` tables, with the reserved `global` project; baseline data model (§4.6) | Built, with a `source_links` table and a `mode` column that the design no longer uses (§4.5). The RAGNART repository holds the first ragnart project |
+| Projects data model: the `projects`, `project_tags`, `project_links` and `grants` tables, with the reserved `global` project; baseline data model (§4.6) | Built, with a `parent` and a `mode` column and a `source_links` table that the design no longer uses (§4.5). The RAGNART repository holds the first ragnart project |
 | `project.toml`, marker discovery, tags, `resolve_scope()` (§4.5, §8.8); owner rule as the access rule (§6.5) | Built. `authorize()`, grants and authentication: v0.6 |
-| Project extent, membership and marker guards (§4.5): a ragnart project is the content of its `.ragnart/`, a session is assigned once, and a missing or unreadable marker removes nothing at once | v0.4. Built today, to an earlier model: a file attaches by the directory that holds `.ragnart/`, every item is re-evaluated on every sync, and a missing marker removes its ragnart project at once |
-| References between ragnart projects (§4.5) | v0.4 |
+| Project content and membership (§4.5): `ragnart init <name>`, the managed folders beside `.ragnart/`, `.ragnart/` as state only, no meaning for nesting, marker guards | v0.4. Built today, to an earlier model: every file under the directory that holds `.ragnart/` carries its `project_id`, a nested ragnart project records a `parent`, and a missing marker removes its ragnart project at once |
+| References by stable id (§4.5): to ragnart projects and to sessions, with the session-start hook referencing a session started in a project folder | v0.4. Built today, to an earlier model: every sync assigns each session to the ragnart project whose holding directory encloses its `launch_dir` |
+| Registration of project folders, project-relative keys of managed files, `ragnart mv` and `ragnart repair` (§4.2, §4.5) | v0.4; a move to another source needs the ingestion API (v0.3). Built today: ragnart projects are found by the walk of the crawl roots only, and every file is keyed by its full path |
 | Scope and grounding in the API and the `/ragnart` skill and commands (§8) | API scope and project listing: built. Skill and commands: v0.4 |
-| Project workflow: `init`, capture, the inbox, keep and drop, collateral, `add --wait`, the `/ragnart` skill, the session-start hook and the status line (§7.3 to §7.5) | v0.4 |
+| Project workflow: `init`, capture, the inbox, keep and drop, collateral, `add` and `commit`, the `/ragnart` skill, the session-start hook and the status line (§7.3 to §7.5); concurrency rules (§10.6) | v0.4 |
 | Retrieval-quality knobs and calibration (§9) | `max_hits_per_source` and collapse by `content_hash`: built. Other knobs and calibration: v0.4 |
 | Relevance verdict in the search response: hit id, rerank score, good-hit count, reranker status (§8.7, §9.2) | Not built. It depends on neither v0.3 nor v0.4 |
 | Deletion rules (§10.2), reconciliation (§10.3) | Built: all five rules of §10.2 (the purge record is the sync log line of rule 4), plan-then-apply, and the scheduled reconciliation of §10.3 |
 | OpenCode database backup (§10.5) | v0.2 |
-| Connectors and sources (§4.7), central and the ingestion side (§2.3), the three stores (§4.8), `source_id` on every item and chunk (§4.3, §4.4), source-qualified scope terms (§8.8) | v0.3. Built today: the three connectors run as scanners of one ingestion run on Server 2, with one state database and no `source_id` |
+| Connectors and sources (§4.7), the hub and the ingestion side (§2.3), the three stores (§4.8), `source_id` on every item and chunk (§4.3, §4.4), source-qualified scope terms (§8.8) | v0.3. Built today: the three connectors run as scanners of one ingestion run on Server 2, with one state database and no `source_id` |
 | Ingestion API, and sources on hosts other than Server 2 (§2.3, §12) | v0.3 |
 | Kotaemon (§12) | v0.5 |
 
@@ -87,26 +88,32 @@ each deviation are recorded here and in decision D7 (§14).
 
 | git concept | RAGNART | Note |
 |---|---|---|
-| Working tree | The files of a filesystem source (§4.7); today the NAS, under the NFS roots | The authority. RAGNART does not modify them. It writes only inside `.ragnart/` directories (planned, §7.3) and appends lines to `.ragignore` files (by `rm`, planned, deviation B). |
-| Untracked files | A ragnart project's inbox, `.ragnart/inbox/` | On disk and not in the index (§7.1). |
-| Staging area | Queue rows with status `pending` | Queued for ingestion, not yet indexed. |
+| Working tree | The files of a filesystem source (§4.7); today the NAS, under the NFS roots | The authority. RAGNART does not modify them. It writes only inside ragnart projects, in `.ragnart/` and the managed folders (planned, §7.3), and appends lines to `.ragignore` files (by `rm`, planned, deviation B). |
+| Repository, created by `git init <dir>` | Ragnart project, created by `ragnart init <name>` (planned) | `init` creates the folder `<name>` with `.ragnart/` inside it (§4.5). The folder can be anywhere, and its place has no meaning. Unlike a repository, a ragnart project knows only its managed folders (deviation I). |
+| `.git/` | `.ragnart/` | State and metadata only: `project.toml`, provenance, dropped items (§4.5). The material is in `resources/` and `collateral/` beside it. |
+| Tracked files | The files of a ragnart project's `resources/` and `collateral/` | Tracked by location: a file placed there by hand belongs to the project as one placed by `add` does (§4.5, §7.3). |
+| Untracked files | The files of a ragnart project's folder outside its managed folders; and its inbox, `inbox/` | Neither is indexed: the global crawl does not enter a project folder (deviation D), and a commit skips the inbox (§7.1). |
+| Staging area | Queue rows with status `pending`; in a ragnart project, the files of its `resources/` and `collateral/` that no commit has indexed yet | Queued or placed, not yet indexed. |
 | Committed content | The index: Qdrant points and `completed` queue rows | Derived from the sources (§10.1). |
-| Repository (`.git`) | Ragnart project (`.ragnart/project.toml`) | Addressed by the path of the directory that holds it (§4.5). `init` (planned) is `git init`. Unlike a repository, it holds only what is inside `.ragnart/` (deviation I). |
-| `.gitignore` | `.ragignore`, one per directory | Same syntax and precedence (below). |
+| `.gitignore` | `.ragignore`, one per directory | Same syntax and precedence (below). Not applied in a ragnart project's folder (deviation D). |
 | `core.excludesFile` | `config/ragignore` | Global exclusion rules with the lowest precedence. There is no `.git/info/exclude` equivalent. |
 | System, global and local config | `ragnart.yaml`, then `project.toml`, then the request | Each level overrides the one before it (§9.2). |
-| `git status` | `ragnart status` (built) | Queue and Qdrant counts; `--ignored` lists ignored files with their reason. |
+| `git status` | `ragnart status` (built) | Queue and Qdrant counts; `--ignored` lists ignored files with their reason. Planned: scoped to a ragnart project, it lists the files not indexed and why (§7.3). |
 | `git ls-files`, with `--others`, `--ignored`, `--stage` | `ragnart ls-files` (built), same flags | Without a flag, lists indexed files. `--stage` lists every queue row with its status. Planned: scoped to a ragnart project, the listing is that ragnart project's catalogue, and `--others` lists its inbox (§7.4). |
 | `git check-ignore -v` | `ragnart check-ignore -v` (built) | Prints the file, line and pattern that decide each path. |
-| `git add` | `ragnart add` and `ragnart add --wait` (planned) | `add` queues; `add --wait` blocks until the item is indexed (deviation E). On an inbox item, `add` is the operator's "keep". A file from outside the ragnart project is copied into its `resources/` first (§7.3). |
-| `git rm` | `ragnart rm` (planned) | Appends an anchored line to the nearest `.ragignore`; never deletes a file (deviation B). |
-| `git mv` | `ragnart mv` (planned) | Move detection by `content_hash` (§4.2); nothing is re-embedded. |
+| `git add` | `ragnart add --no-commit` (planned) | Copies a file into the ragnart project's `resources/` and records its origin. Nothing is indexed until a commit (§7.3). |
+| `git add` + `git commit` | `ragnart add` (planned) | Copies, records the origin and commits, and waits (deviation E). On an inbox item, `add` is the operator's "keep". |
+| `git commit` | `ragnart commit` (planned) | Indexes every file of the ragnart project's `resources/` and `collateral/` that is not indexed yet, including files placed by hand, and waits for the outcome of each (§7.3). No history is kept (deviation F). |
+| `git rm` | `ragnart rm` (planned) | Appends an anchored line to the nearest `.ragignore`; never deletes a file (deviation B). In a ragnart project the verb is `drop` (§7.5). |
+| `git mv` | `ragnart mv` (planned) | A file: move detection by `content_hash` (§4.2); nothing is re-embedded. |
+| `git worktree move` | `ragnart mv` of a ragnart project (planned) | Moves the project folder, to another place or another source, keeping its id; nothing is re-embedded (§4.5). |
+| `git worktree list`, `git worktree repair` | The registered project folders; `ragnart repair <path>` (planned) | `init` registers the project folder with its ingestion host. `repair` re-registers a project folder moved by hand (§4.5). |
 | `git diff` | `ragnart diff` (planned) | The plan of the next sync, shown without applying it. |
 | `git fsck` | `ragnart fsck` (planned) | Reconciliation (§10.3). |
 | `git gc` | `ragnart gc` (planned) | Purges tombstones after the grace period (§10.2), and removes expired and dropped inbox items (§7.5). |
-| Staging everything on each run (`git add -A`) | Static policy, run by the timer | Every 6 hours, all files that the inclusion and exclusion rules admit (§7.2). |
-| Staging chosen paths (`git add <path>`) | Curated policy: `add` | Only what a ragnart project chooses (§7.2, §7.3). |
-| `git commit`, `git log`, branches, remotes | None | Deviation F. The snapshot pairs (§10.4) are the nearest equivalent to tags and restore. |
+| Staging everything on each run (`git add -A`) | Static policy, run by the timer | Every 6 hours, all files that the inclusion and exclusion rules admit (§7.2). It does not enter a project folder, and it commits no ragnart project (§7.3). |
+| Staging chosen paths (`git add <path>`) | Curated policy | Only what is placed in a ragnart project's `resources/` and `collateral/` (§7.2, §7.3). |
+| `git log`, branches, remotes | None | Deviation F. The snapshot pairs (§10.4) are the nearest equivalent to tags and restore. |
 
 **Deviations from git.** Each deviation is named by a letter and states its reason.
 
@@ -118,39 +125,46 @@ each deviation are recorded here and in decision D7 (§14).
 - **B. `rm` appends a rule and never deletes a file.** `ragnart rm <path>` (planned) adds an
   anchored pattern to the nearest `.ragignore`. *Why:* the exclusion is durable, visible in a text
   file, and reversed by removing its line. The source is the authority, so RAGNART does not delete
-  files from it. The one exception is files under a ragnart project's `.ragnart/` (§7.5).
+  files from it. The one exception is files of a ragnart project: in its `inbox/` and under its
+  `.ragnart/dropped/` (§7.5).
 - **C. Symbolic links are followed.** The walk follows links, and patterns match the path as
   walked, never a resolved path. A file reached through several links is queued once, under the
   first path the walk meets. *Why:* `Gitlab--fotel` is reached through a link, and a rule should
   match the path the operator sees.
-- **D. One ignore hierarchy across nested ragnart projects.** `.ragignore` files apply across ragnart project
-  boundaries within an NFS root. *Why:* a ragnart project is a `.ragnart/` directory inside a folder, not a
-  separate repository. A boundary that reset the rules would let excluded content in through the
-  ragnart project.
-- **E. `add` queues; `add --wait` blocks.** *Why:* git's `add` is cheap because hashing is cheap.
-  Ingestion parses on the CPU (§5.1) and can take a long time per item, and a blocking default
-  would hold the caller for that time. The ingestion run is the single writer (§10.3), so the queue,
-  not the caller, drives the index.
-- **F. No history, branches or remotes.** *Why:* the source is the authority, and the NAS already
+- **D. The global crawl does not enter a ragnart project's folder.** A `.ragnart/` marker acts, for
+  the crawl, as a `.ragignore` holding `*`: the crawl reads the marker, so that it can register the
+  ragnart project (§4.5), and does not walk the folder. Nothing in a project folder becomes a `global`
+  item. Its `resources/` and `collateral/` are indexed only by a commit (§7.3), which applies the admission rules of
+  §5.2 and no exclusion rule; the other files of the folder are not indexed at all. `ragnart
+  check-ignore` names the project folder as the reason. *Why:* the global crawl and a ragnart project
+  are two kinds of ingestion with different meanings. If the crawl walked a project folder, it would
+  either give the project material it did not choose or turn its files into `global` items, and an
+  exclusion rule written for the archive, such as `*.csv`, would drop material the operator chose.
+- **E. `add` commits, and waits.** `ragnart add` copies the file, commits and waits for the outcome;
+  `ragnart add --no-commit` only copies, as `git add` does (§7.3). *Why:* adding a source to a
+  notebook makes it usable at once. Commits of one ragnart project coalesce (§7.3), so a run of adds
+  does not cost one ingestion each.
+- **F. No history, branches or remotes.** `ragnart commit` indexes the current content of a ragnart
+  project and records nothing else: there is no log of commits. *Why:* the source is the authority, and the NAS already
   keeps history: hourly Synology snapshots and an offsite copy (§10.1). A second history inside
   RAGNART would duplicate it and could disagree with it. The snapshot pairs (§10.4) are the restore
-  points of the index. A source that submits its items to central (§2.3) is not a remote: central
+  points of the index. A source that submits its items to the hub (§2.3) is not a remote: the hub
   holds a derived index, not a copy that can be fetched or cloned.
 - **G. An unreadable `.ragignore` stops the sync.** Git warns and continues. RAGNART raises an
   error: the sync exits with a non-zero code and runs no deletion phase. *Why:* an exclusion that
   cannot be read must neither admit content it would exclude nor delete content it would keep.
   Continuing would do one or the other.
 - **H. Capture is ambient.** In a ragnart project with capture on, a page the agent fetches is written to
-  the inbox without a command from the operator, by the policy of the `/ragnart` skill (§7.3).
+  its `inbox/` without a command from the operator, by the policy of the `/ragnart` skill (§7.3).
   *Why:* git records nothing unless asked. Work in a ragnart project finds its material during a conversation,
   and a command per item would interrupt it. Captured material stays out of the index until the
   operator keeps it, so the index still changes only by a deliberate act.
-- **I. A ragnart project does not own its directory.** A ragnart project is what sits inside its
-  `.ragnart/` (§4.5). The files beside it are external: the static policy ingests them as `global`
-  items, whether or not a ragnart project is there. *Why:* a repository tracks its working tree. A
-  ragnart project is a notebook, and several can serve one body of material, each independent of the
-  directory that holds it. A ragnart project that claimed its directory would change what is indexed
-  there.
+- **I. A ragnart project knows only its managed folders.** Its material is the content of
+  `resources/` and `collateral/`, and its inbox is `inbox/` (§4.5). Every other file in its folder is
+  external: the project does not know it, and it is not indexed (deviation D). A ragnart project
+  nested in another one's folder is external to the outer one. *Why:* a repository
+  tracks what is added to its working tree. A ragnart project is a notebook, whose material is what
+  was put into it, and it never adopts what happens to lie around it.
 
 **`.ragignore` semantics.** The format and matching are those of `.gitignore`:
 
@@ -168,7 +182,9 @@ each deviation are recorded here and in decision D7 (§14).
 - A path below an excluded directory cannot be re-included. The walk does not enter an excluded
   directory, so a `.ragignore` inside it is never read.
 - The rules apply to sources of the filesystem connector only (§4.7); today that is the NAS crawl.
-  They do not apply to the Claude Code and OpenCode session connectors.
+  They do not apply to the Claude Code and OpenCode session connectors, nor in a ragnart project's
+  folder, which the crawl does not enter (deviation D). A ragnart project under an excluded
+  directory is still found, because its folder is registered (§4.5).
   `.gitignore` files are not read.
 - An unreadable `.ragignore` stops the sync (deviation G).
 - `ragnart check-ignore -v <path>` shows the file, line and pattern that decide a path.
@@ -190,7 +206,7 @@ to start local rules. This mirrors git's `core.excludesFile` against `.gitignore
 | Host | Role in RAGNART |
 |---|---|
 | **Server 1** — um690, 192.168.1.93 | Qdrant 1.17.1 (vector store) on local NVMe, `/var/lib/qdrant/storage`; config installed locally as `/etc/qdrant/config.yaml` by `scripts/qdrant/install-qdrant.sh` |
-| **Server 2** — NucBoxK11, 192.168.1.95 | Central and, today, the only ingestion host (§2.3). `ragnart-search.service` (HTTP API, port 8100); `ragnart-ingest.timer` (ingestion 01, 07, 13, 19:00); Ollama with bge-m3 (port 11434); the reranker bge-reranker-v2-m3 behind llama-swap (port 8000); the only host that opens `rag_state.db`; the OpenCode server (port 4096) |
+| **Server 2** — NucBoxK11, 192.168.1.95 | The hub and, today, the only ingestion host (§2.3). `ragnart-search.service` (HTTP API, port 8100); `ragnart-ingest.timer` (ingestion 01, 07, 13, 19:00); Ollama with bge-m3 (port 11434); the reranker bge-reranker-v2-m3 behind llama-swap (port 8000); the only host that opens `rag_state.db`; the OpenCode server (port 4096) |
 | **NAS** — Synology DS1019, NFS `/mnt/nfs` | The corpus (NFS roots), Claude Code sessions (`~/.claude` is a link into NFS), RAGNART's data root `/mnt/nfs/__Backups/RAGNART--databases/` (state database, logs, snapshot pairs, ingestion lock). BTRFS with hourly snapshots and an offsite copy. |
 
 Clients: Claude Code and OpenCode sessions (through the `/ragnart` skill and commands), the
@@ -208,40 +224,42 @@ supplies models to clients; RAGNART does not use it.
 | OpenCode's database | Server 2 local NVMe (SQLite in WAL mode is unsafe on NFS) | Nightly online copy to the NAS (§10.5) |
 | Installed configs and units | Local `/etc` on both servers | Reinstallable from the repository (on NFS) |
 
-### 2.3 Central and the ingestion side
+### 2.3 The hub and the ingestion side
 
 **Status.** The split of roles below is the design. Built today: both roles run on Server 2, in one
 ingestion run, with one state database. The ingestion API that separates them, and sources on other
 hosts, are v0.3 (`docs/Implementation-plan.md` §6).
 
-Ingestion is multi-point: any number of sources (§4.7), on any number of hosts, submit to one
-central index. RAGNART therefore has two roles.
+Ingestion is multi-point: any number of sources (§4.7), on any number of hosts, submit to the
+one index at the hub. RAGNART therefore has two roles.
 
-| | Ingestion side, one per ingestion host | Central, one |
+| | Ingestion side, one per ingestion host | The hub, one |
 |---|---|---|
 | Runs | The sources of that host (§4.7) | The pipeline (§5), the index and the search API |
-| Stores | Its state database (§4.3) | Qdrant and the central registry (§4.8) |
+| Stores | Its state database (§4.3) | Qdrant and the hub registry (§4.8) |
 | Decides | What to submit, re-submit and delete: scanning, exclusion (§1.2), change, move and duplicate detection (§4.2), deletion guards and tombstones (§10.2), reconciliation of its own items (§10.3) | Nothing about the lifecycle of a source's items |
 | Compute | Light: walking, hashing, rendering a connector-native format to text (§4.7) | Parsing, chunking, embedding, reranking |
 
-- **Four requests per item.** An ingestion side asks central to upsert an item with its content, to
-  delete an item, to change an item's key, or to change an item's metadata. The last two rewrite
-  payload fields only: a move changes the key (§4.2), and the assignment of a session to a ragnart
-  project changes `project_id` (§4.5). Neither carries content, and nothing is re-embedded. An
-  ingestion side also publishes the records of the ragnart projects it holds (§4.5).
-- **Central is the only writer of the index.** No source writes to Qdrant.
-- **Central is agnostic to a source's lifecycle.** It does not track which items a source should
+- **Five requests per item.** An ingestion side asks the hub to upsert an item with its content, to
+  delete an item, to change an item's key, to change an item's metadata, or to change an item's
+  source. The last three rewrite payload fields only: a move of a file changes its key (§4.2), a
+  correction of `owner` or `project_id` changes metadata, and the move of a ragnart project to
+  another source changes the `source_id` of its managed files (§4.5). None carries content, and
+  nothing is re-embedded. An ingestion side also publishes the records of the ragnart projects it
+  holds, with their references (§4.5).
+- **The hub is the only writer of the index.** No source writes to Qdrant.
+- **The hub is agnostic to a source's lifecycle.** It does not track which items a source should
   have, and it does not notice that a source is silent. A source's items stay in the index until that
   source deletes them. A laptop that is offline for weeks keeps its items searchable.
-- **Central keeps nothing of an item beyond its chunks** (§4.4). Submitted content is held only in
+- **The hub keeps nothing of an item beyond its chunks** (§4.4). Submitted content is held only in
   transit, from the request until the item is ingested, and is then deleted.
-- **What central knows spans sources.** No single source can see these: the registry of sources, the
+- **What the hub knows spans sources.** No single source can see these: the registry of sources, the
   published ragnart project records that scope resolution needs (§8.8), and the write-time gates
   (§12).
 - **An ingestion host is thin in compute, not in logic.** It carries the scanners, the sync and a
   state database. It carries no parser for general document formats and no embedder.
 
-Central owes a source three services, none of which is bookkeeping:
+The hub owes a source three services, none of which is bookkeeping:
 
 | Service | Use |
 |---|---|
@@ -250,7 +268,7 @@ Central owes a source three services, none of which is bookkeeping:
 | The current pipeline version, the accepted file types and the admission limits | The source re-submits the items whose chunks carry an older version (§4.1), and applies the size limit before it submits (§5.2) |
 
 Removing the items of a source that no longer exists, such as a lost or reinstalled machine, is a
-maintenance operation by the operator on central (§10.2). It is not part of the API.
+maintenance operation by the operator on the hub (§10.2). It is not part of the API.
 
 ## 3. The layered model
 
@@ -260,7 +278,7 @@ the last two are where kinds of material differ.
 | Layer | Scope | Content |
 |---|---|---|
 | **Data and access model** | Global | Identity, sources, metadata, projects, grants (§4, §6) |
-| **Ingestion mechanics** | Common | One pipeline in central, versioned (§5), fed by the sources through their connectors (§2.3, §4.7) |
+| **Ingestion mechanics** | Common | One pipeline in the hub, versioned (§5), fed by the sources through their connectors (§2.3, §4.7) |
 | **Ingestion policy** | Per kind of material | **Static**: the inclusion rules of `ragnart.yaml` and the exclusion rules of §1.2, unattended, every 6 hours. **Curated**: only what a project deliberately keeps (§7) |
 | **Curation (lifecycle)** | Per tier | Archive: blunt, mirrors the filesystem. Runtime: session records. Transient: material in flight (§7) |
 
@@ -271,23 +289,23 @@ the last two are where kinds of material differ.
 Two version numbers govern the data. They are independent.
 
 - **Schema version — the data model.** It names the set of tables and columns and the Qdrant
-  payload layout. Each database stores its own value: a state database, and the central registry
+  payload layout. Each database stores its own value: a state database, and the hub registry
   (§4.8, v0.3). Each change to the data model is a numbered migration that runs once and records
   the new version.
 - **Pipeline version — how a submitted item became chunks and vectors.** Recorded **per item**.
   The current pipeline is **`p1`**, defined in §5.
 
-**What a pipeline is.** A pipeline is what central does to a submitted item (§2.3): parsing,
+**What a pipeline is.** A pipeline is what the hub does to a submitted item (§2.3): parsing,
 admission, chunking and embedding (§5.1 to §5.4). It starts at the submission. What a connector does
 before that point (enumeration, exclusion, hashing, and rendering its native format, §4.7) is not
 part of the pipeline. Retrieval (§5.5) is not part of it either.
 
-- **There is one current pipeline, and it is central's.** It is the same for every source: a PDF is
+- **There is one current pipeline, and it is the hub's.** It is the same for every source: a PDF is
   processed identically whichever source submitted it (§4.7). Processing that differs by file type,
   such as flat or parent–child chunking (§5.3), is a choice inside the pipeline, not a second
   pipeline. There is no pipeline per connector and none per source.
 - **The version is recorded per item.** A change is applied in batches, so one source is partly on
-  the old version while the change runs, and a record per source would be too coarse. Central stamps
+  the old version while the change runs, and a record per source would be too coarse. The hub stamps
   `pipeline_version` on every chunk it writes (§4.4) and returns it in the listing of a source's
   items (§2.3). The ingestion side keeps a copy per item (§4.3).
 - **A version changes only on a major event** (D8): a change of parsing, admission or chunking that
@@ -304,16 +322,16 @@ Not built (v0.3): `pipeline_version` in the chunk payload and in the listing.
 | | Parsing, admission or chunking | Embedding model |
 |---|---|---|
 | What changes | The chunks | The vectors |
-| Redoing it needs | The item's content, so its source submits the item again | Only the chunk `text`, which central holds in the payload (§4.4) |
+| Redoing it needs | The item's content, so its source submits the item again | Only the chunk `text`, which the hub holds in the payload (§4.4) |
 | Old and new together | Yes. Both are valid chunks with comparable vectors, so the collection can hold a mix | No. A query is embedded once, and one query vector cannot be compared with the vectors of two models |
-| Applied | Per item, in batches, as each source re-submits | To the whole collection, by central, without the sources |
+| Applied | Per item, in batches, as each source re-submits | To the whole collection, by the hub, without the sources |
 
-- **A change of parsing, admission or chunking.** Central announces its current version (§12). A
+- **A change of parsing, admission or chunking.** The hub announces its current version (§12). A
   source re-submits the items whose chunks carry an older version, when it is next reachable.
-  Central keeps no record of an item beyond its chunks and waits for no source, so the items of an
+  The hub keeps no record of an item beyond its chunks and waits for no source, so the items of an
   offline source stay on the old version, and stay searchable, until that source returns.
 - **A change of embedding model.** It is never applied item by item and the collection never holds
-  the vectors of two models in one searchable set. Central re-embeds from the stored `text`; no
+  the vectors of two models in one searchable set. The hub re-embeds from the stored `text`; no
   source re-submits and nothing is parsed again. The mechanism (a second vector or a second
   collection, and the switch between them) is defined when a second embedding model is chosen
   (§13.3).
@@ -337,9 +355,10 @@ instance the item comes from (§4.7). The key is the item's natural key, in the 
 defines. A key is unique within its source and makes no claim outside it: the same path on two
 machines is two items, in two sources.
 
-**Status.** Built: the keys below. Not built (v0.3): the source as part of the identity. The three
-built sources share one state database and their key formats do not overlap, so today the key alone
-is unique.
+**Status.** Built: the keys below, except the `ragnart://` key of a ragnart project's managed files
+(v0.4; today every file is keyed by its full path). Not built (v0.3): the source as part of the
+identity. The three built sources share one state database and their key formats do not overlap, so
+today the key alone is unique.
 
 | Connector | Item | Key |
 |---|---|---|
@@ -347,7 +366,7 @@ is unique.
 | Claude Code | Session | `claude-session://<session uuid>` |
 | Claude Code | Subagent transcript (direct or workflow agent) | `claude-session://<session uuid>/agent-<id>` |
 | OpenCode | Session | `opencode://<session id>` |
-| Filesystem | Captured page, operator-added file, note, collateral | Its path under the ragnart project's `.ragnart/`; the URL of a capture is an attribute |
+| Filesystem | File in a ragnart project's `resources/` or `collateral/`: added file, kept capture, note, collateral | `ragnart://<project id>/<path relative to the project folder>`, e.g. `ragnart://3f9c2e1a-…/resources/report.pdf`. The origin of a copy or a capture is recorded in the project's provenance (§4.5) |
 
 **Claude Code transcripts.** The scanner derives the key from the transcript's path
 (`claude_jsonl_key()` in `ragnart/scanner.py`). Workflow journals are excluded: a journal is an
@@ -386,22 +405,29 @@ The file name alone is not a key: of 11,772 indexed NAS files, 6,495 names are d
 | Display | A label for people: a file name, a session title | None |
 
 For a file, the key and the locator are the same path. For a Claude Code session they differ: the
-key carries the session uuid, and the locator is the transcript's path. No format is universal: a
+key carries the session uuid, and the locator is the transcript's path. For a file in a ragnart
+project's `resources/` or `collateral/` they differ too: the key carries the project id and the path within the
+project folder, and the locator is the file's full path, so a move of the project folder changes the
+locator only (§4.5). No format is universal: a
 key or a locator makes no claim outside its own source.
 
-**Moves.** A move is a one-to-one match within one sync of one source: exactly one completed file that vanished
+**Moves.** A move of a ragnart project's folder is not a move of its files: their keys do not change,
+and the sync rewrites their locators. Moving a file within a ragnart project's `resources/` and
+`collateral/`, and moving any other file, is a move in the following sense; for a file of a ragnart
+project, the commit plays the part of the sync. A move is a one-to-one match within one sync of one source: exactly one completed file that vanished
 and exactly one new file share a non-empty `content_hash`, and that hash is not the empty-file MD5
 (`d41d8cd98f00b204e9800998ecf8427e`). Session keys never take part. Any other case is a deletion
 plus a new item: several vanished or several new files with the same hash, a tombstoned item (§10.2),
 or a file that was both moved and edited between two scans, whose hash changed. A move rewrites the
 key in one operation in the state database and in the `source_path` payload of its chunks; nothing
-is re-embedded. A source on another host asks central for the payload change (§2.3). A move is not
+is re-embedded. A source on another host asks the hub for the payload change (§2.3). A move is not
 counted by the mass-delete guard (§10.2, rule 3).
 
 **Sessions** are keyed by session id because their files move: `~/.claude/scripts/
 project-chats.sh` relocates a session's `.jsonl` between Claude Code project folders. With the
-session id as key, such a move changes only where the transcript is read from (`origin_path`). It
-does not change the session's ragnart project, which is assigned from its launch directory (§4.5).
+session id as key, such a move changes only where the transcript is read from (`origin_path`). A
+ragnart project includes a session by a reference to its id (§4.5), so the move changes nothing
+there either.
 
 **Hashing** is MD5 (change, move and duplicate detection, not security). A NAS file is hashed when
 the scan first discovers it, so that a move can be found in the same sync, and ingestion hashes it
@@ -425,19 +451,19 @@ metadata backfill gives existing rows the same values. OpenCode rows have no `si
 | `source_id` | The source the item belongs to (§4.7). Not built (v0.3) |
 | `source_type` | `file`, `claude_session`, `opencode_session`, `web_capture`, `upload`, `collateral` |
 | `file_type` | Extension class: `pdf`, `md`, `txt`, …. For sessions: `claude_chat` (Claude Code), `opencode` (OpenCode) |
-| `project_id` | The ragnart project the item belongs to (§4.5), or `global` outside every ragnart project (§4.6) |
+| `project_id` | The ragnart project whose `resources/` or `collateral/` holds the item (§4.5), or `global` for every other item (§4.6). A session is always `global`: a ragnart project includes it by reference |
 | `owner` | Accountable person (metadata, §6) |
 | `size_bytes`, `content_hash`, `hashed_at` | Change, move and duplicate detection |
 | `first_seen_at` | When RAGNART first discovered the item |
 | `modified_at` | Per type: file mtime; session = time of last activity; capture = fetch time |
 | `ingested_at` | When its chunks were last written |
-| `pipeline_version` | The ingestion side's copy of the version central stamped on the item's chunks: `p1`, … (§4.1) |
+| `pipeline_version` | The ingestion side's copy of the version the hub stamped on the item's chunks: `p1`, … (§4.1) |
 | `chunk_count` | Number of points written; used by reconciliation (§10.3) |
 | `status`, `error_msg`, `skip_reason`, `retry_count` | Queue state |
 | `missing_since` | Tombstone: when the item was last seen missing (§10.2) |
 | `origin_path` | The locator (§4.2): where the item's bytes are read. A NAS file: the same as its key. A Claude Code transcript: the real `.jsonl` path (its key is `claude-session://…`). OpenCode: `NULL`, read through the API |
-| `launch_dir` | Session launch directory: for Claude Code, the first non-empty `cwd` of the transcript; for OpenCode, `location.directory`. Recorded verbatim, never normalised, including a stale or deleted directory. `NULL` for files |
-| origin details | Sessions: `session_id` and `session_title` in the payload (§4.4); there is no separate session start-time field, `first_seen_at` is when RAGNART first saw the item. Captures: `url`, `fetched_at` (v0.4, §7.3) |
+| `launch_dir` | Session launch directory: for Claude Code, the first non-empty `cwd` of the transcript; for OpenCode, `location.directory`. Recorded verbatim, never normalised, including a stale or deleted directory. Metadata only: no rule reads it. `NULL` for files |
+| origin details | Sessions: `session_id` and `session_title` in the payload (§4.4); there is no separate session start-time field, `first_seen_at` is when RAGNART first saw the item. Files of a ragnart project: the origin of a copy or a capture (URL or original path, and when it was added) is in the project's provenance (§4.5), not here |
 
 ### 4.4 Per-chunk payload (Qdrant)
 
@@ -461,11 +487,11 @@ carried: `file_name`, `chunk_index`, `text`, `parent_text`, `page`, `tag`, and o
 | `source_type`, `file_type` | keyword | Metadata filters |
 | `modified_at`, `ingested_at` | datetime | Time filters |
 | `content_hash` | keyword | Collapse identical copies in results |
-| `pipeline_version` | keyword | The pipeline version that made the chunk, set by central (§4.1). Not built (v0.3): existing points receive `p1` in the same payload backfill as `source_id` |
+| `pipeline_version` | keyword | The pipeline version that made the chunk, set by the hub (§4.1). Not built (v0.3): existing points receive `p1` in the same payload backfill as `source_id` |
 | `file_name` / title | — | Display |
 | `chunk_index`, `text` (child, embedded), `parent_text` (returned) | — | Content |
 
-The connector type is not copied onto chunks: the central registry maps a `source_id` to its
+The connector type is not copied onto chunks: the hub registry maps a `source_id` to its
 connector (§4.8). The locator is not in the payload (§4.2).
 
 Project tags are **not** copied into payloads (§4.5). The current fields `page` (always `0`)
@@ -474,178 +500,272 @@ helps citations) or dropped.
 
 ### 4.5 ragnart projects
 
-**Status.** This section is the design. Built in v0.2, to an earlier model: marker discovery, tags,
-the tables and attachment. In that code every file under the directory that holds `.ragnart/`
-belongs to the ragnart project, every session is re-evaluated on every sync, `mode` is read from
-`project.toml`, and a ragnart project whose marker is missing is removed at once. Each part below
-names what differs from the code. The differences are built in v0.4 (`docs/Implementation-plan.md`
-§6), as are `ragnart init` and references. The RAGNART repository holds the first ragnart project.
+**Status.** This section is the design. Built in v0.2, to an earlier model: marker discovery by the
+walk of the crawl roots, tags and the tables. In that code every file under the directory that holds
+`.ragnart/` carries the ragnart project's `project_id`, a nested ragnart project records a `parent`,
+every sync assigns each session to the ragnart project whose directory encloses its `launch_dir`,
+`mode` is read from `project.toml`, and a ragnart project whose marker is missing is removed at once.
+The model below is built in v0.4 (`docs/Implementation-plan.md` §6), with `ragnart init`, the
+managed folders, references, registration, `ragnart mv` and `ragnart repair`. The RAGNART repository
+holds the first ragnart project, with a hand-written marker.
 
-**A ragnart project is a notebook.** It is the self-hosted counterpart of a NotebookLM notebook: a
-body of material kept for one purpose, and the conversations held over it. It is implemented as one
-directory, `.ragnart/`, and the workflow of §7.3 inside it. Its name and identity come from
-`.ragnart/project.toml`, not from the directory that holds it:
+**What a ragnart project is: a notebook.** It is the self-hosted counterpart of a NotebookLM
+notebook (§1).
+
+- **Many per topic.** "ACME-Q1" and "ACME-Q2" are two ragnart projects. A topic is a tag
+  (`customer = "ACME"`), never a folder.
+- **Material is added, removed and curated** (§7.3).
+- **Questions are answered from it**, librarian-style: facts, references and quotes (§8).
+- **Collateral is produced from it**: a summary, a commented index of its material, a presentation
+  (§7.3).
+
+**How it is built: a folder, as a git repository is.** Git is the model for the mechanics, not for
+what a ragnart project is (§1.2).
+
+```
+ACME-Q1/                  the project folder, created by `ragnart init ACME-Q1`
+  .ragnart/               state and metadata only, as `.git/` is (below)
+  inbox/                  captured material, not indexed, expires (§7.5)
+  resources/              the material: copies (added files, kept captures, notes) and references
+                          (sessions, ragnart projects); indexed
+  collateral/             documents produced from the material; indexed as derived material (§7.3)
+  draft.docx              external: not part of the ragnart project, and not indexed
+```
+
+**`ragnart init <name>`.** It creates the folder `<name>` in the current directory, and inside it
+`.ragnart/`, the three managed folders and a `project.toml` holding `name`, a new `id`,
+`grounding = "strict"` and `capture = true`. It prints them, registers the project folder with its
+ingestion host ("Registration" below), and publishes the ragnart project's record to the hub at once
+(§2.3, §12). It is `git init <dir>`, with two differences: the name is required, and a folder `<name>`
+that already exists is refused.
+
+- **`init` is not a commit.** It indexes nothing, and nothing is created in Qdrant: a `project_id` is a
+  value in the payload of chunks, and a new ragnart project has none. Its first chunks come from its
+  first commit.
+- **The record is published at `init`, not at the next sync**, so that search knows the ragnart
+  project at once: a search at scope `project` answers "no good hits" instead of HTTP 422, and the
+  hub's "one home" gate knows the `id`. When the hub cannot be reached, `init`
+  still succeeds, says that the record is not published, and the next commit or sync publishes it. A
+  new `id` is a fresh UUID, so the delay cannot cause a collision.
+
+- **The current directory has no meaning.** It is only where the folder is created. A ragnart project
+  created under `ACME/` has no relation to `ACME/` or to its files, and it can be moved anywhere
+  later.
+- **`init` never changes what is indexed.** The folder is new and empty, so nothing that already
+  existed is adopted.
+- `ragnart init --from <project> <name>` creates a ragnart project with a new `id` and a copy of the
+  material and settings of another. A folder copied by hand keeps the `id` of its original and is
+  refused ("Copies" below).
+- **A ragnart project is created from inside a session**, by the agent following the `/ragnart`
+  skill, which runs `ragnart init` and then adds the session to the new project (§7.3). Creation from
+  a shell is the exception. `init` behaves the same either way: it knows nothing about sessions.
+
+**Content: what the ragnart project manages.**
+
+- **Its managed folders are `inbox/`, `resources/` and `collateral/`.** Its material is the content
+  of `resources/` and `collateral/`, which its commits index; `inbox/` holds its working material,
+  which is never indexed. Membership is by location: a file placed there by hand belongs to the
+  ragnart project as one placed by `ragnart add` does, and a file removed from there leaves it
+  (§7.3).
+- **Its resources take two forms**: a copy of a file, or a reference to a session or a ragnart
+  project, held as a reference file in `resources/` ("Resources: references and copies" below).
+- **Every other file in the project folder is external.** The ragnart project does not know it, as
+  git does not know an untracked file, and it is not indexed: the global crawl does not enter a
+  project folder (§1.2, deviation D).
+- **Nesting has no meaning.** A ragnart project whose folder lies inside another one's folder is
+  external content to the outer one. The outer one neither contains it nor includes it in its scope,
+  and it is not its parent: a ragnart project has no parent. A file belongs to the ragnart project
+  whose managed folders hold it.
+- **No marker changes what is indexed.** `init` is the supported way to make a ragnart project, and
+  its folder is new. A marker that `init` did not make (written by hand, copied in, or `.ragnart/`
+  moved out of a project) is accepted only in a folder that holds no indexed `global` item
+  ("Registration" below). Otherwise the crawl would stop at it, and the folder's content would leave
+  the index.
+- **A code repository is not a ragnart project.** Its files are `global` material, found by the
+  global crawl. A ragnart project about a repository is a folder of its own, created by `init`, and
+  the sessions held in the repository are added to it explicitly (§7.4).
+- **There is no mode.** `project.toml` has no `mode` key (§7.2).
+
+**`.ragnart/`: state and metadata only.** It holds what would be lost if the project folder were
+copied to another host and every RAGNART database were empty: what the operator wrote, and what was
+recorded at the moment of a project action. Everything that can be rebuilt is kept elsewhere.
+
+| Content | Written by | Holds |
+|---|---|---|
+| `project.toml` | The operator, and `init` once | Identity, settings and tags (below). RAGNART never rewrites it |
+| `provenance/` | RAGNART: `add` and `capture` (§7.3) | One file per copy that RAGNART placed: its path in the project folder, its origin (a URL or the original path) and when it was added or captured. The folder is the authority on what exists. An entry whose file is gone is reported and ignored, and a file placed by hand has no entry |
+| `dropped/` | `drop` (§7.5) | Items set aside until the grace period ends |
+
+`.ragnart/` never holds parsing results, queue state, hashes, chunk counts or pipeline versions: they
+belong to the state database of the ingestion side and to the hub (§2.3, §4.8), and a second copy
+could disagree with them. It never holds a session's scope or grounding either: they belong to one
+session, not to the ragnart project ("Sessions" below). RAGNART writes into `.ragnart/` one file per
+entry, created atomically, and never rewrites a shared file (§10.6).
 
 ```toml
 name = "ACME-Q1 strategy"          # required, human-readable
 id   = "3f9c2e1a-6d1b-4c0e-9a57-2b8f0c4d7e11"   # written by `ragnart init`; never edited
-inherit_access = true              # optional, default true (§6.3)
 grounding = "strict"               # optional: default grounding in this project (§8.2)
 capture = true                     # optional: ambient capture into the inbox (§7.3)
 inbox_expiry_days = 30             # optional: lifetime of an inbox item (§7.5)
-kind = "customer"                  # optional tags: any key = value
+customer = "ACME"                  # optional tags: any key = value
 segment = "ISV"
 ```
 
-**Extent: a ragnart project is the content of its `.ragnart/` directory.**
-
-- **What belongs to it.** The files under `.ragnart/resources/` and `.ragnart/collateral/` (§7.3),
-  and the sessions assigned to it ("Membership" below). Its inbox is its working material and is not
-  indexed (§7.5). Its references name other ragnart projects ("References" below).
-- **The directory that holds `.ragnart/` is not the ragnart project.** The files beside `.ragnart/`
-  are external to it. The static policy (§7.2) ingests them as `global` items (§4.6), exactly as if
-  no ragnart project were there. A ragnart project never changes what is indexed outside its own
-  `.ragnart/`.
-- **One directory holds one ragnart project.** A directory has at most one `.ragnart/`, and
-  `ragnart init` refuses a directory that already has one. Several ragnart projects for one body of
-  material are several directories, each with its own `.ragnart/`. Such a directory may hold nothing
-  else.
-- **There is no mode.** The content of a ragnart project is curated: it enters only by an operator
-  add, a keep or new collateral (§7.2). Everything else is ingested by the static policy. The two do
-  not overlap, so `project.toml` has no `mode` key.
-
-```
-Acme/                              an ordinary directory, not a ragnart project
-  notes/report.pdf                 a global item, ingested by the static policy
-  Q1-strategy/                     holds the ragnart project "ACME-Q1 strategy"
-    .ragnart/project.toml
-    .ragnart/resources/report.pdf  a copy added by the operator; belongs to "ACME-Q1 strategy"
-  Q2-plan/                         holds a second ragnart project for the same material
-    .ragnart/project.toml
-```
-
-Built today: a file under the holding directory, at any depth, carries the ragnart project's
-`project_id`, and `mode` is read and stored, with no effect.
-
-**What the holding directory is for.** Two things, and nothing else.
-
-- **Addressing.** A ragnart project is addressed **by its source and the path of the directory that
-  holds it** (`~/Gin-AI/projects/AYA`, on the NAS source). A path means nothing outside its source
-  (§4.2), so the source is part of the address (§8.8). Within a source the path is unambiguous and
-  needs no name resolution.
-- **Sessions.** A session is launched in a directory, not inside `.ragnart/`. The holding directory
-  is how a session finds its ragnart project ("Membership" below, and §7.4).
-
 **`id` is the immutable, unique ragnart project identifier.** It lives inside `.ragnart/`, so it
-travels with any move or rename. The id is the one written in the ragnart project's `project.toml`.
-Moving a holding directory is specified under "Moving a ragnart project" below.
+travels with any move or rename of the project folder.
+
+**Address: the name.** People and commands refer to a ragnart project **by its `name`**
+("ACME-Q1"), which is unique across the hub registry, compared without regard to case. The `id` is
+its identity; the name is how it is addressed.
+
+**Status.** Not built (v0.4). Built today: a ragnart project is addressed by the path of its folder,
+and `name` need not be unique.
+
+- **The path of the folder is metadata.** It says where the folder is now, on which source, and it
+  changes whenever the folder moves (§4.2). A path still selects ragnart projects by where their
+  folders are (§8.8), but a name, an `id` or a tag is the stable way to refer to one.
+- **Uniqueness is checked when the record is published** (§2.3, §12). `init` refuses a name that the
+  hub registry already holds. When the hub cannot be reached, `init` succeeds, and a name found
+  taken at the first publication is reported on every sync, and the record is not published, until
+  the operator renames the ragnart project. A name changed in `project.toml` to one already taken is
+  refused in the same way, and the registry keeps the last good record (marker guards, below).
+- **The folder's name is `name` at creation.** The two may diverge afterwards: `name` in
+  `project.toml` is the authority.
+
+**Resources: references and copies.** Every item of a ragnart project's material is a resource, in
+`resources/` (or `collateral/`, §7.3). A resource takes one of two forms.
+
+**Status.** Not built (v0.4). Built today: the `project_links` table, which is empty.
+
+| Form | For | Held in `resources/` as |
+|---|---|---|
+| **Reference**, the rule | A Claude Code or OpenCode session; another ragnart project; any future kind of item with a stable id | A reference file, `<label>.reference`: the target's kind (`session` or `project`), its id, a label (a session's title, a ragnart project's name) and when it was added |
+| **Copy**, the exception | A file or a folder; a web page, captured | The file itself, with its origin in `.ragnart/provenance/` |
+
+- **The rule: a reference to a stable id.** Nothing is copied, and the target is included as it is
+  now: a referenced session is included with every turn it later gains.
+- **The exception: files are snapshotted.** A file is copied into `resources/` and ingested from the
+  copy, as part of the ragnart project (§7.3). The original may be edited, moved or deleted, and the
+  ragnart project must not change or lose material when that happens. A web page is captured for the
+  same reason (§7.3).
+- **Material made in the ragnart project**, notes and collateral, is written into its managed folders.
+  It is neither referenced nor copied.
+- **Live or frozen is decided per kind of material**, not by whether it has an id: a session is
+  referenced because its past turns are never rewritten and its live record is wanted; a file is
+  copied because it can be rewritten or vanish. A future connector declares which side its items are
+  on.
+- **One verb for both forms.** `ragnart add <item>` adds the item to the current ragnart project, and
+  only to it: it copies a file and references a session or a ragnart project (§7.3). A ragnart
+  project may be given by its name or by the path of its folder; either is resolved to its `id`, and
+  only the `id` is stored.
+- **A reference file is a resource like any other.** Membership is by location: deleting a
+  `.reference` file by hand removes the reference, as deleting a copy removes it, and `ragnart drop`
+  sets it aside as it does a copy (§7.5). A commit does not ingest a reference file as text: it reads
+  the target from it and publishes the ragnart project's references (§7.3, §12).
+- **A reference widens scope, never access.** A referenced item or ragnart project is searched only
+  for a principal who may read it under its own access rule (§6.1).
+- **References between ragnart projects are not transitive.** When A references B, a search in A
+  covers B's material, including the sessions B references, and does not follow B's references to
+  other ragnart projects.
+- **A missing target is reported, never dropped.** The sync reports a reference to an id that no
+  ragnart project or session carries, and search ignores it. A session counts as missing only after a
+  run of its connector that could have found it, because a session is referenced before it is first
+  ingested.
+- **"Reference" is the only term.** The words "link" and "ref" are not used for it. A symbolic link is
+  a filesystem construct and never creates a reference: how a file reached through a symbolic link is
+  ingested is a matter of the filesystem connector, as for any file (§1.2, deviation C; §4.7).
+
+**Sessions.** A Claude Code or OpenCode chat session relates to ragnart projects in two distinct ways.
+
+- **A session works in at most one ragnart project, its current project, for its whole life.** The
+  current project is session state, held on the client host and keyed by the session's id, with the
+  session's scope and grounding (§8.4). It holds the ragnart project's `id`; the folder is looked up
+  from the registered projects when a command runs. A session gets its current project once: when
+  it starts in a project folder (the session-start hook, §7.4), or when it creates a ragnart project
+  (§7.3). It never changes it. The `ragnart` commands it runs act on its current project only.
+- **A session is in its current project as a resource.** Becoming a session's current project
+  always adds a reference to the session to that ragnart project.
+- **Any session can also be referenced as material by other ragnart projects**, by an explicit `add`
+  there: a `global` session, or one that works in another ragnart project. Being referenced by a
+  ragnart project is not working in it.
+- **Ingestion does not change.** Every session is ingested by its connector as one `global` item of
+  its owner, keyed by its id (§4.2), whether or not any ragnart project references it. A reference
+  re-ingests nothing, re-embeds nothing and writes nothing to Qdrant.
+- **A session started in a project folder works in that ragnart project.** The session-start hook
+  (§7.4) finds the closest `.ragnart/` at or above the session's working directory, makes that
+  ragnart project the session's current project, and adds the session to it, once, when the session
+  starts.
+- **`launch_dir` is metadata only** (§4.3). No rule compares it with a project folder.
+- **A search matches a referenced session by its `session_id`**, so the session's subagent
+  transcripts are included with it (§4.2).
+
+**Registration.** A ragnart project's folder may lie anywhere on a source that RAGNART can write to,
+inside or outside the crawl roots, and under an excluded directory.
+
+- **`init` registers the project folder** with the ingestion host of its source. Each sync of a
+  filesystem source reads the registered project folders, and also walks its crawl roots. The marker
+  is read before the walk prunes a directory's children, so a rule on the children cannot hide it,
+  and the walk does not enter a project folder (§1.2, deviation D).
+- **A marker the walk finds that is not registered** is decided by its `id`:
+  - a known `id` at a new path is a registered ragnart project that moved ("Moving" below), when its
+    registered path no longer carries the marker; otherwise it is a copy ("Copies" below);
+  - an unknown `id`, in a folder that holds no indexed `global` item, is registered as a new ragnart
+    project;
+  - an unknown `id`, in a folder that holds indexed `global` items, is refused. The sync logs an
+    ERROR on every run until the marker or the content is removed, and walks the folder as if the
+    marker were not there, so nothing leaves the index. Turning an existing folder of material into
+    a ragnart project is not supported: `init` a new one and `add` what is wanted, which copies it.
+- **`.ragnart/` is never ingested**, whether its folder is a ragnart project or a refused one:
+  `config/ragignore` excludes it.
+- **`ragnart repair <path>`** registers a project folder that was moved by hand to a place no
+  registration or walk covers (`git worktree repair`).
+- A marker with the reserved id `global` is logged at ERROR and ignored.
+- `scope`, `grounding`, `capture` and `inbox_expiry_days` are reserved keys: they are not tags and
+  are not stored. The `/ragnart` client (v0.4) reads them from `project.toml`.
+
+**Keys of managed files.** A file in a ragnart project's `resources/` or `collateral/` is keyed
+`ragnart://<project id>/<path relative to the project folder>`, and its full path is its locator
+(§4.2). Its key does not change when the project folder moves. Every other file, including an
+external file in a project folder, keeps its full path as its key.
 
 **One home.** A ragnart project lives in exactly one place: one source and one path.
 
 **Status.** Not built (v0.3). Built today: one source holds ragnart projects, with a duplicate rule
-within one scan (see "Marker discovery" below).
+within one scan ("Marker guards" below).
 
-- **The source is tree-shaped and writable.** RAGNART writes the marker, the inbox, the resources,
-  the collateral and the references under `.ragnart/` (§7.3). A source that RAGNART can only read
-  cannot hold a ragnart project, and its items are `global` (§4.6).
+- **The source is tree-shaped and writable.** RAGNART writes `.ragnart/` and the managed folders
+  (§7.3). A source that RAGNART can only read cannot hold a ragnart project, and its items are `global`
+  (§4.6).
 - **Sharing is a grant, never a replica.** A ragnart project that several people use lives on a
-  central source (§4.7), and each of them holds a grant on it (§6.3). It is not copied to their
+  hub source (§4.7), and each of them holds a grant on it (§6.3). It is not copied to their
   machines, and no machine ingests it a second time. A ragnart project on an endpoint source belongs
   to that source's owner and is not shared.
 - **A second sighting of a project id is refused.** A project id that is homed on one source and is
   then published by another (§12) is refused and reported; the registered home keeps it. The cause
   does not matter: a cloned repository, a restored backup and a folder synchronised between machines
-  all carry the marker with them. The files under the refused marker are still ingested, as `global`
-  items of their owner.
+  all carry the marker with them. The managed folders under the refused marker are ordinary folders:
+  their files are ingested as `global` items of their owner, under the exclusion rules.
 
-**Membership.** Every item belongs to exactly one project: a ragnart project, or `global` (§6.1).
+**Moving a ragnart project.**
 
-- **A file** belongs to the ragnart project whose `.ragnart/` it is under. Every other file is
-  `global`. The file's key decides, so nothing is evaluated over time, and a file never passes from
-  `global` into a ragnart project: it enters one as a copy (§7.3).
-- **A session**, which is a Claude Code or an OpenCode chat session, is assigned to the closest
-  enclosing ragnart project of its launch directory when it is first found to have one, and keeps
-  that ragnart project until the ragnart project is removed. A session with no enclosing ragnart
-  project is `global`: an ordinary session, ingested as before.
-  - The closest enclosing ragnart project of a directory is the one held by that directory or,
-    failing that, by its nearest ancestor that holds one.
-  - The launch directory is `launch_dir` (§4.3). It is metadata, and the input to this rule. It is
-    not an identifier of the session or of the ragnart project.
-  - `launch_dir` is compared verbatim with the paths of the holding directories, with no `realpath`.
-    A session launched through another spelling of the same directory, for example a path under
-    `/home/florian/Gin-AI/…` that is a symbolic link, is not assigned (§13.3).
-  - While a session is `global`, the rule is evaluated on every sync. A session held before
-    `ragnart init` is therefore assigned at the first sync after it.
-  - Once assigned, a session is not evaluated again. Moving or renaming the holding directory does
-    not change it.
-  - When its ragnart project is removed, a session returns to `global` and is evaluated again.
-  - A subagent transcript takes the ragnart project of its parent session.
-- **A ragnart project's parent** is the closest enclosing ragnart project of the parent of its
-  holding directory.
-- **A change of `project_id`** is written to the chunk payloads (`set_payload`, no re-embedding) and
-  then to SQLite. An item queued for purge (§10.2, rule 2) is not assigned again.
+- **On one ingestion host**, by `ragnart mv` or by hand: the next sync finds the `id` at the new path,
+  gives its `projects` row the new path and rewrites the locators of its managed files. Their keys do
+  not change, so nothing is matched by hash and nothing is re-embedded. Its references are
+  `.reference` files in `resources/` and move with it. A folder moved by hand to a place the sync does not read is found
+  again by `ragnart repair`; until then its marker is not found, and the marker guards apply.
+- **To another source**, only by `ragnart mv <project> <destination>`. It copies the project folder,
+  verifies the copy, releases the old home and claims the new one. The hub rewrites the `source_id` of
+  the managed files' chunks (§2.3), so nothing is re-embedded, there is no window in which the `id` is
+  refused, and grants on the `id` survive. A project folder moved by hand to another source is refused
+  there as a second sighting until the operator runs `ragnart repair` at the new place, which claims
+  the new home once the old home no longer finds the marker. The destination must be a writable
+  source with a running ingestion side (§2.3).
 
-Built today: every sync re-evaluates every completed item, files and sessions alike, against the
-holding directories, so a session returns to `global` when its ragnart project's directory moves.
-
-Assignment is computed on the ingestion side: `launch_dir` is compared with the holding directories
-of the ragnart projects held by the sources of the same ingestion host. `launch_dir` is the path as
-the session's own host spelled it. A session run on another host is therefore assigned only when
-that spelling equals the path on the ingestion host, and it is never assigned to a ragnart project
-on a source of another ingestion host: it stays a `global` item of its owner.
-
-Items outside ragnart projects are ingested and searched exactly as in the single-user RAG. Existing
-RAG ingestion, search, and semantics hold for all items that are not part of a ragnart project, now
-or in the future. Only when ragnart projects are defined and items belong to a ragnart project does
-the ragnart data and retrieval model apply. Items not in the scope of a ragnart project follow the
-baseline data model (§4.6) and the current RAG retrieval semantics.
-
-**Git parallel.** Files outside any git repository are still files, and repositories nest. Ragnart
-projects work the same way: an item outside every ragnart project is still an item. Unlike a
-repository, a ragnart project does not own the files of the directory that holds it (§1.2,
-deviation I).
-
-**References.**
-
-**Status.** Not built (v0.4). Built today: the `project_links` table, which is empty.
-
-- **A ragnart project may reference other ragnart projects.** A reference adds the referenced
-  ragnart project to what scope `project` searches (§8.1).
-- **"Reference" is the only term.** The word "link" is not used for it. A symbolic link is a
-  filesystem construct and never creates a reference: how a file reached through a symbolic link is
-  ingested is a matter of the filesystem connector, as for any file (§1.2, deviation C; §4.7).
-- **A reference points at a ragnart project, never at an item.** A file wanted in a ragnart project
-  is copied into its `resources/` (§7.3). References to items, for something that cannot be copied
-  such as a session, are not part of the design and may be added later (§13.3).
-- **References are stored in the ragnart project**, in `.ragnart/references`: one reference per
-  line, the `id` of the referenced ragnart project, and after a `#` a comment in which RAGNART
-  writes its name. The file is the authority. On each sync the set read from it replaces the
-  published set, as for tags.
-- **A reference widens scope, never access.** A referenced ragnart project is searched only for a
-  principal who may read it at its home (§6.1).
-- **References are not transitive.** When A references B, a search in A covers B and does not
-  follow B's own references.
-- A reference to an `id` that no ragnart project carries is reported by the sync and ignored.
-
-**Tags** are arbitrary `key = value` pairs: every key except the reserved `name`, `id`,
-`inherit_access`, `scope`, `grounding`, `capture` and `inbox_expiry_days`, and except `mode`, which
-stays reserved and ignored so that a `project.toml` written before this model does not gain a tag.
-They are stored as rows `(project_id, key, value)`. On each sync the tag set read from
-`project.toml` replaces the stored set: changing `industry = "ISV"` to `segment = "ISV"` deletes one
-row and adds one, for the same `project_id`. A tag filter is resolved to a set of ragnart project
-ids in the database before the search, so tag changes never touch Qdrant.
-
-**Marker discovery (built).** Every sync of a filesystem source walks its roots (today the NFS
-roots) and reads each `.ragnart/project.toml` it finds, so the set of ragnart projects follows the
-disk. The marker is read before the walk prunes a directory's children, so a rule on the children
-cannot hide it. A directory excluded by a `.ragignore` holds no ragnart project. Then:
-
-- A marker with the reserved id `global` is logged at ERROR and ignored.
-- `parent` is recorded among the ragnart projects that exist after the sync, so a nested ragnart
-  project records the one that encloses it.
-- `grounding`, `capture` and `inbox_expiry_days` are reserved keys: they are not tags and are not
-  stored. Their values are not checked in v0.2. The `/ragnart` client (v0.4) reads them from
-  `project.toml`.
+**Copies.** A project folder copied by hand carries the `id` of its original. Within one source the
+registered path keeps the `id`, and the copy's marker is logged at ERROR and ignored; across sources
+the copy is refused as a second sighting. `ragnart init --from` is the way to start a ragnart project
+from another.
 
 **Marker guards.** A ragnart project is protected as an item is (§10.2): a marker that cannot be
 read, or that is not seen, neither removes the ragnart project nor changes what it holds.
@@ -655,62 +775,52 @@ malformed is removed in the same sync, with its tags and its `project_links` and
 rows, and its items are re-attached. Of two markers with one id in a scan, the first in walk order
 keeps it.
 
-- **A malformed marker of a directory that holds no registered ragnart project** (invalid TOML, or
-  `name` or `id` missing or not a string) is logged at ERROR and ignored. The directory holds no
-  ragnart project.
+- **A malformed marker of a folder that holds no registered ragnart project** (invalid TOML, or
+  `name` or `id` missing or not a string) is logged at ERROR and ignored. The folder holds no ragnart
+  project.
 - **A registered ragnart project whose marker turns malformed or unreadable keeps its last good
   record.** The sync logs an ERROR on every run, and nothing about the ragnart project changes until
   the marker can be read again. The reason is that of deviation G (§1.2): a rule that cannot be read
   must neither admit nor delete.
 - **A registered ragnart project whose marker is not found is tombstoned, not removed.** Its
-  `missing_since` is set at the first sighting. Its record, its tags, its references and its
-  sessions stay as they are. The first sync more than 24 hours later removes it. A marker found
-  again before that clears the tombstone. As for items, this happens only when no root was skipped,
-  and with `--user` only for that owner's ragnart projects (§10.2, rule 1).
-- **Removal.** The ragnart project's `projects` row, its tags and its published references go. Its
-  sessions return to `global`. A file still under its `.ragnart/` becomes a `global` item; a file
-  that vanished with it follows the deletion rules of §10.2.
-- **Two markers with one id in one source.** The path already registered keeps the id, and the
-  other marker is logged at ERROR and ignored. This is the rule of "One home" above, applied within
-  a source. When neither path is registered, the first in walk order keeps it. When the registered
-  path has no marker any more and exactly one other marker carries the id, the ragnart project has
-  moved (next paragraph).
+  `missing_since` is set at the first sighting. Its record, its tags and its references stay as they
+  are. The first sync more than 24 hours later removes it. A marker found again before that, by the
+  sync or by `ragnart repair`, clears the tombstone. As for items, this happens only when no root was
+  skipped, and with `--user` only for that owner's ragnart projects (§10.2, rule 1).
+- **Removal.** The ragnart project's `projects` row, its tags and its published references go. The
+  sessions it referenced are unaffected: they are `global` items. A file still in a managed folder of
+  a removed ragnart project is an ordinary file: it is ingested as a `global` item under its full
+  path, and its `ragnart://` item follows the deletion rules of §10.2.
+- **Two markers with one id in one source.** The registered path keeps the id, and the other marker
+  is logged at ERROR and ignored. This is the rule of "One home" above, applied within a source. When
+  neither path is registered, the first in walk order keeps it. When the registered path has no
+  marker any more and exactly one other marker carries the id, the ragnart project has moved.
 
-**Moving a ragnart project.** When the directory that holds a ragnart project is moved or renamed,
-the next sync gives its `projects` row the new `path`. The id does not change.
+**Tags** are arbitrary `key = value` pairs: every key except the reserved `name`, `id`, `scope`,
+`grounding`, `capture` and `inbox_expiry_days`, and except `mode` and `inherit_access`, which stay
+reserved and ignored so that a `project.toml` written before this model does not gain a tag. They are
+stored as rows `(project_id, key, value)`. On each sync the tag set read from `project.toml` replaces
+the stored set: changing `industry = "ISV"` to `segment = "ISV"` deletes one row and adds one, for
+the same `project_id`. A tag filter is resolved to a set of ragnart project ids in the database
+before the search, so tag changes never touch Qdrant.
 
-- Every file under its `.ragnart/` has a new key, so each is a move (§4.2) when the one-to-one rule
-  matches, with its `source_path` rewritten and no re-embedding. Otherwise it is a deletion plus a
-  new item. Either way the file is under the same `.ragnart/` and belongs to the same ragnart
-  project.
-- Its sessions keep it: an assigned session is not evaluated again. Their `launch_dir` is recorded
-  verbatim (§4.3) and is not rewritten.
-
-Built today: a session launched from the old path no longer matches after the move, and the next
-sync attaches it to `global`.
-
-**Tables.** `projects` (id, parent, path, name, owner, inherit_access; also the reserved `global`
-row, §4.6), `project_tags`, `project_links` (the published references) and `grants` (§6). Built
-today, and with no use in the design: the `mode` column of `projects`, and the `source_links` table,
-which was meant for references to items. No code inserts into `project_links`, `source_links` or
-`grants` yet. Whether `project_links` is renamed, and `source_links` and `mode` dropped, when the
-tables move to the central registry is a decision of the v0.3 kickoff (`docs/Implementation-plan.md`
-§8).
+**Tables.** `projects` (id, path, name, owner; also the reserved `global` row, §4.6), `project_tags`,
+`project_links` (the published references) and `grants` (§6). Built today, and with no use in the
+design: the `parent` and `mode` columns of `projects`, and the `source_links` table. No code inserts
+into `project_links`, `source_links` or `grants` yet. How the tables are reshaped when they move to
+the hub registry (renaming `project_links` for references to ragnart projects and sessions,
+dropping `parent`, `mode` and `source_links`) is a decision of the v0.3 kickoff
+(`docs/Implementation-plan.md` §8).
 
 These tables are records published for retrieval: scope resolution and the project listing read them
-(§8.8, §12). `project.toml` and `.ragnart/references` on the source stay the authority. Their place
-is the central registry (§4.8), where `projects` also records each ragnart project's home source and
-each ingestion side publishes its records (§12). Built today: the tables are in the state database,
-and the sync writes them directly.
+(§8.8, §12). `project.toml` and the reference files in `resources/` stay the authority. Their place is the hub
+registry (§4.8), where `projects` also records each ragnart project's home source and each ingestion
+side publishes its records (§12). Built today: the tables are in the state database, and the sync
+writes them directly.
 
-**`ragnart init`.** It creates `.ragnart/` in the current directory, with a `project.toml` that
-holds the `name`, a new `id`, `grounding = "strict"` and `capture = true`, and it prints them.
-
-- **`ragnart init` never changes what is indexed.** This holds by construction: a ragnart project
-  does not own the files beside its `.ragnart/`, so creating one adds an empty notebook and touches
-  no item.
-- It refuses a directory that already has a `.ragnart/`.
-- The operator changes `grounding` or `capture` afterwards by editing `project.toml`.
+**Items outside ragnart projects** are ingested and searched exactly as in the single-user RAG. Every
+item that is not in the managed folders of a ragnart project follows the baseline data model (§4.6)
+and the current RAG retrieval semantics, now and in the future.
 
 ### 4.6 Baseline data model
 
@@ -738,13 +848,13 @@ in a ragnart project.
 - **Item-level metadata.** The fields of §4.3, including `size_bytes`, `content_hash`, `modified_at`
   and `ingested_at`.
 - **Launch directory.** Sessions carry `launch_dir` (§4.3), recorded verbatim and never rewritten or
-  normalised, including a stale or deleted directory. Files have none.
+  normalised, including a stale or deleted directory. It is metadata only. Files have none.
 - **`project_id` is `global`.** One reserved value for every item outside a ragnart project. It is one
   value, not one per owner: tenancy is already carried by `owner`. It is not one per source either:
   the source is a separate field (`source_id`, §4.4), so the baseline items of one source are the
   items with `project_id` `global` and that `source_id`.
-- **Reserved project row.** The `projects` table holds a row with `id` `global`. It has no path and
-  no parent, it is never a parent, and nothing inherits from it.
+- **Reserved project row.** The `projects` table holds a row with `id` `global`. It has no path, and
+  nothing inherits from it.
 
 #### (c) Retrieval semantics
 
@@ -780,9 +890,9 @@ project by a common path ancestor.
 
 A file never passes from `global` into a ragnart project. It is copied into the ragnart project's
 `resources/` (§7.3), and the copy is a new item, ingested as any file is. The original stays a
-`global` item, and identical copies collapse in results (§9.1). The assignment of a session to a
-ragnart project (§4.5) changes only its `project_id`: in the state database, and in Qdrant by
-`set_payload`. It never re-embeds.
+`global` item, and identical copies collapse in results (§9.1). A session never passes into a
+ragnart project either: it stays a `global` item, and a ragnart project includes it by a reference
+to its id (§4.5). A reference changes nothing in the state database or in Qdrant.
 
 ### 4.7 Connectors and sources
 
@@ -824,23 +934,23 @@ exist: the files on the NAS, the Claude Code sessions and the OpenCode sessions.
 
 | Form | For | Turned into text by |
 |---|---|---|
-| Bytes, with a declared file type | General document formats: `pdf`, `docx`, `pptx`, `ipynb` and the text-like extensions (§5.1) | Central. Its parsers are chosen by file type, so a PDF is parsed identically whichever source submitted it |
+| Bytes, with a declared file type | General document formats: `pdf`, `docx`, `pptx`, `ipynb` and the text-like extensions (§5.1) | The hub. Its parsers are chosen by file type, so a PDF is parsed identically whichever source submitted it |
 | Text | A format native to the connector: a Claude Code transcript, an OpenCode session read from its API | The connector. No other connector produces that format, so there is nothing to keep consistent across sources |
 
 A connector for a store whose documents have no bytes of their own exports them to a general format
-and submits that. Central publishes the file types it accepts, and the admission limits a source
+and submits that. The hub publishes the file types it accepts, and the admission limits a source
 applies before it submits (§5.2, §12).
 
 **What a source is.**
 
 - **Id.** `source_id`, chosen by the operator when the source is registered, and unique across
-  RAGNART. `tag` is reserved and cannot be a source id (§8.8).
+  RAGNART. `tag` and `name` are reserved and cannot be source ids (§8.8).
 - **Owner binding.** How the owner of each of its items is derived.
 - **Credential.** One secret per source, checked at the write-time gate (§12).
 
-| | Central source | Endpoint source |
+| | Hub source | Endpoint source |
 |---|---|---|
-| Run by | Central's own host | Any other host; typically a laptop that is reachable only some of the time |
+| Run by | The hub's own host | Any other host; typically a laptop that is reachable only some of the time |
 | Owner | From the source's own mapping. The NAS source maps each crawl root to an owner (`ragnart.yaml`) | One owner, fixed at registration. A machine used by two people runs one source per person |
 | Its items | `global` items under the owner rule, and ragnart projects that grants can share (§6) | Its owner's: `global` items, and ragnart projects that are not shared (§4.5) |
 
@@ -863,25 +973,26 @@ is scheduled. The contract is defined so that one can be added.
 **Status.** Not built (v0.3). Built today: the Qdrant payload without `source_id`, and one database,
 `rag_state.db`, which holds both the per-item rows and the ragnart project tables.
 
-**Central holds what retrieval filters on or displays, and what gates a write. The ingestion side
+**The hub holds what retrieval filters on or displays, and what gates a write. The ingestion side
 holds what decides whether to submit, re-submit or delete.** That gives three stores.
 
 | Store | Where | Granularity | Contents |
 |---|---|---|---|
-| Qdrant payload (§4.4) | Central | Per chunk | `source_id` and key; `project_id`, `owner`; `source_type`, `file_type`, `modified_at`, `ingested_at`, `content_hash`, `pipeline_version`; the display fields; `text` and `parent_text` |
-| Central registry | Central | Per source and per ragnart project | The sources: id, connector, owner binding, secret. The published ragnart project records: the tables of §4.5, with each ragnart project's home source. The current pipeline version. The status of items in transit. Grants, when tenancy is built (§6) |
+| Qdrant payload (§4.4) | The hub | Per chunk | `source_id` and key; `project_id`, `owner`; `source_type`, `file_type`, `modified_at`, `ingested_at`, `content_hash`, `pipeline_version`; the display fields; `text` and `parent_text` |
+| Hub registry | The hub | Per source and per ragnart project | The sources: id, connector, owner binding, secret. The published ragnart project records: the tables of §4.5, with each ragnart project's home source. The current pipeline version. The status of items in transit. Grants, when tenancy is built (§6) |
 | State database (§4.3) | Each ingestion host | Per item | Queue status, errors and retries; size, hash and hash time; `first_seen_at`; its copy of `pipeline_version`, and `chunk_count`; `missing_since`; the locator (`origin_path`); `launch_dir` |
 
 - **Some fields exist on both sides**: the key, `project_id`, `owner`, the types, the times and the
   content hash. They are in the payload because search filters on them, and in the state database
   because the sync decides with them.
 - **The locator never leaves the ingestion side** (§4.2).
-- **The authority for a ragnart project is its `.ragnart/`**: `project.toml` and `references`
+- **The authority for a ragnart project is its folder**: `.ragnart/project.toml`, and the reference
+  files in `resources/`
   (§4.5). The registry holds the published copy.
 - **Each store can be inspected and repaired on its own.** The operator's maintenance tools act on
-  central's two stores. A lost state database is rebuilt from central's listing of that source's
+  the hub's two stores. A lost state database is rebuilt from the hub's listing of that source's
   items (§2.3).
-- The central registry is not a ragnart project's catalogue (§7.4), which is the listing of that
+- The hub registry is not a ragnart project's catalogue (§7.4), which is the listing of that
   ragnart project's items.
 
 ## 5. Pipeline `p1` and retrieval
@@ -892,7 +1003,7 @@ reads what the pipeline stored. It is described here and is not part of `p1`.
 
 ### 5.1 Parsing
 
-The pipeline starts at the submission (§4.1). Central parses the general document formats, which a
+The pipeline starts at the submission (§4.1). The hub parses the general document formats, which a
 source submits as bytes. A connector renders its own native format to text before it submits; that
 rendering belongs to the connector and is listed in §4.7. Built today: both run in
 `ragnart/ingest.py` on Server 2.
@@ -919,9 +1030,9 @@ same definitions, so they cannot drift from ingestion.
 already-indexed item that an exclusion rule now matches leaves the index through the sync (§10.2).
 
 **After queueing (ingestion), in this order.** These rules run where the content is processed, in
-central. The result is returned to the source (§2.3), whose queue row records `ignored` and the
+the hub. The result is returned to the source (§2.3), whose queue row records `ignored` and the
 reason. The size rule is the exception to where the rules run: a source applies it before it
-submits, with the limit central publishes (§12), so that an oversized file is not uploaded only to
+submits, with the limit the hub publishes (§12), so that an oversized file is not uploaded only to
 be refused (not built, v0.3; today ingestion applies it on Server 2). The size, NUL-byte and
 replacement-character rules
 apply to text-like files only: every type except `pdf`, `docx` and `pptx` (docling), `ipynb`,
@@ -1010,16 +1121,18 @@ rerank score (§9.2), which a hit does not carry yet (§8.7).
 
 ### 6.1 Every item has exactly one project
 
-Every item belongs to exactly one project: a ragnart project (§4.5), or the reserved `global`
-project for an item outside every ragnart project (§4.6). A ragnart project is the content of a
-`.ragnart/` directory: its resources, its collateral and the sessions assigned to it. The files
-beside `.ragnart/` are `global` items. Ragnart projects nest as §4.5 defines. NAS roots are not
-projects: a crawl root is a traversal starting point and the owner mapping (§4.6). A source is not a
-project either (§4.7).
+Every item belongs to exactly one project, which is its access home: a ragnart project (§4.5) for a
+file in that ragnart project's `resources/` or `collateral/`, or the reserved `global` project for every other item
+(§4.6). The other files of a project folder are not indexed (§1.2, deviation D). Every session is a `global` item of
+its owner, whichever ragnart projects reference it. A nested ragnart project has no relation to the
+one around it (§4.5). NAS roots are not projects: a crawl root is a traversal starting point and the
+owner mapping (§4.6). A source is not a project either (§4.7).
 
-A ragnart project may reference other ragnart projects (§4.5). A reference widens what a search
-covers and never who may read: a referenced ragnart project is searched only for a principal who may
-read it under its own access rule.
+A ragnart project may reference other ragnart projects and sessions (§4.5). A reference widens what a
+search covers and never who may read: a referenced ragnart project or session is searched only for a
+principal who may read it under its own access rule. In a shared ragnart project, a principal is
+therefore shown only the referenced sessions they may already read: sharing a ragnart project does
+not share the sessions it references.
 
 Access to an item in a ragnart project is defined **only through grants on that ragnart project**
 (§6.3). Access to a `global` item is the owner rule (§6.5). Content shared with the family is either
@@ -1039,25 +1152,24 @@ A principal is a **person** or a **group**. Groups come from the identity provid
 claim of an OAuth token), so team membership is managed there. Clients (Claude Code, OpenCode,
 the CLI, Kotaemon) act **as the person** using them; they are not principals of their own.
 
-### 6.3 Grants and inheritance
+### 6.3 Grants
 
-- A grant gives a principal a role on a ragnart project. It applies to that ragnart project and to the
-  ragnart projects nested in it.
-- A ragnart project with `inherit_access = false` in `project.toml` does not inherit grants from its
-  parents: only its own grants apply. There are no deny rules.
-- Grants live in the central registry (§4.8) and are managed through the CLI or API. `project.toml`
+- A grant gives a principal a role on one ragnart project. It does not reach a ragnart project
+  nested in that one's folder: nesting has no meaning (§4.5), so nothing is inherited. There are no
+  deny rules.
+- Grants live in the hub registry (§4.8) and are managed through the CLI or API. `project.toml`
   holds structure only (the NAS is writable by anyone with access, so it cannot hold access
   rules).
-- Grants exist only on ragnart projects homed on a central source (§4.5, §4.7). A ragnart project on
+- Grants exist only on ragnart projects homed on a hub source (§4.5, §4.7). A ragnart project on
   an endpoint source, and every `global` item of an endpoint source, is its owner's.
 
 Example (a sales organisation):
 
 ```
-/Sales/EMEA/            ragnart project, granted to group sales-emea         (regional plans)
-/Customers/Acme/        ragnart project, granted to Alice (account manager)  (customer material)
-/Sales/EMEA/Acme/       if a customer sits under a region instead: inherit_access = false,
-                        granted to Alice only, so the EMEA team does not see it
+~/Notebooks/EMEA-plans/      ragnart project, granted to group sales-emea   (regional plans)
+~/Notebooks/ACME-Q1/         ragnart project, granted to Alice              (customer material)
+~/Notebooks/EMEA-plans/ACME/ a ragnart project inside EMEA-plans' folder: granted to Alice only;
+                             the EMEA team does not see it, because no grant is inherited
 ```
 
 ### 6.4 Roles
@@ -1070,8 +1182,8 @@ Example (a sales organisation):
 **Sharing and ownership transfer** are not implemented. The mechanism that fits the existing
 primitives:
 
-- A `share` role: its holder may add and remove grants on the project (and on sub-projects
-  that inherit), up to their own level, never `admin`. Checked by the same seam:
+- A `share` role: its holder may add and remove grants on the project, up to their own level,
+  never `admin`. Checked by the same seam:
   `authorize(principal, "grant", project)`. Grants record `granted_by` and `granted_at`.
 - Ownership transfer is a database transaction: set the project's owner, add the new owner's
   default grant, optionally revoke the old owner's. Access is project-based, so Qdrant is not
@@ -1102,8 +1214,8 @@ tenancy (§13.3).
 
 | Tier | Lifecycle | Where | Vector-indexed | Leaves the tier by |
 |---|---|---|---|---|
-| **Transient** | Material in flight: captured, not yet kept | Files in a ragnart project's `.ragnart/inbox/`, or an attached folder | **No.** The agent reads the files directly. | Keep (becomes a resource in the Archive), drop, or expiry after 30 days (§7.5) |
-| **Archive** | Persistent | The roots of filesystem sources (static crawl; today the NFS roots); ragnart project resources and collateral (curated) | Yes | The file is removed (after the grace period, §10.2) |
+| **Transient** | Material in flight: captured, not yet kept | Files in a ragnart project's `inbox/` | **No.** The agent reads the files directly. | Keep (becomes a resource in the Archive), drop, or expiry after 30 days (§7.5) |
+| **Archive** | Persistent | The roots of filesystem sources (static crawl; today the NFS roots); the `resources/` and `collateral/` of ragnart projects (curated) | Yes | The file is removed (after the grace period, §10.2) |
 | **Runtime** | Persistent session record; a specific case of Archive | Claude Code and OpenCode sessions | Yes | — |
 
 There is **one persistent store** (the `documents` collection, an alias of `documents_new`)
@@ -1115,39 +1227,40 @@ used while work is in progress and becomes persistent only by being kept.
 | Policy | What enters | Trigger |
 |---|---|---|
 | **Static** | Every item of every source: every file under a filesystem source's roots (today the NFS roots) that `ragnart.yaml` includes and no rule of §1.2 excludes, plus every Claude Code and OpenCode session | Each ingestion host's own schedule; on Server 2, `ragnart-ingest.timer`, every 6 hours |
-| **Curated** | A ragnart project's resources (`.ragnart/resources/`) and its collateral (`.ragnart/collateral/`) | An operator add, a keep or new collateral: `add --wait` for that item, or the next ingestion run |
+| **Curated** | The content of a ragnart project's `resources/` and `collateral/`, wherever the project folder is (§4.5) | A commit: `ragnart add`, `ragnart note`, `ragnart commit` or `ragnart drop`. Never the scheduled run (§7.3) |
 
 Archive curation is blunt: a file that exists is indexed; a file that is removed has its
 chunks removed. Nothing else decides.
 
-The two policies do not overlap. A file under a ragnart project's `.ragnart/` follows the curated
-policy. Every other file follows the static policy, including the files beside a `.ragnart/`
-(§4.5). "Crawl" names the static policy's walk of a source and nothing else: a ragnart project has
-no ingestion mode.
+The two policies do not overlap: they are separated by the project folder. The static policy's
+crawl does not enter a project folder (§1.2, deviation D), and the curated policy indexes only the
+`resources/` and `collateral/` of one ragnart project, by a commit; never its `inbox/`. The files of a project folder outside its
+managed folders follow neither and are not indexed. "Crawl" names the static policy's walk of a
+source and nothing else: a ragnart project has no ingestion mode.
 
 ### 7.3 ragnart project workflow
 
 **Status.** Not yet built; v0.4.
 
 Work in a ragnart project is RAGNART's reason to exist. It follows the dynamics of working with git:
-`ragnart init` once, then ordinary sessions in which the operator's requests are understood as
+`ragnart init <name>` once, then ordinary sessions in which the operator's requests are understood as
 actions on the ragnart project.
 
-**A ragnart project is a directory on disk.** `ragnart init` creates `.ragnart/` (§4.5), on a source
-that RAGNART can write to. A session is in a ragnart project because a `.ragnart/` directory is at
-or above its working directory, as a `.git` directory makes a repository. There is no mode to enter
-or leave. Removing `.ragnart/` removes the ragnart project's identity, inbox, resources, collateral
-and references. Their chunks leave the index under the deletion rules of §10.2, and the ragnart
-project's record is removed after its grace period (§4.5).
+**A ragnart project is a folder on disk.** `ragnart init <name>` creates it (§4.5), on a source that
+RAGNART can write to, normally from inside a session (below). A session started in the project
+folder, or below it, works in that ragnart project and is added to it when it starts, as a `.git`
+directory makes a repository of the working directory (§4.5, §7.4). There is no mode to enter or
+leave. Removing the project folder removes the ragnart
+project's identity, inbox, resources, collateral and references. Their chunks leave the index under
+the deletion rules of §10.2, and the ragnart project's record is removed after its grace period
+(§4.5). The sessions it referenced stay, as `global` items.
 
 ```
-<ragnart project>/.ragnart/
-  project.toml     identity and settings (§4.5)
-  references       the ragnart projects this one references (§4.5)
+ACME-Q1/
+  .ragnart/        state and metadata: project.toml, provenance/, dropped/ (§4.5)
   inbox/           Transient tier: captured material, not indexed (§7.5)
-  resources/       kept and operator-added material, and notes; indexed
+  resources/       copies (added files, kept captures, notes) and references (*.reference); indexed
   collateral/      documents produced from the resources; indexed as derived material
-  dropped/         items set aside by a drop, until the grace period ends (§7.5)
 ```
 
 **Four activities, no workflow states.** They interleave in any session and are not entered or
@@ -1160,6 +1273,40 @@ left. The only session state is scope and grounding (§8).
 | Distill | A request that produces collateral | `project`, `strict` |
 | Ask | A question answered from the ragnart project | `project`, `strict`; widened only by the operator |
 
+**Creating a ragnart project from inside a session.** A ragnart project is created from inside a
+Claude Code or OpenCode session, by the agent following the `/ragnart` skill. `ragnart init` is
+plumbing and makes no assumption about where or how it is called; the skill performs the further
+steps after it completes. For a session S, working in `ACME/`, asked to "start a notebook ACME-Q2":
+
+| # | The skill | Command | What the operator sees |
+|---|---|---|---|
+| 0 | Checks the gate: S has no current project. Takes the request literally if it starts with an action verb; otherwise states its translation first | — | "Creating ragnart project ACME-Q2 in `ACME/`" |
+| 1 | Runs `init` where the ragnart project is to live: S's working directory, or a place the operator named. A subshell keeps S's working directory where it is. Reads the folder and the `id` from the output | `(cd <place> && ragnart init ACME-Q2)` | The action line of `init`: folder, `name`, `id`, `grounding = strict`, `capture = on` |
+| 2 | Makes ACME-Q2 the current project for S, in session state on the client host. S's scope becomes `project` and its grounding the ragnart project's default | — | The status line shows ACME-Q2 |
+| 3 | Adds S to the current project, which is now ACME-Q2 | `(cd <folder> && ragnart add session:<S's id>)` | `[ragnart · add · 1 session → resources]` |
+| 4 | Reports the result | — | `[ragnart · scope project ACME-Q2 · grounding strict]` |
+
+- **The gate.** A session works in at most one ragnart project for its whole life (§4.5). If S
+  already has a current project, because it started in a project folder or already created one, the
+  skill refuses: "this session is already part of a ragnart project; a new ragnart project cannot be
+  started from an existing one". This is the session-level counterpart of "nesting has no meaning".
+  `ragnart init` itself has no such check: it knows nothing about sessions.
+- **Failures stop the sequence and are reported**, never retried silently and never undone. If
+  `init` refuses (the folder exists, the source is not writable), steps 2 to 4 do not run and S has
+  no current project. If the `add` of step 3 fails, the ragnart project exists and is S's current
+  project; repeating the `add` is safe, because an existing reference is reported as already present.
+  If the skill cannot obtain S's id, it reports that S could not be added and stops after step 2.
+- **Creation from a shell** is step 1 alone. No session is in the ragnart project until one is started
+  in its folder, or added explicitly.
+
+**Every `ragnart` command acts on the current project only.** The skill runs all `ragnart` commands
+only in the current project, the one created by `ragnart init` or found by the session-start hook.
+Acting on another ragnart project is not permitted: `ragnart` actions are strictly scoped to the
+current project. The CLI finds its project as git finds a repository, from the nearest `.ragnart/`
+at or above the working directory, and has no option that names another project; the skill runs it
+in a subshell in the current project's folder. Reading another ragnart project is a search at a
+selection scope (§8.1), not an action on it.
+
 **Actions.** The operator speaks plain language. The agent, following the `/ragnart` skill (§7.4),
 translates a request into a `ragnart` command. The `ragnart` CLI is plumbing: the operator does
 not need to type it. A command acts on the ingestion host of the ragnart project's source, which holds
@@ -1168,19 +1315,20 @@ that ragnart project's files and its state database (§2.3).
 | The operator says | Action | Command | Decided by |
 |---|---|---|---|
 | Nothing: the agent fetches a page while capture is on | The page is captured into the inbox | `ragnart capture <url>` | The skill's policy |
-| "add" a file or a URL | It becomes a resource directly, without passing through the inbox | `ragnart add --wait` | The operator |
-| "keep" an inbox item | It moves to `resources/` and is indexed | `ragnart add --wait` | The operator |
-| "drop" an item | It is set aside, and deleted after the grace period (§7.5) | `ragnart drop` | The operator |
-| "note" a remark | The remark is saved as a Markdown file in `resources/` | `ragnart note` | The operator |
-| A request for a summary, a presentation, a chart | Collateral is written to `collateral/` and registered | `ragnart add --wait` | The operator |
+| "add" a file, a folder, a URL, a session or another ragnart project | A file or folder is copied, a URL captured, into `resources/` without passing through the inbox; a session or a ragnart project is referenced by a `.reference` file in `resources/`. Then committed | `ragnart add` | The operator |
+| "keep" an inbox item | It moves to `resources/` and is committed | `ragnart add` | The operator |
+| "drop" a resource or an inbox item | It is set aside, deleted after the grace period, and committed (§7.5) | `ragnart drop` | The operator |
+| "note" a remark | The remark is saved as a Markdown file in `resources/` and committed | `ragnart note` | The operator |
+| A request for a summary, a commented index, a presentation, a chart | Collateral is written to `collateral/` and committed | `ragnart commit` | The operator |
 | A question | A search at the current scope (§8) | The search API | The agent; read-only |
 
 - **The command prints the action line; the model does not compose it.** For example:
   `[ragnart · keep · 2 items → resources]`.
 - **A request that starts with an action verb is taken literally.** Any other wording is
   interpreted, and the agent states its translation before acting, as it does for scope (§8.4).
-- **Every change to the index is an operator request.** Capture writes only to the inbox, which is
-  not indexed.
+- **Every change to a ragnart project's content is a deliberate act**: a command, or a file the
+  operator places into or removes from a managed folder by hand. Capture writes only to the inbox,
+  which is not indexed. The session-start hook writes only a session reference (§4.5).
 - **Capture is best-effort.** It depends on the skill being followed. A page the agent fetched and
   did not capture is still named in the session record.
 
@@ -1188,7 +1336,8 @@ that ragnart project's files and its state database (§2.3).
 the agent's rendering of it.
 
 - Captured: pages, and PDF files behind a URL. Search-result lists are not captured.
-- A page is stored as Markdown with front matter: title, URL and fetch time.
+- A page is stored as Markdown with front matter: title, URL and fetch time. Every capture, a PDF
+  included, also gets an entry in `.ragnart/provenance/` with its URL and fetch time (§4.5).
 - A second capture of the same URL replaces the item and restarts its expiry.
 - A failed fetch is reported; it is never silent.
 
@@ -1197,31 +1346,117 @@ the agent's rendering of it.
 | Added | Result |
 |---|---|
 | A file, wherever it is | Copied into `resources/` |
+| A folder | Copied into `resources/`, with its files |
 | A URL | Captured into `resources/` |
+| A file in the ragnart project's own `inbox/` or `collateral/` | Moved into `resources/`, not copied: a keep, or collateral made a resource. Its provenance entry follows it |
+| A session, or another ragnart project | Not copied: referenced, by a `.reference` file in `resources/` (§4.5). A ragnart project may be given by its name or the path of its folder; only its `id` is stored. A folder that contains a ragnart project below it is refused, naming that project |
 
-**An add always copies.** Whether the original is already an item somewhere else does not matter:
-it was not a resource of this ragnart project, and the copy is.
+**An add always copies a file.** Whether the original is already an item somewhere else does not
+matter: it was not a resource of this ragnart project, and the copy is.
 
 - The copy is a snapshot. A later edit of the original does not reach it, and it stays when the
   original is moved or deleted.
+- **The copy is the ragnart project's own file, and it may be edited.** An edit is re-indexed at the
+  next commit. The original never sees it, and the provenance still names where the copy came
+  from.
 - The copy travels with the ragnart project and falls under its access rule (§6.1).
+- Its origin and the time of the add are recorded in `.ragnart/provenance/` (§4.5).
 - The cost is a duplicate file and a second ingestion. It is accepted for robustness and
   simplicity. Identical copies collapse into one hit in a search at scope `all` (§9.1).
-- Another ragnart project is not copied: it is referenced (§4.5).
+- A file placed into `resources/` by hand is material of the ragnart project too, with no provenance
+  entry (§4.5).
 
-**Collateral.** Distill produces a document on demand from the ragnart project's resources: an executive
-summary, a presentation, a chart. The agent writes it at scope `project` and grounding `strict`.
+**`add` and `commit`.** A file in a managed folder is material of the ragnart project from the moment
+it is there; a commit is what indexes it.
+
+| Command | What it does |
+|---|---|
+| `ragnart add <path or url>…` | Copies or captures each item into `resources/`, records its provenance, then commits and waits |
+| `ragnart add --no-commit <path or url>…` | Copies or captures and records, and nothing more. The items are indexed by the next commit |
+| `ragnart commit` | Indexes every file of `resources/` and `collateral/` that is not indexed yet, removes from the index every file that has left them, and waits for the outcome of each file |
+
+- **A commit reconciles `resources/` and `collateral/` with the index; it never indexes `inbox/`.** It covers everything present when it
+  starts, however it got there: an add, a keep, collateral, or a file placed by hand. It is
+  idempotent, and it records no history (§1.2, deviation F).
+- **Changes made by hand in `resources/` and `collateral/` are picked up by the next commit**, never by the
+  scheduled run. Until then they are uncommitted changes, counted on the status line (§7.4).
+
+| Done by hand in `resources/` or `collateral/` | At the next commit |
+|---|---|
+| A file added | Indexed: the manual equivalent of `ragnart add --no-commit`, without a provenance entry |
+| A file edited | Indexed again |
+| A file deleted | Removed from the index at once (below) |
+| A file renamed or moved within `resources/` and `collateral/` | A move when its content hash matches one-to-one (§4.2): the key changes and nothing is re-embedded. Otherwise a deletion and an addition |
+| A `.reference` file created or deleted | The reference is added or removed |
+
+- **A commit removes at once.** A file that has left `resources/` and `collateral/`, by a drop or by hand, leaves
+  the index in that commit, with no tombstone: the commit is the operator's deliberate act, and
+  undoing it means restoring the file and committing again. The guard is against a folder that cannot
+  be read: a commit runs no deletion phase when the project folder or one of its managed folders
+  cannot be read, or when the folder no longer carries the ragnart project's `id` (§10.6, R13). The
+  24-hour tombstone of §10.2 belongs to the global crawl, where a vanished file may be a mount failure
+  that nobody asked for.
+- **There is no implicit commit.** The scheduled run never commits a ragnart project: a ragnart
+  project's index changes only by `ragnart add`, `ragnart commit` and `ragnart drop`, and every file
+  of a commit gets an outcome that is reported to whoever ran it. A file placed or deleted by hand is
+  an uncommitted change until the next commit: it is not found, or still found, at scope `project`
+  until then. Uncommitted changes are shown, not applied: the session-start hook's listing and the
+  status line count them (§7.4), as `git status` does, and the skill offers a commit when a question
+  at scope `project` meets uncommitted changes. It does not commit on its own.
+- **What changes without a commit, by design.** A referenced session is a `global` item, ingested by
+  its connector on the schedule, so its new turns reach the ragnart project's scope without a commit;
+  so does a referenced ragnart project's own commit. The existence of the ragnart project is checked
+  by the scheduled sync: a missing folder is guarded as §4.5 says.
+- **Commits coalesce.** At most one commit runs per ragnart project, and at most one more waits behind
+  it. An `add` waits for the first commit that started after its files were in place: if one is
+  running, it joins the waiting one, and if one is already waiting, it joins that. A run of adds
+  therefore costs at most two commits, and each caller still gets the outcome of its own files.
+- **Every file gets an outcome**, never silence:
+
+| Outcome | Meaning | What follows |
+|---|---|---|
+| Indexed | The file is in the index, with its chunk count | — |
+| Refused | An admission rule rejected it (§5.2), with the reason | The file stays in the folder: location is membership. The refusal is recorded, and later commits do not retry it until the file changes |
+| Failed | Parsing or embedding failed | The file stays and is marked as an error. The next commit retries it, under the retry rule of §5.2 |
+| Pending | The wait ended before the file was processed | Not an error. Ingestion continues in the background |
+
+- `add` and `commit` exit with a non-zero code when any of their files was refused or failed.
+  `ragnart status`, scoped to the ragnart project, lists the files that are not indexed and why.
+- **A commit that waits depends on the split of the hub and the ingestion side** (§2.3). On the
+  ingestion side, a commit only walks `resources/` and `collateral/`, plans and submits, and holds the
+  single-writer lock (§10.3) briefly. The waiting is on the hub's status of each submitted item, and
+  the hub gives an interactive submission priority over the bulk of a scheduled run. Without that
+  split, a commit would meet the lock of a scheduled run that parses for hours. The concurrency rules
+  are in §10.6.
+
+**Collateral.** Distill produces a document on demand from the ragnart project's resources: an
+executive summary, a commented index of its material, a presentation, a chart. The agent writes it
+at scope `project` and grounding `strict`.
 
 - Its front matter lists the resources it was made from.
 - It is indexed with `source_type = collateral`, so a result shows it as derived material and not
   as a source. Its weight in results is a `type_weights` setting (§9.2).
 - An inbox item that it lists is kept.
+- **Stale collateral is reported, never repaired.** A commit and `ragnart status` report a piece of
+  collateral when a resource its front matter lists has changed since the collateral was written,
+  or is gone. RAGNART never regenerates or drops collateral on its own.
+- **Collateral is the ragnart project's output, kept apart from what was gathered.** It stays in
+  `collateral/`, and it becomes a resource only explicitly: `ragnart add collateral/<file>` moves it
+  into `resources/`.
+- **Why collateral is kept apart.** Both folders are the ragnart project's material, indexed by its
+  commits, but they do not carry the same weight as evidence. A resource was gathered and chosen by
+  the operator. Collateral is the ragnart project's own synthesis, written by the agent from those
+  resources. Under `strict` grounding, an answer resting on collateral rests on a summary the agent
+  wrote, which is circular unless it is marked: a hit from collateral is therefore shown as derived
+  material (`source_type = collateral`), carries its own `type_weights` setting, and is the only
+  material checked for staleness. Promoting collateral to a resource is the operator vouching for it
+  as material. The mark is the folder and not a field in the file, because membership is by location
+  (§4.5): a field in the file is lost when a file is placed or edited by hand, and a folder cannot be.
 
 **The ask loop.** A question is asked at project scope. When the answer is "no good hits in this
 scope" (§8.3), the operator widens the scope or opens the grounding. What is found there can be
-added to the ragnart project: an Archive item as a copy, a web page as a capture, and another
-ragnart project as a reference. The same question is then
-answered at project scope.
+added to the ragnart project: an Archive file as a copy, a web page as a capture, and a session or
+another ragnart project as a reference. The same question is then answered at project scope.
 
 Relations between resources are not recorded. Search relates them when a question is asked.
 
@@ -1234,42 +1469,46 @@ harness knows where it is, and nothing has to be re-seeded.
 
 | Layer | Content | Use |
 |---|---|---|
-| **Resources** | `.ragnart/resources/` | Searched (§8) |
-| **Collateral** | `.ragnart/collateral/` | Searched; shown as derived material |
-| **Ragnart project sessions** | The Claude Code and OpenCode sessions assigned to the ragnart project: those launched at or below the directory that holds it (§4.5) | Searched; weight set by `type_weights` (§9.2) |
-| **Referenced ragnart projects** | The ragnart projects named in `.ragnart/references` (§4.5) | Searched at scope `project` (§8.1) |
-| **Working set** | The Transient tier: inbox and attached folders | Read directly by the agent |
+| **Resources** | `resources/` | Searched (§8) |
+| **Collateral** | `collateral/` | Searched; shown as derived material |
+| **Referenced sessions** | The Claude Code and OpenCode sessions the ragnart project references: those started in its folder, referenced by the session-start hook, and those referenced explicitly (§4.5) | Searched; weight set by `type_weights` (§9.2) |
+| **Referenced ragnart projects** | The ragnart projects referenced by `.reference` files in `resources/` (§4.5) | Searched at scope `project` (§8.1) |
+| **Working set** | The Transient tier: `inbox/` | Read directly by the agent |
 
 **The catalogue is a listing, not a file.** No index file is kept in the ragnart project: it would duplicate
-the state database and the inbox folder, and could disagree with them.
+the state database and the folders, and could disagree with them.
 
-- `ragnart ls-files`, scoped to the ragnart project, lists its resources and collateral.
+- `ragnart ls-files`, scoped to the ragnart project, lists its resources and collateral, each with
+  its outcome (§7.3).
 - `ragnart ls-files --others` lists its inbox, each item with its origin and expiry date.
 - The resource listing reads the state database of the ragnart project's ingestion host (§10.3). From
-  another host it is served by the item-listing endpoint (§12). The inbox listing reads the folder.
+  another host it is served by the item-listing endpoint (§12). The inbox listing reads the folder,
+  and the references are read from the `.reference` files in `resources/`.
 
 **How a session learns it is in a ragnart project.** Three parts, each mirroring how the harness knows git:
 
 | Part | Carries | Counterpart for git |
 |---|---|---|
 | The `/ragnart` skill, installed once for all ragnart projects | The action vocabulary (§7.3), the librarian rules (§8) and the capture policy. It is the same for every ragnart project and is refined over time. | The harness's built-in git instructions |
-| The session-start hook | Finds the nearest `.ragnart/` above the working directory and injects the ragnart project name, scope, grounding and a capped listing: counts and the most recent items. Outside a ragnart project it is silent. | "This is a git repository", and the status snapshot |
-| The status line | Ragnart project, scope, grounding and inbox count, at all times | The branch name |
+| The session-start hook | Reads the session's current project from session state. A session without one that starts at or below a project folder gets the nearest `.ragnart/` at or above its working directory as its current project, and is added to it (§4.5). The hook then injects the ragnart project name, scope, grounding and a capped listing: counts, uncommitted changes and the most recent items. A session with no current project, outside every project folder, gets nothing: the hook is silent and writes nothing. | "This is a git repository", and the status snapshot |
+| The status line | Ragnart project, scope, grounding, inbox count and the count of uncommitted changes, at all times | The branch name |
 
 In Claude Code the hook runs on new, resumed and compacted sessions. The OpenCode equivalent is open
 (§13.3).
 
-- **Context is implicit by location** (the nearest `.ragnart/` above the working directory)
-  and **explicit by path** from anywhere: "structure the docs the way
-  `~/Gin-AI/projects/AYA` does" loads AYA's listing and searches AYA's resources.
+- **Context is the session's current project**, set by location (the nearest `.ragnart/` at or above
+  the working directory when the session starts) or by creating a ragnart project (§7.3). Other
+  ragnart projects are searched **explicitly by name**, at a selection scope (§8.1): "structure the
+  docs the way AYA does" searches `name:AYA`. That reads AYA and acts on nothing in it (§7.3).
 - **Context is alive.** Each session adds to it.
 - **Location is resolved within a source.** A session's working directory is a path on its own host,
   so the hook finds only a ragnart project held by a source of that host (§4.7). A ragnart project on
-  another source, such as a shared one on a central source reached from a laptop, is named explicitly
-  (§8.8).
-- In a code repository the project's own `CLAUDE.md`, docs and git history are part of the folder;
-  RAGNART's files live under `.ragnart/` and it never modifies tracked files. The repository's files
-  are not part of the ragnart project: they are `global` items, found at scope `all` (§4.5).
+  another source, such as a shared one on a hub source reached from a laptop, is named explicitly
+  (§8.8), and a session there is referenced explicitly.
+- **A code repository is not a ragnart project** (§4.5). Its files are `global` items, found at
+  scope `all`. A ragnart project about a repository is a folder of its own, created by `init`, and the
+  sessions held in the repository are added to it explicitly: a session started at the repository's
+  root has no current project.
 
 **Ragnart project resources are not the harness's memory files.** Claude Code keeps its own memory files per
 working directory. RAGNART neither writes nor replaces them.
@@ -1281,16 +1520,15 @@ working directory. RAGNART neither writes nor replaces them.
 | Reachable from | Claude Code, for that working directory | Any client; indexed and cited |
 
 **A ragnart project has no ingestion mode.** Its content is curated: only its resources and
-collateral are indexed as its own (§7.2). The files beside its `.ragnart/` are not its content. The
-static policy ingests them as `global` items, and the ragnart project neither adds them nor excludes
-them (§4.5).
+collateral are indexed as its own (§7.2). The other files of its folder are not its content, and
+they are not indexed (§1.2, deviation D).
 
 Captured material is noise until it is kept, and the session in which it was used is already
 archived and resumable in the Runtime tier.
 
-Folders that must be searchable by meaning before curation are attached as resources (which indexes
-them). Kotaemon uploads are operator adds: they enter directly as resources, followed by
-`add --wait`.
+A folder that must be searchable by meaning before curation is added as a whole: `ragnart add
+<folder>` copies it into `resources/` (§7.3). Kotaemon uploads are operator adds: they enter directly
+as resources, and are committed.
 
 ### 7.5 Transient lifecycle
 
@@ -1305,15 +1543,19 @@ to Qdrant. The only write to the index is a keep.
 | Persist | "keep" | A piece of collateral lists the item as a source |
 | Leave | "drop" | Expiry, 30 days after capture (`inbox_expiry_days`) |
 
-- **Expiry is announced.** The inbox listing (§7.4) shows each item's expiry date.
+- **Expiry is announced.** The inbox listing (§7.4) shows each item's expiry date. A file placed in
+  `inbox/` by hand expires 30 days after its modification time.
 - **A drop is undoable.** A dropped item moves to `.ragnart/dropped/` and is deleted after the grace
   period of §10.2. Until then a keep restores it.
-- **Dropping a resource** sets its file aside in the same way; its chunks leave the index through
-  the sync, under the deletion rules of §10.2. Dropping a reference removes its line from
-  `.ragnart/references` and leaves the referenced ragnart project as it is.
-- **`ragnart gc` deletes** expired and dropped items. It runs in the ingestion run.
-- **RAGNART deletes files only under a ragnart project's `.ragnart/`**, never elsewhere in a source (§1.2,
-  deviation B).
+- **Dropping a resource** sets its file aside in the same way, and `drop` commits, so its chunks
+  leave the index at once (§7.3). A keep within the grace period restores the file and indexes it
+  again. A reference is a resource: dropping it sets its
+  `.reference` file aside in the same way, and leaves the referenced session or ragnart project as it
+  is.
+- **`ragnart gc` deletes** expired and dropped items. It runs in the ingestion run. It changes no
+  index: inbox items were never indexed, and a drop has already committed.
+- **RAGNART deletes files only in a ragnart project's `inbox/` and `.ragnart/dropped/`**, never elsewhere
+  in a source (§1.2, deviation B).
 - **The inbox stays small.** Reading files directly works for a bounded working set, and expiry
   keeps it bounded. A larger body of material is kept, which indexes it.
 
@@ -1333,10 +1575,15 @@ without the other.
 
 | Value | Searches |
 |---|---|
-| `project` | The current ragnart project: its resources, collateral and sessions, the ragnart projects nested in it, and the ragnart projects it references (§4.5). The files beside its `.ragnart/` are not part of it: they are `global`. Inbox files are not searched: the agent reads them directly (§7.4) |
-| `<selection>` | ragnart projects named explicitly: paths (`~/Gin-AI/projects/AYA`), subtrees (`~/Customers/`), tag filters (`kind=customer`, `segment=ISV`), in any combination |
+| `project` | The current ragnart project: its resources and collateral, the sessions it references, and the ragnart projects it references (§4.5). A ragnart project nested in its folder is not part of it, nor are the other files of its folder: they are not indexed (§1.2, deviation D). Inbox files are not searched: the agent reads them directly (§7.4) |
+| `<selection>` | ragnart projects named explicitly: names (`ACME-Q1`), paths (`~/Gin-AI/projects/AYA`), subtrees (`~/Customers/`), tag filters (`kind=customer`, `segment=ISV`), in any combination |
 | `all` | Everything the principal may read: the items outside every ragnart project (`project_id` `global`, filtered by owner and file type as today, §4.6), and all accessible ragnart projects |
 | `none` | No retrieval |
+
+**Name terms in a `<selection>`.** A name term names a ragnart project by its unique `name` (§4.5),
+resolved through the `projects` records to its `project_id`. It is the stable way to name a ragnart
+project, because a path changes when its folder moves. The operator may write a bare name: the client
+completes it to a name term and shows the completed term.
 
 **Path terms in a `<selection>`.** A path term names a ragnart project by its source and its path
 (§4.5). It is resolved through the `projects` records to that project's `project_id`. The operator
@@ -1397,16 +1644,17 @@ Every answer that used retrieval starts with a status line. The client's command
 API's response; the model does not compose it:
 
 ```
-[ragnart · scope project ~/Gin-AI/projects/RAGNART · grounding strict]
+[ragnart · scope project ACME-Q1 · grounding strict]
 ```
 
-A path is shown with its source, as `<source>:<path>` (§8.8), once sources are built (v0.3). The
-default source the client applied is therefore always visible.
+A ragnart project is shown by its name (§4.5). A path term the operator used is shown with its
+source, as `<source>:<path>` (§8.8), once sources are built (v0.3), so the default source the client
+applied is always visible.
 
 When the API reports no good hit (§8.7), the answer ends there:
 
 ```
-[ragnart · scope project ~/Gin-AI/projects/RAGNART · grounding strict]
+[ragnart · scope project ACME-Q1 · grounding strict]
 No good hits in this scope. You may widen it (/ragnart scope …) or open the grounding
 (/ragnart grounding open).
 ```
@@ -1439,8 +1687,8 @@ Capturing a page into the inbox (§7.3) changes neither the scope nor the ground
 
 | Situation | Status line and behaviour |
 |---|---|
-| In `~/Gin-AI/projects/RAGNART`: "what is our snapshot retention?" | At `scope project … · grounding strict` the answer is "no good hits", unless that document was added to the ragnart project: the repository's own files are `global` (§4.5). At `scope all`, set by the operator, the answer quotes `docs/RAG-strategy.md` with citations |
-| In RAGNART: "structure the docs the way AYA does" | Agent states "scope: `~/Gin-AI/projects/AYA`"; loads AYA's listing, searches AYA |
+| In the ragnart project RAGNART-notes: "what is our snapshot retention?" | At `scope project RAGNART-notes · grounding strict` the answer is "no good hits", unless that document was added to the ragnart project. At `scope all`, set by the operator, the answer quotes `docs/RAG-strategy.md`, a `global` item, with citations |
+| In RAGNART-notes: "structure the docs the way AYA does" | Agent states "scope: `name:AYA`"; searches AYA |
 | Working on customer A: "which other customers use vendor ABC?" | Agent states "scope: `~/Customers/` except `~/Customers/A`"; results grouped by customer, each with its source |
 | "PDF files about Qdrant modified in the last month" | Filters `file_type=pdf`, `modified_at ≥ <date>` at the current scope |
 | "OpenCode sessions last week about snapshots" | Filters `source_type=opencode_session`, `modified_at ≥ <date>` |
@@ -1490,22 +1738,31 @@ A hit names its item and returns the passage. It does not say where in the item 
   - `all`: every ragnart project and the `global` items (owner rule). No project filter is sent.
   - `<path>`: the ragnart project at exactly this path. A path that names no ragnart project is
     HTTP 422, with a message that names the path.
-  - `<path>/`: the ragnart project at this path, if there is one, and every ragnart project below
-    it. A path that names no project at or below it is HTTP 422.
+  - `<path>/`: the ragnart project at this path, if there is one, and every ragnart project whose
+    folder is below it. It selects by where the folders are now, and implies no relation between
+    those ragnart projects (§4.5). A path that names no project at or below it is HTTP 422.
+  - `name:<name>`: the ragnart project with that name, compared without regard to case. A name that
+    no ragnart project carries is HTTP 422. Not built (v0.4).
   - `tag:<key>=<value>`: every ragnart project carrying that tag. A tag that no project carries, or
     a term without a non-empty key and value, is HTTP 422.
   - An empty term is HTTP 422.
 - **A path term names its source** (v0.3): `<source>:<path>` and `<source>:<path>/`, split at the
   first `:`. The API has no default source, as it has no default scope: a path term without a source
-  is HTTP 422. `tag` is reserved and is never a source id, so `tag:<key>=<value>` stays unambiguous.
-  `all` and tag terms carry no source. Built today: the bare `<path>` forms above, resolved against
+  is HTTP 422. `tag` and `name` are reserved and are never source ids, so `tag:<key>=<value>` and
+  `name:<name>` stay unambiguous. `all`, name terms and tag terms carry no source. Built today: the bare `<path>` forms above, resolved against
   the one source that holds ragnart projects.
-- A selection (any term except `all`) never includes the `global` items. Only `all` does.
+- **A ragnart project named by a term includes the sessions it references.** The API resolves each
+  ragnart project to its `project_id` and to the `session_id`s of its session references, before the
+  search: the filter matches a chunk whose `project_id` is among the ragnart projects, or whose
+  `session_id` is among their referenced sessions (§4.5). Nothing about a reference is stored in
+  Qdrant. Not built (v0.4).
+- A selection (any term except `all`) never includes the `global` items, except the sessions that its
+  ragnart projects reference. Only `all` includes them all.
 - `project` is resolved by the client, and `none` causes no retrieval call at all. Neither is sent
-  to the API. The client sends `project` as the `<path>/` term of the current ragnart project, which
-  covers the ragnart projects nested in it, and one path term for each ragnart project it
-  references. It reads the references from `GET /v1/projects` (§12; not built, v0.4). A `none` term that is sent anyway is a path term
-  and is answered with HTTP 422.
+  to the API. The client sends `project` as the `<path>` term of the current ragnart project, and one
+  path term for each ragnart project it references. It reads the references from `GET /v1/projects`
+  (§12; not built, v0.4). A `none` term that is sent anyway is a path term and is answered with HTTP
+  422.
 - The response **echoes the resolved scope** in `scope`: `all` (whether `all` was a term), `global`
   (true only for `all`), and `projects`, the ragnart projects actually searched, each as `id`, `path`
   and `name`, and with its source once sources are built (v0.3). It also echoes `max_hits_per_source` (§9.2).
@@ -1587,8 +1844,8 @@ rank-fusion value and does not measure relevance.
 | Store | Role | Recovery |
 |---|---|---|
 | The content of each source; today the files and session stores on the NAS | The knowledge itself | The source's own protection; for the NAS, Synology snapshots (hourly) and offsite copy |
-| A state database, one per ingestion host; today `rag_state.db` | Bookkeeping | Snapshot pair, or a NAS snapshot plus reconciliation. A state database on another host is rebuilt from central's listing of its sources' items (§2.3) |
-| Central registry (§4.8, v0.3) | Sources and published ragnart project records | Snapshot pair; the ragnart project records are published again by their sources |
+| A state database, one per ingestion host; today `rag_state.db` | Bookkeeping | Snapshot pair, or a NAS snapshot plus reconciliation. A state database on another host is rebuilt from the hub's listing of its sources' items (§2.3) |
+| Hub registry (§4.8, v0.3) | Sources and published ragnart project records | Snapshot pair; the ragnart project records are published again by their sources |
 | Qdrant | Derived index | Daily snapshot pair; full re-embedding as last resort, which needs every source to submit again |
 
 NAS backups are for emergencies; normal operation never relies on them.
@@ -1598,7 +1855,7 @@ NAS backups are for emergencies; normal operation never relies on them.
 **Status.** All five rules are built. Rule 4 is built in its minimal form, the sync log line.
 
 Deletion is the dangerous operation. The sync applies these rules. They run on the ingestion side
-(§2.3): each rule and each guard counts the rows of one ingestion host only. Central deletes an item
+(§2.3): each rule and each guard counts the rows of one ingestion host only. The hub deletes an item
 only when its source asks.
 
 1. Nothing is deleted because it was **not seen**, unless the scan that missed it is complete. A
@@ -1632,15 +1889,17 @@ only when its source asks.
 
 **Ragnart projects.** A ragnart project whose marker is missing or unreadable is protected in the
 same way: it is tombstoned for the same grace period, or it keeps its last good record (§4.5). Not
-built (v0.4): today the sync removes it at once.
+built (v0.4): today the sync removes it at once. The content of a ragnart project is not under these
+rules: a commit removes what has left its `resources/` and `collateral/` at once, behind its own guard against an
+unreadable folder (§7.3).
 
-**A silent source.** Central does not notice that a source has stopped submitting (§2.3). Its items
+**A silent source.** The hub does not notice that a source has stopped submitting (§2.3). Its items
 stay in the index and stay searchable for as long as it is silent. Nothing expires them: a tombstone
 is set only by the source itself, from a complete enumeration.
 
 **A source that no longer exists.** A lost or reinstalled machine cannot delete its own items.
 Removing every item of one `source_id` is a break-glass operation by the operator, with a
-maintenance tool on central, as the purge tools in `utils/` are today. There is no API request for it
+maintenance tool on the hub, as the purge tools in `utils/` are today. There is no API request for it
 and no automatic policy. Not built (v0.3).
 
 ### 10.3 Operating rules
@@ -1648,8 +1907,8 @@ and no automatic policy. Not built (v0.3).
 **Status.** Built: the single-writer lock covering every writer of the index, idempotent ingestion,
 plan-then-apply sync, and scheduled reconciliation. Notifications are not yet scheduled.
 
-- **Central is the only writer of the index.** No source writes to Qdrant: a source asks central
-  (§2.3). Within central, and within each ingestion host, one writer runs at a time.
+- **The hub is the only writer of the index.** No source writes to Qdrant: a source asks the hub
+  (§2.3). Within the hub, and within each ingestion host, one writer runs at a time.
 - **Single writer.** Every process that writes `rag_state.db` rows or Qdrant points holds the
   ingestion lock (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`, required in `ragnart.yaml`)
   while it writes: `utils/rag_sync_nfs.py`, `utils/rag_ingest_daemon.py`, `utils/rag_reconcile.py --apply`,
@@ -1660,10 +1919,11 @@ plan-then-apply sync, and scheduled reconciliation. Notifications are not yet sc
   run under that hold. The one exception is `utils/rag_sparse_migrate.py`, a one-off migration that is
   run with the timer stopped. The lock is fail-fast: a second writer exits with status 75 at once and
   prints the holder (pid, host, command line, start time), which is also written into the lock file.
-  It never waits. The planned v0.4 verbs `add`, `add --wait`, `rm` and `gc` will take the same lock.
+  It never waits. The planned v0.4 verbs `add`, `commit`, `drop`, `rm` and `gc` will take the same
+  lock on the ingestion side, for as long as they write the state database (§7.3, §10.6).
   A state database is opened by its own ingestion host only: `rag_state.db` is opened from Server 2
   only.
-- **Idempotency.** Every operation (ingest a file, sync, backfill, `add --wait`, `gc`) can be
+- **Idempotency.** Every operation (ingest a file, sync, backfill, `commit`, `gc`) can be
   re-run safely after a crash.
 - **Failed sync.** A sync that refuses deletion or crashes does not stop the ingestion run. The
   daemon, the WAL checkpoint and the snapshot step still run. The run then exits with the sync's exit
@@ -1688,13 +1948,13 @@ plan-then-apply sync, and scheduled reconciliation. Notifications are not yet sc
   the guard refused the zombie deletion. Its failure does not change the run's exit code: the run logs
   a WARN. The default mode is `--dry-run`, which writes nothing. Reconciliation belongs to the
   ingestion side: it compares one ingestion host's rows with the points of its own sources. A source
-  on another host reconciles against central's listing of its items (§2.3; v0.3).
+  on another host reconciles against the hub's listing of its items (§2.3; v0.3).
 - **Notifications** (failed run, guard tripped, snapshot failed, reconciliation problems) are
   part of the design; the channel and implementation are not defined (§13).
 
 ### 10.4 Snapshot policy
 
-- One restore pair per day (Qdrant snapshot + matching copy of `rag_state.db`, and of the central registry once it exists, §4.8), taken by the
+- One restore pair per day (Qdrant snapshot + matching copy of `rag_state.db`, and of the hub registry once it exists, §4.8), taken by the
   ingestion run when the newest pair is older than 20 hours (normally the 01:00 run);
   `RAG_FORCE_SNAPSHOT=1` forces one.
 - Seven pairs kept on the NAS (`RAGNART--databases/qdrant-snapshots/documents/`).
@@ -1711,6 +1971,32 @@ plan-then-apply sync, and scheduled reconciliation. Notifications are not yet sc
 written to `RAGNART--databases/opencode-backups/<hostname>-<ip>/opencode-<YYYY-MM-DD>.db`,
 with the last 7 copies kept, by a timer installed with RAGNART's units.
 
+### 10.6 Concurrency in ragnart projects
+
+**Status.** Not built (v0.4). Every rule here is part of the design of `add`, `commit`, the inbox and
+`.ragnart/` (§4.5, §7.3, §7.5).
+
+A ragnart project is written by several actors at once: the operator by hand, the commands of §7.3,
+the session-start hook of every session started in its folder, the scheduled run and the hub. Each
+race below names what would go wrong and the rule that prevents it.
+
+| # | Race | What would go wrong | Rule |
+|---|---|---|---|
+| R1 | A file is still being copied when a commit's walk reaches it, as when a file manager drops it into `resources/` | A truncated file is indexed | `add` copies to a temporary name in the same folder and puts it in place with the non-replacing link of R3, so the file appears whole and replaces nothing. A file whose size or modification time changed between its discovery and its hashing is skipped, and the next commit takes it |
+| R2 | A file changes between the plan of a commit and its submission | The stored hash does not match the indexed bytes | The stored hash is the hash of the bytes submitted, never the one seen at discovery |
+| R3 | Two adds put files with one name into `resources/` | One silently replaces the other | The file is put in place by a link that refuses to replace, which is atomic on NFS. The same content is reported as already present; different content is refused, naming the conflict. An add never overwrites |
+| R4 | An add joins the waiting commit just as that commit starts its walk | The add waits for a commit that does not cover its file | Each ragnart project has a commit generation number. An add records it once its file is in place, and waits for a commit that started with a higher one |
+| R5 | Two commits of one ragnart project start at once, from two sessions or a session and a shell | The same item is submitted twice | One writer of the state database at a time, on the ingestion side (§10.3). Commits of one ragnart project coalesce (§7.3). The hub treats an upsert whose content hash equals the stored one as a no-op |
+| R6 | An item is deleted or dropped while its upsert is still in flight | The upsert lands after the delete and leaves points with no queue row | The hub applies the requests for one item in the order they were submitted: the later request wins. Reconciliation (§10.3) catches anything left |
+| R7 | A newer version of a file is submitted while an older one is still in flight | The older version wins | Per-item order at the hub, as in R6: the latest submission wins |
+| R8 | A keep runs while `gc` expires the same inbox item | The kept file is deleted | A keep puts the file in place with the non-replacing link of R3 and then removes it from `inbox/`. `gc` first renames an item into `.ragnart/dropped/`, and fails cleanly when it is already gone. Both take a short lock on the ragnart project |
+| R9 | A restore from `.ragnart/dropped/` runs while `gc` purges the same item | The restored file is deleted | As in R8 |
+| R10 | Two sessions start in one project folder at once, and both hooks add their session | A lost update: an append is not atomic across NFS clients | One file per entry, each created atomically: a `.reference` file in `resources/`, an entry in `.ragnart/provenance/`. No shared file is rewritten |
+| R11 | The hook or a command writes while the operator edits `project.toml` | The operator's edits or comments are lost | RAGNART never writes `project.toml` after `init`: the operator owns it, and RAGNART owns the rest of `.ragnart/` |
+| R12 | `project.toml` is read while it is being saved | A torn read looks malformed | The marker guard keeps the last good record (§4.5) |
+| R13 | The project folder is moved or renamed during a commit | Every file looks deleted | At its end, a commit checks that the project folder still carries the same `id`. If not, it runs no deletion phase, as for deviation G (§1.2); the next sync finds the move (§4.5) |
+| R14 | A commit is started from a host that is not the ingestion host of the ragnart project's source, as from a laptop that mounts the NAS | Two ingestion sides write one ragnart project | Refused: a ragnart project has one home (§4.5). How a project action from another host reaches the home is open (§13.3) |
+
 ## 11. Capacity and placement
 
 | | Server 1 (.93) | Server 2 (.95) |
@@ -1726,12 +2012,12 @@ placement of Qdrant is decided after the cleanup, from measured memory use.
 
 | Interface | Role |
 |---|---|
-| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. `GET /v1/projects` (built) returns the `global` row and every ragnart project, each with `id`, `path`, `name`, `parent`, `owner`, `mode`, `tags` and `item_count` (completed items); `mode` leaves the listing with the key (§4.5). With `user`, it lists the `global` row and the projects whose owner is that user or `la-familia`, the same owner rule as search. Planned: the relevance verdict in a search response (§8.7), each ragnart project's references in the project listing (§4.5), resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
-| Ingestion API (central) | Planned (v0.3). The write path from a source to central (§2.3). Requests: upsert an item, as bytes with a file type or as text (§4.7); delete an item; change an item's key, and change an item's metadata such as `project_id`, both as payload rewrites that carry no content and re-embed nothing (§2.3); list the source's own items with key, content hash, chunk count and pipeline version; read the status of a submitted item; publish the source's ragnart project records (§4.5); read the current pipeline version, the accepted file types and the admission limits (§5.2). **Write-time gates**, each a sanity check and not a policy: the source is registered and presents its secret; a request touches only items of that source; a published project id is not homed on another source. One secret per source, and nothing richer until tenancy (§13.3) |
-| `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.4): `init`, `capture`, `add`, `add --wait`, `drop`, `note`, `rm`, `mv`, `diff`, `fsck`, `gc`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. In project work the CLI is plumbing, called by the agent (§7.3). Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
+| HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. `GET /v1/projects` (built) returns the `global` row and every ragnart project, each with `id`, `path`, `name`, `parent`, `owner`, `mode`, `tags` and `item_count` (completed items); `parent` and `mode` leave the listing, as the design has no use for them (§4.5). With `user`, it lists the `global` row and the projects whose owner is that user or `la-familia`, the same owner rule as search. Planned: the relevance verdict in a search response (§8.7), each ragnart project's references to ragnart projects and sessions in the project listing (§4.5), resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
+| Ingestion API (the hub) | Planned (v0.3). The write path from a source to the hub (§2.3). Requests: upsert an item, as bytes with a file type or as text (§4.7); delete an item; change an item's key, change an item's metadata such as `owner`, and change an item's source when a ragnart project moves to another source (v0.4), all three as payload rewrites that carry no content and re-embed nothing (§2.3); list the source's own items with key, content hash, chunk count and pipeline version; read the status of a submitted item; publish the source's ragnart project records, with their references (§4.5); read the current pipeline version, the accepted file types and the admission limits (§5.2). **Write-time gates**, each a sanity check and not a policy: the source is registered and presents its secret; a request touches only items of that source; a published project id is not homed on another source. One secret per source, and nothing richer until tenancy (§13.3) |
+| `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.4): `init`, `init --from`, `capture`, `add`, `add --no-commit`, `commit`, `drop`, `note`, `rm`, `mv`, `repair`, `diff`, `fsck`, `gc`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. In project work the CLI is plumbing, called by the agent (§7.3). Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
 | `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.4); today the `/rag` command. Scope and grounding (§8), librarian behaviour, the action vocabulary and the capture policy (§7.3) |
-| Session-start hook and status line (Claude Code, OpenCode) | Planned (v0.4). Project detection, and the project's state in every session (§7.4) |
-| Kotaemon | Browser UI: project picker as scope, uploads as resources, answers by its own model through the SoHoAI gateway |
+| Session-start hook and status line (Claude Code, OpenCode) | Planned (v0.4). Project detection, the reference to a session started in a project folder (§4.5), and the project's state in every session (§7.4) |
+| Kotaemon | Browser UI: project picker as scope, uploads as operator adds into a project's `resources/`, answers by its own model through the SoHoAI gateway |
 
 API versioning, the division of work between CLI, skill and API, and Kotaemon's fit are open
 (§13).
@@ -1752,14 +2038,15 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 
 ### 13.3 Undefined parts of the design
 
-- **Project actions from a host other than the ragnart project's ingestion host.** An add or a keep
-  writes under `.ragnart/` and changes the state database of the ragnart project's ingestion host
-  (§7.3). The ingestion API (§12) carries items from a source to central; it does not carry a project
-  action from another host to a source. How a session on a laptop adds to a ragnart project on a
-  central source, other than by placing the file in that source, is not defined.
+- **Project actions from a host other than the ragnart project's ingestion host.** An add, a keep or
+  a commit writes in the project folder and changes the state database of the ragnart project's
+  ingestion host (§7.3), and a commit from another host is refused (§10.6, R14). The ingestion API
+  (§12) carries items from a source to the hub; it does not carry a project action from another host
+  to a source. How a session on a laptop adds to a ragnart project on a hub source, other than by
+  placing the file in that source, is not defined.
 - **Sources and tenancy.** Whether access is scoped by source, and how a source's secret relates to
   a person's identity, belong to the tenancy design.
-- **Embedding model change.** The rule is settled (§4.1): collection-wide, by central, from the
+- **Embedding model change.** The rule is settled (§4.1): collection-wide, by the hub, from the
   stored text, never mixed. The mechanism is not: a second vector or a second collection, and how
   search switches from one to the other.
 - **`ignored` items and a pipeline version change.** A source re-submits the items whose chunks
@@ -1768,19 +2055,6 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 - **A fix inside a pipeline version.** A fix stays in the current version (D8), so no version change
   makes a source on another host re-submit the items the fix affects. On Server 2 a purge tool
   requeues them; the equivalent for a source on another host is not defined.
-- **Launch path spelling.** A session is assigned by comparing `launch_dir` verbatim with the paths
-  of the holding directories (§4.5). A session launched through a symbolic link, through another
-  mount point of the same export, or on a host that mounts the source elsewhere stays `global`. How
-  many sessions this affects is not measured. A path-prefix alias map in `ragnart.yaml` is one
-  candidate.
-- **References to items.** A reference points at a ragnart project only (§4.5). A session cannot be
-  copied into `resources/`, so there is no way to place a `global` session in a ragnart project by
-  hand.
-- **Adding a reference.** The file is defined (§4.5). The command or request that writes a line to
-  it is not.
-- **Attached folders.** §7.1 and §7.4 name an attached folder as unindexed Transient material, and
-  §7.4 also as an indexed resource. With an add that always copies (§7.3), what attaching a folder
-  does is not defined.
 - **Grants of a removed ragnart project.** Whether they are kept or deleted is decided with tenancy.
 - **A context boundary for `strict`.** Staying within the evidence is an instruction to the model
   (§8.1). If it proves leaky, `/ragnart ask` can be answered by a sub-call that receives only the
@@ -1789,9 +2063,15 @@ None open. The purge record is the sync log line of §10.2, rule 4.
   connector is scheduled.
 - **Session-start hook in OpenCode.** The Claude Code hook is defined (§7.4); its OpenCode
   equivalent is not verified.
-- **Where a session's scope and grounding are stored**, so that the status line can read them.
-- **Origin of a capture that is not Markdown.** A captured page carries its URL in its front
-  matter; where a captured PDF in the inbox records its URL is not defined.
+- **Where a session's state lives.** A session's RAGNART state (its current project, scope and
+  grounding, keyed by the session's id, §4.5) is read by the hook and the status line. Where it lives
+  is specific to each harness, Claude Code and OpenCode, and is not defined. The identity of a
+  session is already fixed (§4.2), but not where its state is kept: this is a design topic of its
+  own.
+- **A session's own id, read by the agent.** Adding the session to the ragnart project it creates
+  needs the agent to know its own session id (§7.3). Claude Code hooks receive it in their input;
+  whether the agent can read it, in Claude Code and in OpenCode, is not verified. A v0.4
+  prerequisite.
 - **Video transcripts.** Capture has no transcript fetcher.
 - **Interfaces**: API versioning, CLI / skill / API division, Kotaemon fit, including Kotaemon as
   the view of a project's resources and inbox.
@@ -1808,7 +2088,7 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 - A resource is a snapshot copy. It does not follow later edits of the original (§7.3).
 - An active Claude Code session is re-embedded in full on every change while it grows.
 - Secrets in sessions and files are embedded and returned; there is no secret filter.
-- The static policy runs every 6 hours; a ragnart project uses `add --wait`.
+- The static policy runs every 6 hours; a ragnart project is indexed at once by `add` and `commit` (§7.3).
 - Inputs longer than 2048 bge-m3 tokens are rejected by Ollama, not truncated (§5.6).
 
 ### 13.5 Smaller items
@@ -1825,12 +2105,12 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 | D1 | Item identity = the pair (source, natural key); the key's format is its connector's (D18); content hash (MD5) as attribute; no surrogate id | A natural key already exists and is unique within its source; hash collides and changes on edit; surrogate adds nothing inside RAGNART | Moves rewrite the key everywhere in one step; sessions keyed by id survive file moves |
 | D1b | Schema version (data model) and pipeline version (`p1`, per item), documented explicitly | Separate "shape of the data" from "how content was processed" | Explicit migrations; after a change of parsing or chunking, only the items still on the old version are submitted again (D30) |
 | D1c | Payload carries filterable metadata; identical copies collapse; metadata and time filters; metadata-only queries from the state DB | Operator needs "PDF modified last month", "OpenCode sessions last week"; duplicates are noise | Indexes on type, time, hash; listing endpoint |
-| D2 | Every item belongs to exactly one project, a ragnart project or the reserved `global` project (§4.6); grants on ragnart projects to persons and groups; inheritance with opt-out; grants in the DB; roles `read`, `admin`; owner = metadata | One access concept instead of three; filesystem permissions unusable; NAS cannot hold access rules | `project_id` on every chunk; auth added later without backfill |
-| D2b | Projects addressed by source and path; `name` required; immutable `id` in `project.toml`; free tags, DB-only | KISS; moves must not touch Qdrant; tags change often | Tag edits are row updates |
-| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies: curated inside a ragnart project, static everywhere else (D27) | Captured material is noise until kept; sessions already archive the work | No transient collection; a keep places a file and indexes it; `add --wait` |
-| D3b | Project context = an on-demand listing of resources, collateral and inbox, with no index file; context implicit by location, explicit by path | No re-seeding. A file would duplicate the state database and the inbox folder, and could disagree with them | The session-start hook injects the listing |
+| D2 | Every item belongs to exactly one project, its access home: a ragnart project for a file in its `resources/` or `collateral/`, otherwise the reserved `global` project (§4.6, §6.1). Grants on one ragnart project at a time, to persons and groups, with no inheritance; grants in the DB; roles `read`, `admin`; owner = metadata | One access concept instead of three; filesystem permissions unusable; NAS cannot hold access rules. Nesting has no meaning (D32), so there is nothing to inherit from | `project_id` on every chunk; auth added later without backfill. Sessions are `global` and enter a ragnart project's scope by reference (D34). `inherit_access` is reserved and ignored |
+| D2b | A ragnart project is addressed by its `name`, unique across the hub registry without regard to case; its identity is its immutable `id` in `project.toml`; the path of its folder is metadata, which changes when the folder moves. Free tags, DB-only (§4.5) | People refer to a project by name; a path is transient, so addressing by path alone is fragile. Moves must not touch Qdrant; tags change often | `init` refuses a taken name. A scope accepts `name:<name>`; a path term still selects by location. Tag edits are row updates. A move changes the path, never the `id` or the name (D37) |
+| D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies: curated in a ragnart project's managed folders, static everywhere else (D32) | Captured material is noise until kept; sessions already archive the work | No transient collection; a keep places a file and commits it (D36) |
+| D3b | Project context = an on-demand listing of resources, collateral and inbox, with no index file; context implicit by location, explicit by name | No re-seeding. A file would duplicate the state database and the inbox folder, and could disagree with them | The session-start hook injects the listing |
 | D4 | Scope × grounding, orthogonal; defaults `project+strict` / `all+strict`; changes only by the operator, always shown; natural-language scope translated aloud | Librarian answers; no silent widening | Status line; `/ragnart` commands; required `scope` in the API |
-| D4d | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` reaches the model's knowledge and, outermost, the web | A code repository and a knowledge project need different defaults; an answer given without a search must not escape `strict` | `scope` and `grounding` in `project.toml`; three kinds of statement under `open` (§8.1) |
+| D4d | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` reaches the model's knowledge and, outermost, the web | Different ragnart projects need different defaults; an answer given without a search must not escape `strict` | `scope` and `grounding` in `project.toml`; three kinds of statement under `open` (§8.1) |
 | D4b | Retrieval-only | Librarian answers; clients already have models | No model gateway; client enforces strict grounding |
 | D4c | Predictable, not rigid; knobs at three levels; calibration with a labelled set; no auto-tuning | Corpus pollution is a permanent hazard; tuning needs primitives | `max_hits_per_source`, `type_weights`, `min_relevance`, `ragnart calibrate` |
 | D5 | The source is the authority (today the NAS); reconciliation repairs and fails loudly; deletion rules; single writer | Mirror SoHoAI's robustness; NAS backups cover disasters | Guards in the sync; scheduled reconciliation |
@@ -1839,26 +2119,37 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 | D6 | Mirrored trees (`AWS--fotel`, `Gitlab--fotel`) are both indexed. The duplicated `_AWS` subtree is absent from the NAS | The remaining contents of the two trees differ | No deduplication rule in the scanner. A file reached through several links is queued once (§1.2, deviation C) |
 | D7 | RAGNART mirrors git in ingestion, exclusion and lifecycle. It uses git's command names where the mapping is exact, and its own terms elsewhere (§1.2). Deviations A to I are recorded in §1.2 with their reasons | Git already answers the questions this system asks: what is on disk, what is excluded and why, what would change, what is indexed. Its names are widely known, so one vocabulary serves the CLI and the docs | CLI verbs follow §12. `.ragignore` follows gitignore syntax and precedence. Each deviation carries its reason |
 | D8 | A pipeline version changes only on a major event: a change of parsing, admission or chunking that is incompatible with stored items or changes results significantly, or a different embedding model. Bug fixes and improvements stay in the current version (§4.1) | A version is a signal to the operator and to the calibration gate (§9.3). A new version per fix would make the signal meaningless and send every fix through the gate | A version names a compatibility epoch, not an exact recipe. Items affected by a fix are re-checked or re-ingested, with the version unchanged. A new version is applied as D30 defines |
-| D9 | Project work follows the dynamics of git. `.ragnart/` is the project; a global `/ragnart` skill, a session-start hook and the status line make the harness aware of it; the `ragnart` CLI is plumbing behind plain-language requests. Capture is ambient and goes to an unindexed inbox that expires after 30 days; a keep or an operator add is the only way into the index; distill produces collateral, indexed as derived material (§7.3 to §7.5) | Gathering happens inside a conversation, so a command per item would interrupt it. Transient material must not cause writes or deletes in the shared index | Deviation H (§1.2). No workflow states beyond scope and grounding. `capture`, `drop` and `note` in the CLI; no `distill` or `inbox` command; no `MEMORY.md` |
-| D10 | `ragnart init` never changes what is indexed, by construction: a ragnart project does not own the files beside its `.ragnart/` (D27). Every new ragnart project starts with `strict` and capture on. `init` refuses a directory that already has a `.ragnart/` (§4.5) | With no mode, creating a ragnart project cannot remove a folder's content from the index, so `init` has nothing to decide from the state of the folder | `init` prints the settings it writes. The operator changes `grounding` or `capture` by editing `project.toml` |
+| D9 | Project work follows the dynamics of git. A ragnart project is a folder created by `ragnart init <name>` (D32); a global `/ragnart` skill, a session-start hook and the status line make the harness aware of it; the `ragnart` CLI is plumbing behind plain-language requests. Capture is ambient and goes to an unindexed inbox that expires after 30 days; a file enters the index by being placed in a managed folder and committed, by an add, a keep or by hand (D36); distill produces collateral, indexed as derived material (§7.3 to §7.5) | Gathering happens inside a conversation, so a command per item would interrupt it. Transient material must not cause writes or deletes in the shared index | Deviation H (§1.2). No workflow states beyond scope and grounding. `capture`, `drop` and `note` in the CLI; no `distill` or `inbox` command; no `MEMORY.md` |
+| D10 | `ragnart init <name>` never changes what is indexed, by construction: it creates a new, empty project folder, so nothing that existed is adopted (D32). Every new ragnart project starts with `strict` and capture on. `init` refuses a folder `<name>` that already exists (§4.5) | A ragnart project created in the current directory gave the directory a meaning it does not have, and raised the question of what to do with its content | `init` prints the settings it writes, registers the project folder (D37) and publishes the project record to the hub at once; it commits nothing. The operator changes `grounding` or `capture` by editing `project.toml` |
 | D11 | One session uuid = one item, within one source. When several transcript copies carry the same uuid, the newest copy by modification time wins (an exact tie goes to the greatest path) | Copies come from moved sessions and worktrees and are the same conversation; indexing each copy would duplicate the item | The scanner keeps one copy per key; the backfill resolves collisions |
-| D12 | `scope` on every search is a list of terms, a path term naming its source (D24): `all`; `<path>` (exactly one ragnart project); `<path>/` (that project and those below it); `tag:<key>=<value>`. Repeated terms are unioned. The parameter is required and has no default. A term that names no ragnart project is HTTP 422 | One grammar for paths and tags, so no search silently covers nothing. The scope is stated on every request, as D4 requires | `ragnart/scope.py` is the only builder of a scope filter. `all` sends no project filter. A selection never includes `global`. The response echoes the projects searched (§8.8) |
+| D12 | `scope` on every search is a list of terms, a path term naming its source (D24): `all`; `name:<name>` (exactly one ragnart project, by name); `<path>` (exactly one ragnart project); `<path>/` (that project and those below it); `tag:<key>=<value>`. Repeated terms are unioned. The parameter is required and has no default. A term that names no ragnart project is HTTP 422 | One grammar for paths and tags, so no search silently covers nothing. The scope is stated on every request, as D4 requires | `ragnart/scope.py` is the only builder of a scope filter. `all` sends no project filter. A selection includes no `global` item except the sessions its ragnart projects reference (D34). The response echoes the projects searched (§8.8) |
 | D13 | A move is a one-to-one match, within one sync, of a vanished completed file and a new file with the same non-empty content hash, excluding the empty-file hash. Any other case is a deletion plus a new item | An ambiguous match could rewrite the key of an unrelated item, and the empty-file hash matches every empty file (§4.2) | The key is rewritten in SQLite and in the `source_path` payload, with no re-embedding. Sessions never move. Moves are not counted by the mass-delete guard (§10.2) |
 | D14 | A vanished item is tombstoned (`missing_since`). Its points stay searchable for 24 hours, then the first sync after that purges its points and row. Reappearance clears the tombstone. The mass-delete guard gates new tombstones, not purges | A vanished file may be a mount failure or a move not yet visible, and a grace period lets a mistake be undone without re-embedding. Purges were vetted when their rows were tombstoned | Each purge is one line in the sync log (§10.2, rule 4). A tombstoned row is not tombstoned again on later syncs |
-| D15 | A file belongs to the ragnart project whose `.ragnart/` it is under, else to `global`. A session is assigned to the closest enclosing ragnart project of its launch directory when it is first found to have one, and keeps that ragnart project until the ragnart project is removed. An item with no ragnart project is `global` (§4.5) | A file's path is a present fact, and its key decides. A session's launch directory is a frozen record of where a conversation was held: comparing it again and again with a tree that moves detaches the session. `launch_dir` is metadata and the input to the rule, not an identifier | A session held before `init` is assigned at the first sync after it. Moving a ragnart project changes its `projects` row and no session. A launch path spelled differently is not assigned (§13.3). Built to the earlier rule, the re-evaluation of every item on every sync, until v0.4 |
+| D15 | A file belongs to the ragnart project whose `resources/` or `collateral/` holds it, else to `global`. A session is a `global` item of its owner, keyed by its id; a ragnart project includes it by a reference (D34). The session-start hook references a session started in a project folder, once, when it starts. `launch_dir` is metadata only (§4.5) | A file's place in a managed folder is a present fact. A session's membership is provenance, recorded at a known moment, not a rule re-evaluated against a tree that moves | Moving a ragnart project changes its `projects` row and no session. A launch path spelled differently has no effect, because no rule reads `launch_dir`. Built to the earlier rule, the re-evaluation of every item on every sync, until v0.4 |
 | D16 | The scheduled sync scans every configured root in one run, including the shared La-Familia root. `--user` remains available for manual runs | The per-owner loop in the scheduled run left the shared root out of the index | `utils/rag_sync_nfs.py` is called once per scheduled run. With `--user`, the scan and the deletion checks cover that owner only (§10.2) |
 | D17 | Reconciliation runs in every scheduled run, after the ingestion daemon and under the run lock. It repairs NULL `chunk_count`, short rows and zombie points (the last under a point-count guard). It reports anomalies without repairing them, and it never fails the run | The index can drift from the queue (§10.3). Unattended repair keeps it consistent, and anything not safe to repair is left to a person | One exact facet call on `source_path` per run. The guard counts points, not keys |
 | D18 | A connector is a type and a source is a configured instance of one. Each connector defines its own key, locator and display formats. A key is unique within its source only, and a locator is opaque outside its connector (§4.2, §4.7) | Claude Code and OpenCode sessions already had keys and locators unlike a file path. Naming the pattern removes the assumption of one filesystem namespace | `source_id` on every item and chunk. No format claims universality. A new kind of store is a new connector, not a change to the model |
-| D19 | Ingestion is multi-point. Each ingestion side owns its bookkeeping and the lifecycle of its items. Central parses, chunks, embeds, stores and searches; it is the only writer of the index, is agnostic to a source's lifecycle, and keeps nothing of an item beyond its chunks (§2.3) | Consistency, deletion and reconciliation are specific to a source, and are decided where the source can be seen. An endpoint is reachable only some of the time, so central must not depend on it | Four requests per item: upsert, delete, change of key and change of metadata. The last two rewrite payload fields and re-embed nothing. A silent source's items stay. After a change of parsing, admission or chunking a source re-submits when it is next reachable (§4.1) |
-| D20 | Three stores: the Qdrant payload and the central registry in central, and a state database on each ingestion host (§4.8) | Central needs what retrieval filters on or displays and what gates a write; the ingestion side needs what decides a submission. One database held both only because one host played both roles | The ragnart project tables and the sources live in the registry. Each store is inspected and repaired on its own |
-| D21 | A ragnart project has one home: one source and one path, on a source RAGNART can write to. Sharing is a grant, never a replica: a shared ragnart project lives on a central source. A project id published by a second source is refused and reported (§4.5) | A ragnart project living independently on several machines is distributed data management: consistency, races and divergent copies. `.ragnart/` is the project, so a source that can only be read cannot hold one | Sharing stays inside the access model. A cloned or synchronised marker never forks a ragnart project; its files are `global` items. Within one source the registered path keeps a duplicated id (D29) |
-| D22 | Central's checks on a write are gates, not policy: the source is known and presents its secret, the request stays within that source, and a project id is not homed elsewhere. One secret per source. Removing the items of a source that no longer exists is a break-glass operator tool on central (§10.2, §12) | A submission is a write across hosts, so the source must prove which one it is. Anything richer is tenancy, which is open | No lifecycle logic in central. No API request and no automatic expiry for a dead source |
-| D23 | A source submits bytes for a general document format, which central parses, and text for a format native to its connector, which the connector renders (§4.7, §5.1) | The line follows who owns the format. Central's parsers are chosen by file type, so a document is treated identically whichever source submitted it; a native format has no second producer to stay consistent with | A connector's rendering version is kept on the ingestion side, separate from the pipeline version (§4.1). A store whose documents have no bytes exports them to a general format |
-| D24 | A path term in a scope names its source: `<source>:<path>`. The API has no default source. The client completes a bare path with its default source, which is explicit, visible and changeable (§8.2, §8.8) | A path means nothing outside its source. A server-side default would hide which source was searched, against D4 | `tag` is reserved. `/ragnart status` shows the default source, and `/ragnart source` changes it |
+| D19 | Ingestion is multi-point. Each ingestion side owns its bookkeeping and the lifecycle of its items. The hub parses, chunks, embeds, stores and searches; it is the only writer of the index, is agnostic to a source's lifecycle, and keeps nothing of an item beyond its chunks (§2.3) | Consistency, deletion and reconciliation are specific to a source, and are decided where the source can be seen. An endpoint is reachable only some of the time, so the hub must not depend on it | Five requests per item: upsert, delete, change of key, change of metadata and change of source. The last three rewrite payload fields and re-embed nothing (D37). A silent source's items stay. After a change of parsing, admission or chunking a source re-submits when it is next reachable (§4.1) |
+| D20 | Three stores: the Qdrant payload and the hub registry in the hub, and a state database on each ingestion host (§4.8) | The hub needs what retrieval filters on or displays and what gates a write; the ingestion side needs what decides a submission. One database held both only because one host played both roles | The ragnart project tables and the sources live in the registry. Each store is inspected and repaired on its own |
+| D21 | A ragnart project has one home: one source and one path, on a source RAGNART can write to. Sharing is a grant, never a replica: a shared ragnart project lives on a hub source. A project id published by a second source is refused and reported, unless it arrives by `ragnart mv` or `ragnart repair` (D37) (§4.5) | A ragnart project living independently on several machines is distributed data management: consistency, races and divergent copies. RAGNART writes into the project folder, so a source that can only be read cannot hold one | Sharing stays inside the access model. A cloned or synchronised marker never forks a ragnart project; its files are `global` items. Within one source the registered path keeps a duplicated id (D29) |
+| D22 | The hub's checks on a write are gates, not policy: the source is known and presents its secret, the request stays within that source, and a project id is not homed elsewhere. One secret per source. Removing the items of a source that no longer exists is a break-glass operator tool on the hub (§10.2, §12) | A submission is a write across hosts, so the source must prove which one it is. Anything richer is tenancy, which is open | No lifecycle logic in the hub. No API request and no automatic expiry for a dead source |
+| D23 | A source submits bytes for a general document format, which the hub parses, and text for a format native to its connector, which the connector renders (§4.7, §5.1) | The line follows who owns the format. The hub's parsers are chosen by file type, so a document is treated identically whichever source submitted it; a native format has no second producer to stay consistent with | A connector's rendering version is kept on the ingestion side, separate from the pipeline version (§4.1). A store whose documents have no bytes exports them to a general format |
+| D24 | A path term in a scope names its source: `<source>:<path>`. The API has no default source. The client completes a bare path with its default source, which is explicit, visible and changeable (§8.2, §8.8) | A path means nothing outside its source. A server-side default would hide which source was searched, against D4 | `tag` and `name` are reserved. `/ragnart status` shows the default source, and `/ragnart source` changes it |
 | D25 | A hit names its origin by `source_id`, key and display label, and makes no promise that the caller can open the item (§8.7) | A key and a locator are meaningful to their own source only, and the caller may be on another host | The passage is returned in the hit. Opening an item is an operation of its connector, not of the client |
-| D26 | The NAS is one source, and its crawl roots are traversal starting points inside it. `global` stays one value, not one per source (§4.6, §4.7) | Existing keys are full paths, so one source for the NAS needs no re-keying. Crawl roots are not an identity (§4.6) | Existing items gain `source_id` by backfill, with no re-keying and no re-embedding. A central source derives owners from its own mapping; an endpoint source has one owner |
-| D27 | A ragnart project is a notebook: the content of one `.ragnart/` directory, named and identified by its `project.toml`. The directory that holds it is not the ragnart project: the files beside `.ragnart/` are `global` items under the static policy. One directory holds one ragnart project. There is no `mode` (§4.5, §7.2, §7.4) | The intent is a self-hosted NotebookLM: several notebooks can serve one body of material, each independent of the directory it sits in. A ragnart project that claimed its directory changed what was indexed there, and needed a mode to say how | Deviation I (§1.2). The holding directory serves addressing and session assignment only. "Crawl" names the static policy's walk. At scope `project`, a repository's own files are not found. The directory keeps the name `.ragnart` |
-| D28 | An add always copies the file into the ragnart project's `resources/`, whether or not the original is an item elsewhere. A ragnart project may reference other ragnart projects, never items. References are stored in `.ragnart/references`, widen scope and never access, and are not transitive. "Reference" is the only term; a symbolic link is a filesystem construct and never creates one (§4.5, §7.3) | "Link" meant three things: a reference to a ragnart project, a reference to an item, and an instruction to ingest a file. A copy is robust and simple: it does not change or vanish with the original, it needs no filter of its own in search, and it raises no access question. The redundancy is accepted | No references to items, and no use for `source_links` (§13.3). Identical copies collapse in results. A resource is a snapshot. A reference adds an id to the existing `project_id` filter |
-| D29 | A ragnart project's marker is guarded as an item is. A registered ragnart project whose marker is malformed or unreadable keeps its last good record. One whose marker is missing is tombstoned for 24 hours before it is removed. Within one source the registered path keeps a duplicated id (§4.5) | A typing error in `project.toml`, or a marker not seen in one scan, must not remove a ragnart project and what is recorded for it. The reasoning is that of deviation G | `missing_since` for ragnart projects. Not built (v0.4): today removal is immediate, and walk order decides between duplicates |
-| D30 | A pipeline is what central does to a submitted item: parsing, admission, chunking and embedding. Retrieval is not part of it. There is one current pipeline, for every source. The version is recorded per item, and central stamps it on every chunk. A change of parsing, admission or chunking is applied per item as sources re-submit, and old and new coexist. A change of embedding model is applied to the whole collection by central, from the stored text, and is never mixed (§4.1, §5) | One version number covered three things that behave differently when they change. The vectors of two embedding models cannot be searched with one query vector. A change to retrieval touches no stored data. Central does the processing, so central is the one that knows which version made a chunk | `pipeline_version` in the payload and in the listing (v0.3). Connector rendering is listed in §4.7, not §5.1. A change to retrieval is gated by the labelled set and has no version on items. The mechanism of an embedding change is open (§13.3) |
+| D26 | The NAS is one source, and its crawl roots are traversal starting points inside it. `global` stays one value, not one per source (§4.6, §4.7) | Existing keys are full paths, so one source for the NAS needs no re-keying. Crawl roots are not an identity (§4.6) | Existing items gain `source_id` by backfill, with no re-keying and no re-embedding. A hub source derives owners from its own mapping; an endpoint source has one owner |
+| D27 | A ragnart project is a notebook, named and identified by its `project.toml`: its material is what it manages, the content of `resources/` and `collateral/`, with `inbox/` as working material: its three managed folders. Every other file of its folder is external and not indexed (D39). There is no `mode` (§4.5, §7.2, §7.4) | The intent is a self-hosted NotebookLM: several notebooks per topic, each independent of where its folder is. A ragnart project that claimed its folder's other files would change what is indexed there, and would need a mode to say how | Deviation I (§1.2). The project folder is where the session-start hook finds the project; its path is metadata. "Crawl" names the static policy's walk. At scope `project`, a repository's own files are not found |
+| D28 | An add always copies a file into the ragnart project's `resources/`, whether or not the original is an item elsewhere: files are the exception to the rule of references by stable id (D34). "Reference" is the only term for a pointer to a ragnart project or a session; a symbolic link is a filesystem construct and never creates one (§4.5, §7.3) | "Link" meant three things: a reference to a ragnart project, a reference to an item, and an instruction to ingest a file. A copy is robust and simple: it does not change or vanish with the original, it needs no filter of its own in search, and it raises no access question. The redundancy is accepted | No use for `source_links`. Identical copies collapse in results. A resource is a snapshot, with its origin in `.ragnart/provenance/` (D33) |
+| D29 | A ragnart project's marker is guarded as an item is. A registered ragnart project whose marker is malformed or unreadable keeps its last good record. One whose marker is missing is tombstoned for 24 hours before it is removed. Within one source the registered path keeps a duplicated id (§4.5) | A typing error in `project.toml`, or a marker not seen in one scan, must not remove a ragnart project and what is recorded for it. The reasoning is that of deviation G | `missing_since` for ragnart projects; `ragnart repair` clears it for a folder moved by hand (D37). Not built (v0.4): today removal is immediate, and walk order decides between duplicates |
+| D30 | A pipeline is what the hub does to a submitted item: parsing, admission, chunking and embedding. Retrieval is not part of it. There is one current pipeline, for every source. The version is recorded per item, and the hub stamps it on every chunk. A change of parsing, admission or chunking is applied per item as sources re-submit, and old and new coexist. A change of embedding model is applied to the whole collection by the hub, from the stored text, and is never mixed (§4.1, §5) | One version number covered three things that behave differently when they change. The vectors of two embedding models cannot be searched with one query vector. A change to retrieval touches no stored data. The hub does the processing, so the hub is the one that knows which version made a chunk | `pipeline_version` in the payload and in the listing (v0.3). Connector rendering is listed in §4.7, not §5.1. A change to retrieval is gated by the labelled set and has no version on items. The mechanism of an embedding change is open (§13.3) |
 | D31 | The librarian's guarantee is split by who can keep it. The search API guarantees the evidence and its verdict on it: a hit id, the rerank score, the count of good hits and the reranker's status. The client's command prints the status line and the "no good hits" message from that response. Staying within the evidence in free conversation is an instruction to the model, and best-effort. Actions, including fetching a page the operator asked for, are allowed under `strict` (§8.1, §8.7, §9.2) | `strict` was stated as a guarantee while no component could detect a breach. The threshold applies to the rerank score, which a hit did not carry, so no client could apply it | `min_relevance` is applied by the API to the raw rerank score, with one global value; `type_weights` change order only. The labelled set includes questions that should not be answered. `ragnart calibrate` finds `min_relevance` and sweeps nothing else |
+| D32 | `ragnart init <name>` creates the folder `<name>`, with `.ragnart/` and the managed folders inside it; the current directory has no meaning. A ragnart project's material is only what it manages. Nesting has no meaning: a ragnart project has no parent, a nested one is external content of the outer one, and scope `project` does not include it. A marker that `init` did not make is registered only in a folder with no indexed `global` item (D41) (§4.5) | What a ragnart project is comes first, and git is the model for how it is built. Creating `.ragnart/` in the current directory tied the project to a directory by chance, and raised the question of what to do with the directory's content | `init` is `git init <dir>` with a required name. `init --from` starts a ragnart project from another with a new `id`. A hand-made marker never changes what is indexed. `parent` is dropped |
+| D33 | `.ragnart/` holds state and metadata only: what would be lost if the project folder were copied and every database were empty. `project.toml` is the operator's; RAGNART writes `provenance/` and `dropped/`, one file per entry. Parsing results, queue state, hashes and a session's state are never kept there (§4.5) | `.git/` is heavy because it holds the objects; here the managed folders hold the material, references included, so `.ragnart/` needs far less. A second copy of the bookkeeping would disagree with the state database | The managed folders sit beside `.ragnart/`. The provenance of a captured PDF is recorded. Concurrent writers never rewrite a shared file (§10.6) |
+| D34 | References by stable id are the rule: a ragnart project includes another ragnart project, or a Claude Code or OpenCode session, by a reference to its id. Files are the exception: they are snapshotted into `resources/` and ingested from the copy, as are captured pages. Both are resources: a reference is a `.reference` file in `resources/`, added by `ragnart add` and removed as any resource is. Live or frozen is decided per kind of material. A reference widens scope, never access, and is not transitive between ragnart projects. A missing target is reported (§4.5) | A session has a stable id and its live record is wanted; a file can be rewritten or vanish, and the notebook must not change with it. A reference is material of the ragnart project like a copy, so it lives and is managed where the material is | Sessions stay `global` items; ingestion is unchanged. One verb, `add`, copies or references by the kind of item; there is no separate reference command. "Reference" is the only term; "ref" is not used. Search matches referenced sessions by `session_id`, resolved before the search; nothing is written to Qdrant |
+| D35 | Exclusion rules do not apply in a ragnart project's folder: the global crawl does not enter it (D39), and a commit applies the admission rules and no exclusion rule. A refusal is reported (§1.2, deviation D) | Placing a file in a managed folder is already the deliberate act of curation; an exclusion rule written for the archive would drop it silently | A ragnart project under an excluded directory is still found, because its folder is registered (D37) |
+| D36 | Membership is by location in `resources/` and `collateral/`, and a commit indexes it. `ragnart add` copies, records the provenance, commits and waits; `ragnart add --no-commit` only copies; `ragnart commit` reconciles the managed folders with the index and waits; the scheduled run commits no ragnart project (D40). Adding a file from the project's own `inbox/` or `collateral/` moves it into `resources/`. At most one commit runs and one waits per ragnart project, and an add waits for the first commit that started after its files were in place. Every file gets an outcome: indexed, refused, failed or pending (§7.3) | Adding a source to a notebook should make it usable at once, and a file placed by hand should belong to the notebook as one placed by a command does. A commit covers everything present, so commits can coalesce | Deviations E and F (§1.2). Refusals are recorded and not retried until the file changes; failures are retried. A commit removes what left the managed folders at once, with no tombstone, and runs no deletion phase when a folder cannot be read. A copy may be edited; stale collateral is reported, never repaired. A waiting commit needs the split of the hub and the ingestion side (v0.3). The races are in §10.6 |
+| D37 | `init` registers the project folder with its ingestion host; the sync reads the registered folders and walks the crawl roots, and `ragnart repair` re-registers a folder moved by hand. A file in a managed folder is keyed `ragnart://<project id>/<relative path>`, with its full path as locator. A move to another source is made by `ragnart mv`, which has the hub rewrite the `source_id` of the managed files' chunks (§4.2, §4.5) | A ragnart project's folder may lie anywhere, including outside the crawl roots and under an excluded directory. Keys relative to the project make every move a change of locator, with no matching by hash. An explicit change of home keeps "one home" safe against clones and restores | `git worktree` is the model. The ingestion API gains a fifth request, change of source (D19). Nothing is re-embedded by a move, there is no refusal window, and grants survive. The destination of a move is a writable source with an ingestion side |
+| D38 | A ragnart project is created from inside a Claude Code or OpenCode session, by the `/ragnart` skill: it runs `ragnart init`, makes the new ragnart project the session's current project with scope `project` and the project's default grounding, and adds the session to it. A session works in at most one ragnart project, its current project, for its whole life, set when it starts in a project folder or when it creates a ragnart project; the skill refuses to create a ragnart project from a session that has one. Every `ragnart` command acts on the current project only; acting on another ragnart project is not permitted. A session may still be referenced as material by other ragnart projects (§4.5, §7.3) | `ragnart init` is plumbing and makes no assumption about its caller; the workflow belongs to the skill. A session creating or switching between ragnart projects would be nesting by another route, and an action on a project other than the current one invites confusion between where a session is and what it changes | The CLI has no option that names another project: it finds its project from the working directory, and the skill runs it in a subshell in the current project's folder. The current project is session state on the client host (§13.3). Creation from a shell is the exception, and no session is in the ragnart project until one starts in its folder or is added |
+| D39 | The global crawl does not enter a ragnart project's folder: for the crawl, a `.ragnart/` marker is a `.ragignore` holding `*`. The crawl reads the marker to register the ragnart project, and nothing in the folder becomes a `global` item. `resources/` and `collateral/` are indexed only by commits; the other files of the folder, and `inbox/`, are not indexed. `.ragnart/` is never ingested (§1.2, deviation D; §4.5; §7.2) | The global crawl and a ragnart project are two kinds of ingestion with different meanings. A crawl walking a project folder would give the project material it did not choose, or turn its files into `global` items | `config/ragignore` excludes `.ragnart/`. `check-ignore` names the project folder as the reason. Collateral is indexed as the ragnart project's output; it becomes a resource only by `ragnart add`, which moves it |
+| D40 | There is no implicit commit. A ragnart project's index changes only by `ragnart add`, `ragnart note`, `ragnart commit` and `ragnart drop`; the scheduled run commits no ragnart project. Uncommitted changes are counted by the session-start hook and the status line, and the skill offers a commit, never makes one (§7.3) | Every change to a ragnart project's index stays a deliberate act, and every outcome of a commit has someone to report it to. A timer commit would have no caller, and refusals and failures would be silent | A file placed or deleted by hand waits for a commit, as an unstaged change does in git. `drop` commits. `gc` changes no index. Live references (sessions, other ragnart projects) still change the scope without a commit, by design |
+| D41 | No marker changes what is indexed. A marker with an unknown `id` found by the crawl is registered only in a folder that holds no indexed `global` item; otherwise it is refused, logged at ERROR on every run, and the folder is walked as if it had no marker. A code repository is not a ragnart project (§4.5) | Under D39 a marker removes its folder from the crawl, so a marker placed by hand in a folder of material would delete that material from the index after the grace period, below the reach of the mass-delete guard. The reasoning is that of deviation G | Turning an existing folder of material into a ragnart project is not supported: `init` a new one and `add` what is wanted. A ragnart project about a repository is its own folder. The RAGNART repository's hand-written marker is removed in the v0.4 migration |
+| D42 | The role that runs the pipeline, the index and the search API is called the hub; its registry is the hub registry, and a source run on the hub's own host is a hub source (§2.3, §4.7, §4.8) | "Central" named both the role and a kind of source, two different things sharing a word | The ingestion side keeps its name. `init` publishes the project record to the hub at once (D10) |
