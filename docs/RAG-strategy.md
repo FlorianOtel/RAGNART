@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6)
-updated_at: 2026-11-16--17-25
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1)
+updated_at: 2026-11-18--22-53
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -81,14 +81,16 @@ default) both point to `/mnt/nfs/__Backups/RAGNART--databases/`:
 /mnt/nfs/__Backups/RAGNART--databases/
 ├── rag-ingest.lock                     ← NFS lock held by the running index writer; holds the holder's line (§5.6)
 ├── sqlite/
-│   └── rag_state.db                    ← ingestion queue (SQLite, WAL mode)
+│   ├── rag_state.db                    ← ingestion queue (SQLite, WAL mode)
+│   └── hub_registry.db                 ← hub registry: sources and ragnart project tables (SQLite, WAL mode)
 ├── logs/
 │   ├── rag-ingest.log                  ← ingestion + snapshot log (rotated daily, 7 kept)
 │   └── rag-ingest.log.N.gz
 └── qdrant-snapshots/
     └── documents/
         ├── documents_new-<id>-<YYYY-MM-DD-HH-MM-SS>.snapshot   ← Qdrant archive (~21 GB)
-        └── rag_state-<YYYY-MM-DD-HH-MM-SS>.db                  ← matching state DB (~250 MB)
+        ├── rag_state-<YYYY-MM-DD-HH-MM-SS>.db                  ← matching state DB (~250 MB)
+        └── hub_registry-<YYYY-MM-DD-HH-MM-SS>.db               ← matching hub registry (~50 KB)
 ```
 
 ---
@@ -1210,15 +1212,16 @@ there only.
 
 ### 9.1 Policy
 
-`rag_state.db` and the Qdrant collection must be restored as a **pair** taken at the same
-logical point: the set of `completed` rows must match the points in Qdrant.
+`rag_state.db`, `hub_registry.db` and the Qdrant collection must be restored as a **triple** taken at the
+same logical point: the set of `completed` rows must match the points in Qdrant, and the hub registry
+must be the copy taken at that point.
 
 | Item | Value |
 |---|---|
 | When | at the end of an ingestion run, if the newest `.snapshot` on the NAS is older than 20 h — normally the 01:00 run; `RAG_FORCE_SNAPSHOT=1` forces one. No cron job. |
-| What | one Qdrant snapshot of `documents` (stored as `documents_new-<id>-<ts>.snapshot`, ~21 GB) + `rag_state-<ts>.db` (~250 MB), same `<ts>` |
+| What | one Qdrant snapshot of `documents` (stored as `documents_new-<id>-<ts>.snapshot`, ~21 GB) + `rag_state-<ts>.db` (~250 MB) + `hub_registry-<ts>.db` (~50 KB), same `<ts>` |
 | Where | `/mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/` |
-| Retention | 7 pairs (about one week, ~150 GB) |
+| Retention | 7 triples (about one week, ~150 GB) |
 | Server 1 NVMe | `/var/lib/qdrant/snapshots` holds one snapshot only while it is being downloaded; normally empty |
 | Recovery point | at most ~24 h old; the next ingestion run re-ingests anything newer |
 
@@ -1229,7 +1232,7 @@ logical point: the set of `completed` rows must match the points in Qdrant.
 1. Safety net 1 — delete any snapshot Qdrant still holds for the collection (API).
 2. Safety net 2 — delete stale `*.tmp` partial downloads on the NAS.
 3. Safety net 3 — abort before creating anything if the NAS has less than 60 GB free.
-4. `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db`.
+4. `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` and on `hub_registry.db`.
 5. `POST /collections/documents/snapshots` — Qdrant writes the archive to its local
    `snapshots_path`.
 6. Safety net 4 — an EXIT trap deletes the Qdrant-local snapshot and the partial download on
@@ -1237,23 +1240,29 @@ logical point: the set of `completed` rows must match the points in Qdrant.
 7. Download to `<name>.tmp` on the NAS (`curl --max-time 7200`), check it is non-empty,
    rename to `<name>`.
 8. `DELETE` the snapshot from Qdrant.
-9. Copy `rag_state.db` to `rag_state-<ts>.db` next to it.
-10. Safety net 5 — keep the newest N `.snapshot` files and delete `rag_state-*.db` copies
-    whose snapshot is gone.
+9. Copy `rag_state.db` to `rag_state-<ts>.db`, and `hub_registry.db` to `hub_registry-<ts>.db`, next to it.
+10. Safety net 5 — keep the newest N `.snapshot` files and delete `rag_state-*.db` and
+    `hub_registry-*.db` copies whose snapshot is gone.
 
-The pair is consistent because the snapshot step runs after the daemon has exited, inside the
-same oneshot, and the search service never writes: nothing changes Qdrant or the state DB
-between steps 5 and 9. Download time depends on Server 1's link (a few minutes on gigabit;
+The triple is consistent because the snapshot step runs after the daemon has exited, inside the
+same oneshot, and the search service never writes: nothing changes Qdrant, the state DB or the
+hub registry between steps 5 and 9. Download time depends on Server 1's link (a few minutes on gigabit;
 slow downloads point at that link).
 
-### 9.2 Choosing a pair
+### 9.2 Choosing a triple
 
 ```bash
 ls -lt /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/
 ```
 
-Pick the newest `<ts>` (UTC) at or before the point to restore to; use the `.snapshot` and the
-`rag_state-<ts>.db` with that same `<ts>`.
+Pick the newest `<ts>` (UTC) at or before the point to restore to; use the `.snapshot`, the
+`rag_state-<ts>.db` and the `hub_registry-<ts>.db` with that same `<ts>`.
+
+Inspect a copy with `immutable=1`, for example `sqlite3 'file:<path>?immutable=1'`. Each copy is
+checkpointed before it is taken, so it has no WAL file, and `immutable=1` reads it exactly and creates
+no `-shm` or `-wal` file beside it (a `mode=ro` read does create them). Do not use `immutable=1` on the
+live `rag_state.db` or `hub_registry.db`: both run in WAL mode, so `immutable=1` ignores changes still in
+the WAL and shows stale data.
 
 ### 9.3 Full restore (Qdrant storage lost or corrupt)
 
@@ -1301,12 +1310,14 @@ Wait for `status: green` and `optimizer_status: ok`. If a real collection named 
 exists (something called `ensure_collection()` in between), delete it
 (`curl -X DELETE http://192.168.1.93:6333/collections/documents`) before creating the alias.
 
-**4. Restore the state DB from the same pair (Server 2).**
+**4. Restore the state DB and the hub registry from the same triple (Server 2).**
 
 ```bash
 cp /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/rag_state-<ts>.db \
    /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
-rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-{wal,shm}
+cp /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/hub_registry-<ts>.db \
+   /mnt/nfs/__Backups/RAGNART--databases/sqlite/hub_registry.db
+rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/{rag_state,hub_registry}.db-{wal,shm}
 ```
 
 **5. Verify (Server 2).**
@@ -1316,6 +1327,7 @@ sudo systemctl start ragnart-search.service
 python utils/rag_status.py                      # completed count vs Qdrant point count
 python utils/rag_sparse_migrate.py status       # alias -> documents_new, sparse space present
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS"
+curl -s 'http://192.168.1.95:8100/v1/projects'   # the listing must match the restored hub registry
 ```
 
 **6. Catch up and re-enable (Server 2).** A sync re-queues everything that changed after
@@ -1330,14 +1342,16 @@ systemctl list-timers ragnart-ingest.timer
 
 ### 9.4 State-DB-only restore (Qdrant healthy)
 
-Use when `rag_state.db` is corrupt but Qdrant is intact. All steps on Server 2.
+Use when `rag_state.db` or `hub_registry.db` is corrupt but Qdrant is intact. All steps on Server 2.
 
 ```bash
 sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service
 
 cp /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/rag_state-<ts>.db \
    /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db
-rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db-{wal,shm}
+cp /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/hub_registry-<ts>.db \
+   /mnt/nfs/__Backups/RAGNART--databases/sqlite/hub_registry.db
+rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/{rag_state,hub_registry}.db-{wal,shm}
 
 bash scripts/ragnart-ingest-run.sh          # sync + re-ingest the gap
 sudo systemctl start ragnart-ingest.timer
@@ -1355,7 +1369,7 @@ RAG_FORCE_SNAPSHOT=1 bash scripts/ragnart-ingest-run.sh   # preferred: runs afte
 bash scripts/sqlite-qdrant-snapshot.sh                    # direct; takes the ingestion lock itself, exits 75 while a run holds it
 ```
 
-Each extra pair counts toward the 7 kept, so forcing snapshots shortens the history.
+Each extra triple counts toward the 7 kept, so forcing snapshots shortens the history.
 
 ### 9.6 OpenCode database backup
 
