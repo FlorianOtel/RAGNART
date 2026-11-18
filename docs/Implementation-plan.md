@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design of docs/RAGNART-design.md §2.3, §4.7, §4.8: new v0.3 Sources, later versions renumbered (project mode v0.4, Kotaemon v0.5, tenancy v0.6); §2 decisions, §4 invariants, §7 terms, §8 parameters, §9 status); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- design D27 to D31 and the amended D8, D10, D15, D19: §2 decisions, §4 invariants, v0.3 and v0.4 work items and definitions of done, §7 terms and future work, §8 open decisions); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, design D32 to D37 and the amended D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29: §2 decisions, §5 access model, v0.3 registry item, v0.4 rewritten, v0.5 uploads, §7 terms, §8 open decisions; then D38 to D41, references as resources, the crawl and project folders, no implicit commit, D42: central renamed the hub; projects addressed by unique name)
-updated_at: 2026-11-17--14-32
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design of docs/RAGNART-design.md §2.3, §4.7, §4.8: new v0.3 Sources, later versions renumbered (project mode v0.4, Kotaemon v0.5, tenancy v0.6); §2 decisions, §4 invariants, §7 terms, §8 parameters, §9 status); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- design D27 to D31 and the amended D8, D10, D15, D19: §2 decisions, §4 invariants, v0.3 and v0.4 work items and definitions of done, §7 terms and future work, §8 open decisions); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, design D32 to D37 and the amended D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29: §2 decisions, §5 access model, v0.3 registry item, v0.4 rewritten, v0.5 uploads, §7 terms, §8 open decisions; then D38 to D41, references as resources, the crawl and project folders, no implicit commit, D42: central renamed the hub; projects addressed by unique name); Claude Code (Claude Opus 5.5, 2026-11-18 -- v0.4: persistent `cd` into the project folder after `init`; session relocation to verify; how the agent searches; the working reference, no session state; `session:current`; open, capture, collateral, resume)
+updated_at: 2026-11-18--11-22
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -784,16 +784,27 @@ adds to it.
   ragnart project by name. The status line shows the project's name.
 - `.ragnart/provenance/`, one file per copy placed by `add` or `capture`,
   with its origin and time (design §4.5).
-- The session's current project (design §4.5, §7.3): session state on the
-  client host, keyed by the session id, holding the current project's `id`,
-  scope and grounding. Set once, by the session-start hook or by creating a
-  ragnart project; never changed.
+- The session's current project (design §4.5, §7.3): recorded by the
+  session's reference in the project, marked `working = true`; found by the
+  hook by location or by a local lookup of the working reference to the
+  session's id among the host's registered project folders. Set once, never changed. No separate store of session state:
+  a change of scope or grounding lasts for the conversation only.
 - Creation from inside a session (design §7.3): the skill checks the gate (no
   current project), runs `ragnart init`, makes the new project current with
   scope `project` and the project's default grounding, and adds the session.
-  Every `ragnart` command runs in a subshell in the current project's folder;
-  the CLI has no option naming another project. Prerequisite to verify first:
-  whether the agent can read its own session id, in Claude Code and OpenCode.
+  After `init` the session's shell moves into the project folder with a
+  persistent `cd` and stays there (only `init` runs in a subshell); the CLI
+  has no option naming another project. Also to verify: relocating the
+  session itself into the project folder, the operator's preferred behaviour
+  (design §13.3). `ragnart add session:current`
+  resolves the running session's id from the harness, specific to each:
+  Claude Code reads `CLAUDE_CODE_SESSION_ID`, OpenCode `OPENCODE_SESSION_ID`
+  (design §4.5). The OpenCode variable is undocumented: check it at every
+  OpenCode upgrade, and once from a live OpenCode session in this version's
+  test.
+- Opening an existing ragnart project from inside a session (design §7.3):
+  `/ragnart open <name>`, the creation sequence without `init`, behind the
+  same gate; only a project on a source of the session's own host.
 - `add` and `commit` (design §7.3): `add` copies or captures, records the
   provenance, commits and waits; `add --no-commit` only copies; `commit`
   reconciles `resources/` and `collateral/` with the index and waits; `note`
@@ -836,21 +847,38 @@ adds to it.
   grace period, deletion by `gc` in the ingestion run.
 - Capture (design §7.3): `ragnart capture <url>` fetches the page itself and
   writes Markdown with front matter to the inbox, with a provenance entry.
+  It is run by a capture hook on the harness's fetch tool (Claude Code:
+  `PostToolUse` on `WebFetch`; OpenCode: a plugin on `tool` /
+  `execute.after`), detached, when the session's current project has capture
+  on. The skill instructs the model to do every web search and fetch with the
+  harness's tools, never `curl` or a shell command, so the hook sees each
+  page; other routes fall back to the skill's instruction, best-effort.
 - Operator add, keep and note (design §7.3): a file or a folder is always
   copied into `resources/`, wherever the original is, then committed.
-- Collateral (design §7.3): written to `collateral/`, indexed with
-  `source_type = collateral`; the inbox items it lists are kept.
+- Collateral (design §7.3): Markdown written by the agent's own file tools
+  into `collateral/`, then committed; a presentation or chart sits beside its
+  Markdown source. The model lists `sources:` in the front matter; the first
+  commit records their content hashes in `.ragnart/provenance/`, and later
+  commits and `status` report stale collateral. Indexed with
+  `source_type = collateral`; the inbox items it lists are kept. Working
+  files stay out of `collateral/`.
 - `/ragnart` skill for Claude Code and OpenCode: the action vocabulary and the
   capture policy (design §7.3), scope and grounding knobs with defaults at
   three levels (design §8.2), the status line and the "no good hits in this
-  scope" stop, both printed by the command from the API's response and not
-  composed by the model (design §8.1), one-off `ask`, verbose translation of
-  natural-language requests.
+  scope" stop, both copied from the API's response and never judged by the
+  model, through a fixed request template whose scope comes from the
+  session's settings (design §8.1, §8.8), one-off `ask`, verbose translation of
+  natural-language requests. A `ragnart search` verb only if the template
+  proves unreliable.
   `/rag` becomes an alias (design §8.9).
 - Session-start hook and harness status line (design §7.4): the session's
-  current project from session state, or, for a session started in a project
+  current project from its working reference, or, for a session started in a project
   folder, that project made current and the session added to it; and the
-  project name, scope, grounding and a capped listing in every session.
+  project name, scope, grounding and a capped listing in every session. On a
+  resume or a compaction the hook restores the context: the current project,
+  the project folder (the skill moves the shell back into it after a resume),
+  the project's default scope and grounding, and a short block of the
+  librarian rules (design §7.4).
 - The client's default source (design §8.2): a setting of the `/ragnart`
   skill, shown by `/ragnart status` and changed by `/ragnart source`. The
   skill completes a bare path term with it and shows the completed term.
@@ -945,9 +973,9 @@ whether it has an equivalent of the session-start hook, is unverified (§8).
 **Decisions to confirm at kickoff.** The open items of
 `docs/RAGNART-design.md` §13.3 that this version depends on: the write path
 for project actions from a host other than the ragnart project's ingestion
-host; where a session's scope, grounding and default source are stored;
-where a session's state lives, which is specific to each harness (design
-§13.3).
+host; whether a
+Claude Code session can be relocated into the project folder it created
+(design §13.3).
 
 **Estimated sessions.** 1–2.
 
