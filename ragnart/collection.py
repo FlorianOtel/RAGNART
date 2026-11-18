@@ -19,7 +19,9 @@ from .schema import (
     FIELD_INGESTED_AT,
     FIELD_MODIFIED_AT,
     FIELD_OWNER,
+    FIELD_PIPELINE_VERSION,
     FIELD_PROJECT_ID,
+    FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
     FIELD_SOURCE_TYPE,
     SPARSE_VECTOR_NAME,
@@ -43,6 +45,9 @@ _KEYWORD_INDEX_FIELDS = (
     FIELD_SOURCE_TYPE,
     FIELD_FILE_TYPE,
     FIELD_CONTENT_HASH,
+    # v0.3: every point carries its source and the pipeline version that wrote it.
+    FIELD_SOURCE_ID,
+    FIELD_PIPELINE_VERSION,
 )
 
 # Payload fields that get a DATETIME index (range filters).

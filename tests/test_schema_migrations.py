@@ -18,7 +18,7 @@ import pytest
 from ragnart.state import StateDB
 
 # The schema version that the newest migration produces.
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 # Columns added by migration version 2 (ragnart/state.py _MIGRATIONS).
 NEW_COLUMNS = {
@@ -38,6 +38,9 @@ NEW_COLUMNS = {
 
 # Tables added by migration version 2.
 NEW_TABLES = {"projects", "project_tags", "project_links", "source_links", "grants"}
+
+# Column added by migration version 3 (ragnart/state.py _MIGRATIONS).
+V3_COLUMNS = {"source_id"}
 
 # The ingestion_queue schema exactly as ragnart/state.py had it before migrations
 # existed, as the live rag_state.db was created. The live DB has user_version 0 and
@@ -129,6 +132,18 @@ def test_new_columns_exist_on_ingestion_queue(db, db_path):
     assert "launch_dir" in column_names
 
 
+def test_source_id_column_exists_on_ingestion_queue(db, db_path):
+    # Migration 3 adds source_id; it is nullable, so existing rows need no value.
+    conn = sqlite3.connect(db_path)
+    try:
+        column_names = {
+            row[1] for row in conn.execute("PRAGMA table_info(ingestion_queue)")
+        }
+    finally:
+        conn.close()
+    assert V3_COLUMNS <= column_names
+
+
 def test_reopening_an_already_migrated_db_is_a_no_op(db_path):
     first = StateDB(db_path)
     first.close()
@@ -137,6 +152,31 @@ def test_reopening_an_already_migrated_db_is_a_no_op(db_path):
     second = StateDB(db_path)
     second.close()
     assert _user_version(db_path) == LATEST_VERSION
+
+
+def test_discover_or_update_writes_source_id_on_insert(db, db_path):
+    db.discover_or_update("/f.md", "tester", 1.0, source_id="nas")
+
+    assert _read_row(db_path, "/f.md")["source_id"] == "nas"
+
+
+def test_discover_or_update_without_source_id_leaves_it_null(db, db_path):
+    # The call shape without source_id, as before v0.3, stores NULL.
+    db.discover_or_update("/g.md", "tester", 1.0)
+
+    assert _read_row(db_path, "/g.md")["source_id"] is None
+
+
+def test_discover_or_update_does_not_rewrite_source_id_on_update(db, db_path):
+    # source_id is set once, at insert. A later re-queue with another value is a no-op for it.
+    db.discover_or_update("/h.md", "tester", 1.0, source_id="nas")
+
+    db.discover_or_update("/h.md", "tester", 2.0, source_id="claude-linux-shared-nfs")
+
+    row = _read_row(db_path, "/h.md")
+    assert row["status"] == "pending"
+    assert row["last_modified"] == 2.0
+    assert row["source_id"] == "nas"
 
 
 def test_discover_or_update_sets_origin_path_and_first_seen_at_on_insert(db, db_path):
@@ -257,6 +297,10 @@ def test_live_shaped_db_migrates_in_place(db_path):
     # Every existing row is in the 'global' project.
     assert row_a["project_id"] == "global"
     assert row_b["project_id"] == "global"
+
+    # Migration 3 adds source_id as NULL; the backfill sets it later.
+    assert row_a["source_id"] is None
+    assert row_b["source_id"] is None
 
     # first_seen_at comes from completed_at where completed_at was set, and stays NULL otherwise.
     assert row_a["first_seen_at"] == "2026-01-02T03:04:05+00:00"

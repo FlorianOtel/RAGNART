@@ -24,7 +24,8 @@ Refusals. The deletion phase is refused, and the run exits EXIT_DELETION_REFUSED
     already tombstoned is not subject to this guard.
 
 --dry-run prints the plan and exits 0. It takes no lock and writes nothing to the live
-database. The scan writes to the queue, so the dry run runs on a private copy of it.
+databases. The scan writes to the queue, and the plan reads the project registry, so the
+dry run runs on private copies of both (rag_state.db and hub_registry.db).
 
 Usage (run from project root):
     python utils/rag_sync_nfs.py
@@ -52,6 +53,7 @@ import yaml  # noqa: E402  (after sys.path fix)
 
 from ragnart.collection import get_client  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
+from ragnart.registry import RegistryDB  # noqa: E402
 from ragnart.scanner import scan_claude_chats, scan_nfs_roots, scan_opencode_sessions  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
 from ragnart.sync_plan import apply_sync_plan, build_sync_plan, format_plan  # noqa: E402
@@ -63,16 +65,18 @@ logger = logging.getLogger(__name__)
 EXIT_DELETION_REFUSED = 1
 
 
-def sync(config: dict, state_db: StateDB, args: argparse.Namespace) -> int:
+def sync(config: dict, state_db: StateDB, registry_db: RegistryDB, args: argparse.Namespace) -> int:
     """
     Run one sync: scan every source, plan the changes, log the plan, then apply it.
 
     Args:
-        config:   Full ragnart.yaml dict.
-        state_db: Open StateDB. The caller owns it and closes it. The scan writes to it.
-        args:     Parsed arguments. Reads args.user (str or None), args.allow_mass_delete
-                  (bool) and args.dry_run (bool). With dry_run the plan is printed and
-                  nothing is applied, so the caller must pass a private copy of the database.
+        config:      Full ragnart.yaml dict.
+        state_db:    Open StateDB. The caller owns it and closes it. The scan writes to it.
+        registry_db: Open RegistryDB (the hub registry, which holds the projects). The
+                     caller owns it and closes it. The plan reads it, and the apply writes it.
+        args:        Parsed arguments. Reads args.user (str or None), args.allow_mass_delete
+                     (bool) and args.dry_run (bool). With dry_run the plan is printed and
+                     nothing is applied, so the caller must pass private copies of the databases.
 
     Returns:
         0 on success, or after a dry run. EXIT_DELETION_REFUSED when the deletion phase
@@ -89,6 +93,7 @@ def sync(config: dict, state_db: StateDB, args: argparse.Namespace) -> int:
     scan_result = {"nfs": result_nfs, "chats": result_chats, "opencode": result_opencode}
     plan = build_sync_plan(
         state_db,
+        registry_db,
         scan_result,
         config,
         now_iso,
@@ -104,7 +109,7 @@ def sync(config: dict, state_db: StateDB, args: argparse.Namespace) -> int:
     logger.info("%s", format_plan(plan))
     qdrant_url = config.get("rag", {}).get("qdrant_url", "http://192.168.1.93:6333")
     qdrant_client = get_client(qdrant_url, timeout=120)
-    apply_sync_plan(state_db, qdrant_client, plan, now_iso)
+    apply_sync_plan(state_db, registry_db, qdrant_client, plan, now_iso)
 
     skipped_roots = result_nfs["skipped_roots"] + result_chats.get("skipped_roots", [])
     counts = state_db.get_counts()
@@ -160,19 +165,22 @@ def _copy_database(src_path: str, dst_path: str) -> None:
         src.close()
 
 
-def run_dry_run(config: dict, db_path: str, args: argparse.Namespace) -> int:
+def run_dry_run(config: dict, db_path: str, registry_path: str, args: argparse.Namespace) -> int:
     """
-    Print the sync plan without changing the live database and without taking the lock.
+    Print the sync plan without changing the live databases and without taking the lock.
 
-    The scan writes to the queue: new files are queued and modified ones re-queued. To
-    plan without touching the live database, the sync runs on a private copy of it in a
-    scratch directory. The copy is removed afterwards. No Qdrant client is created,
-    because apply_sync_plan() is never called.
+    The scan writes to the queue: new files are queued and modified ones re-queued. The
+    plan reads the project registry. To plan without touching either live database, the
+    sync runs on private copies of both in a scratch directory, and the copies are removed
+    afterwards. The registry copy is taken from the live registry when that exists. When
+    the live registry does not exist yet, the dry run gets a fresh one, as a real run would
+    create it. No Qdrant client is created, because apply_sync_plan() is never called.
 
     Args:
-        config:   Full ragnart.yaml dict.
-        db_path:  Path to the live rag_state.db. It is only read.
-        args:     Parsed arguments, as for sync().
+        config:        Full ragnart.yaml dict.
+        db_path:       Path to the live rag_state.db. It is only read.
+        registry_path: Path to the live hub_registry.db. It is only read, and may not exist.
+        args:          Parsed arguments, as for sync().
 
     Returns:
         The exit code from sync().
@@ -181,10 +189,17 @@ def run_dry_run(config: dict, db_path: str, args: argparse.Namespace) -> int:
     try:
         copy_path = os.path.join(scratch_dir, "rag_state.db")
         _copy_database(db_path, copy_path)
+        registry_copy_path = os.path.join(scratch_dir, "hub_registry.db")
+        # Copy the live registry when it exists. Otherwise RegistryDB below creates an empty
+        # one in the scratch directory, so the dry run never creates the live file.
+        if os.path.exists(registry_path):
+            _copy_database(registry_path, registry_copy_path)
         state_db = StateDB(copy_path)
+        registry_db = RegistryDB(registry_copy_path)
         try:
-            return sync(config, state_db, args)
+            return sync(config, state_db, registry_db, args)
         finally:
+            registry_db.close()
             state_db.close()
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -211,24 +226,28 @@ def main() -> None:
 
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
+    # The hub registry sits beside the queue (same as ragnart/cli.py registry_db_path()).
+    registry_path = f"{db_base}/sqlite/hub_registry.db"
 
-    # A dry run neither takes the ingestion lock nor opens the live database for writing.
+    # A dry run neither takes the ingestion lock nor opens the live databases for writing.
     if args.dry_run:
-        sys.exit(run_dry_run(config, db_path, args))
+        sys.exit(run_dry_run(config, db_path, registry_path, args))
 
     # Take the single-writer ingestion lock before anything is written. This sync
     # writes SQLite rows and Qdrant points, and it must not run alongside the daemon,
     # a purge, a reset or the snapshot. Contention exits at once with EXIT_LOCK_HELD
     # (75) and names the holder; the sync does not wait. The lock is taken before
-    # StateDB is opened, so a refused run never touches the queue database.
+    # either database is opened, so a refused run never touches them.
     # When the run script already holds the lock (see ragnart/lock.py `run`),
     # acquire_or_exit returns None and this process continues under that lock.
     acquire_or_exit(lock_path_from_config(config))
 
     state_db = StateDB(db_path)
+    registry_db = RegistryDB(registry_path)
     try:
-        exit_code = sync(config, state_db, args)
+        exit_code = sync(config, state_db, registry_db, args)
     finally:
+        registry_db.close()
         state_db.close()
     sys.exit(exit_code)
 

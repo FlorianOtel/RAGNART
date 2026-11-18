@@ -10,6 +10,7 @@
 #   - The NAS keeps the newest KEEP restore pairs (default 7 = one week of daily pairs):
 #       ${DATA_ROOT}/qdrant-snapshots/documents/<name>.snapshot
 #       ${DATA_ROOT}/qdrant-snapshots/documents/rag_state-<timestamp>.db
+#       ${DATA_ROOT}/qdrant-snapshots/documents/hub_registry-<timestamp>.db  (when the registry exists, v0.3)
 #
 # Safety nets against filling a disk:
 #   1. Before creating a snapshot, any snapshot Qdrant still holds for the collection
@@ -18,7 +19,8 @@
 #   3. The NAS must have at least MIN_FREE_GB free, or the run aborts before creating anything.
 #   4. On any failure after creation, an EXIT trap deletes the Qdrant-local snapshot and
 #      the partial download.
-#   5. Rotation keeps exactly KEEP pairs and removes orphan rag_state-*.db copies.
+#   5. Rotation keeps exactly KEEP pairs and removes orphan rag_state-*.db and
+#      hub_registry-*.db copies.
 #
 # Usage: bash scripts/sqlite-qdrant-snapshot.sh [--keep N]   (default: keep 7)
 # Env:   RAGNART_DATA_ROOT  (default /mnt/nfs/__Backups/RAGNART--databases)
@@ -53,6 +55,9 @@ COLLECTION="documents"   # Qdrant alias -> documents_new
 DATA_ROOT="${RAGNART_DATA_ROOT:-/mnt/nfs/__Backups/RAGNART--databases}"
 SNAPSHOTS_NFS_DIR="${DATA_ROOT}/qdrant-snapshots/${COLLECTION}"
 SQLITE_DB="${DATA_ROOT}/sqlite/rag_state.db"
+# The hub registry (v0.3). It is copied with the pair when the file exists; before the v0.3
+# registry migration it does not, and the copy is skipped.
+REGISTRY_DB="${DATA_ROOT}/sqlite/hub_registry.db"
 KEEP=7
 MIN_FREE_GB=60           # ~3x one snapshot (~21 GB); abort below this
 
@@ -151,6 +156,20 @@ log "Copying rag_state.db -> $(basename "${SQLITE_DST}")..."
 cp "${SQLITE_DB}" "${SQLITE_DST}"
 log "SQLite copy complete ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "${SQLITE_DST}")" 2>/dev/null || echo "?"))"
 
+# The hub registry travels with the same pair, under the same timestamp. Its WAL is folded
+# into the main file first, so the copy alone holds every committed change (the -wal file is
+# not copied). This script holds the ingestion lock, so nothing writes to it during the copy.
+if [[ -e "${REGISTRY_DB}" ]]; then
+    log "Checkpointing hub_registry WAL..."
+    sqlite3 "${REGISTRY_DB}" "PRAGMA wal_checkpoint(TRUNCATE);"
+    REGISTRY_DST="${SNAPSHOTS_NFS_DIR}/hub_registry-${SNAP_TS}.db"
+    log "Copying hub_registry.db -> $(basename "${REGISTRY_DST}")..."
+    cp "${REGISTRY_DB}" "${REGISTRY_DST}"
+    log "Registry copy complete ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "${REGISTRY_DST}")" 2>/dev/null || echo "?"))"
+else
+    log "No hub_registry.db at ${REGISTRY_DB}: registry not copied"
+fi
+
 # --- Safety net 5: rotation. Keep the KEEP newest pairs, delete the rest. ------------
 log "Rotating snapshots (keeping ${KEEP} most recent)..."
 find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" -printf '%T@ %p\n' \
@@ -162,16 +181,23 @@ find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" -printf '%T@ 
         log "Deleted old snapshot: $(basename "${old_file}")"
     done
 
-# Remove any rag_state-*.db whose matching snapshot no longer exists (its pair was
-# rotated out above, or it was left behind by an older script version).
-for db_copy in "${SNAPSHOTS_NFS_DIR}"/rag_state-*.db; do
-    [[ -e "${db_copy}" ]] || continue
-    ts="$(basename "${db_copy}" .db)"; ts="${ts#rag_state-}"
-    if ! compgen -G "${SNAPSHOTS_NFS_DIR}/*-${ts}.snapshot" > /dev/null; then
-        rm -f "${db_copy}"
-        log "Deleted unpaired SQLite copy: $(basename "${db_copy}")"
-    fi
-done
+# Remove any <prefix>-*.db copy whose matching snapshot no longer exists (its pair was
+# rotated out above, or it was left behind by an older script version). The copies carry
+# the snapshot's timestamp, so the snapshot is matched on that timestamp.
+remove_unpaired_copies() {
+    local prefix="$1"
+    local db_copy ts
+    for db_copy in "${SNAPSHOTS_NFS_DIR}/${prefix}"-*.db; do
+        [[ -e "${db_copy}" ]] || continue
+        ts="$(basename "${db_copy}" .db)"; ts="${ts#"${prefix}"-}"
+        if ! compgen -G "${SNAPSHOTS_NFS_DIR}/*-${ts}.snapshot" > /dev/null; then
+            rm -f "${db_copy}"
+            log "Deleted unpaired SQLite copy: $(basename "${db_copy}")"
+        fi
+    done
+}
+remove_unpaired_copies rag_state
+remove_unpaired_copies hub_registry
 
 log "Snapshot pairs in NFS: $(find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" | wc -l)/${KEEP}"
 log "Snapshot complete"

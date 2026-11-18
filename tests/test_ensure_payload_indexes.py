@@ -16,7 +16,7 @@ from qdrant_client.models import PayloadSchemaType
 
 from ragnart import collection
 from ragnart.collection import ensure_payload_indexes
-from ragnart.schema import FIELD_OWNER, FIELD_SOURCE_PATH
+from ragnart.schema import FIELD_OWNER, FIELD_PIPELINE_VERSION, FIELD_SOURCE_ID, FIELD_SOURCE_PATH
 
 
 @pytest.fixture(autouse=True)
@@ -47,8 +47,8 @@ def test_ensure_payload_indexes_creates_all_fields_on_empty_collection():
 
     ensure_payload_indexes(client)
 
-    # 6 keyword fields + 2 datetime fields.
-    assert client.create_payload_index.call_count == 8
+    # 8 keyword fields + 2 datetime fields.
+    assert client.create_payload_index.call_count == 10
     calls = _calls_by_field(client)
     assert calls["modified_at"] == PayloadSchemaType.DATETIME
     assert calls["ingested_at"] == PayloadSchemaType.DATETIME
@@ -59,6 +59,8 @@ def test_ensure_payload_indexes_creates_all_fields_on_empty_collection():
         "source_type",
         "file_type",
         "content_hash",
+        FIELD_SOURCE_ID,
+        FIELD_PIPELINE_VERSION,
     ):
         assert calls[keyword_field] == PayloadSchemaType.KEYWORD
 
@@ -68,8 +70,8 @@ def test_ensure_payload_indexes_skips_fields_already_indexed():
 
     ensure_payload_indexes(client)
 
-    # Only the 6 still-missing fields are created; source_path and owner are not.
-    assert client.create_payload_index.call_count == 6
+    # Only the 8 still-missing fields are created; source_path and owner are not.
+    assert client.create_payload_index.call_count == 8
     created = {c.kwargs["field_name"] for c in client.create_payload_index.call_args_list}
     assert FIELD_SOURCE_PATH not in created
     assert FIELD_OWNER not in created
@@ -88,13 +90,13 @@ def test_ensure_payload_indexes_is_noop_when_all_cached():
 
 
 def test_ensure_payload_indexes_fills_gap_left_by_partial_index():
-    # Only source_path is indexed on the server. The other 7 fields must still be
+    # Only source_path is indexed on the server. The other 9 fields must still be
     # created, i.e. a partly indexed collection does not short-circuit the call.
     partial = _fake_qdrant(payload_schema={FIELD_SOURCE_PATH: object()})
 
     ensure_payload_indexes(partial)
 
-    assert partial.create_payload_index.call_count == 7
+    assert partial.create_payload_index.call_count == 9
     assert FIELD_SOURCE_PATH not in _calls_by_field(partial)
 
 

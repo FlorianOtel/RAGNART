@@ -62,6 +62,7 @@ from .embeddings import embed_batch, embed_sparse
 from .hashing import hash_file
 from .opencode_client import get_json, load_password
 from .projects import project_id_for_path
+from .registry import RegistryDB
 from .scanner import claude_dot_claude_dir
 from .schema import (
     FIELD_CHUNK_INDEX,
@@ -73,16 +74,20 @@ from .schema import (
     FIELD_OWNER,
     FIELD_PAGE,
     FIELD_PARENT_TEXT,
+    FIELD_PIPELINE_VERSION,
     FIELD_PROJECT,
     FIELD_PROJECT_ID,
     FIELD_SESSION_ID,
     FIELD_SESSION_TITLE,
+    FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
     FIELD_SOURCE_TYPE,
     FIELD_TAG,
     FIELD_TEXT,
     GLOBAL_PROJECT_ID,
+    PIPELINE_VERSION_P1,
     SPARSE_VECTOR_NAME,
+    source_id_for_key,
 )
 from .state import StateDB
 from .textquality import GATE_THRESHOLD, printable_ratio, sniff_binary_text
@@ -771,6 +776,7 @@ async def ingest_file(
     owner: str,
     rag_cfg: dict,
     state_db: StateDB,
+    registry_db: RegistryDB,
     qdrant_client: QdrantClient,
     tag: str = "",
     embed_concurrency: int = 5,
@@ -781,7 +787,7 @@ async def ingest_file(
     Atomically parse, chunk, embed, and upsert one document into Qdrant.
 
     Implements the 7-step atomic worker loop from RAG-strategy.md §5.4:
-      0. Delete stale Qdrant points for this source_path (idempotency).
+      0. Delete stale Qdrant points for this source_id and source_path (idempotency).
       1. Mark file as 'processing' in StateDB.
       2. Parse document → full text.
       3. Chunk text → (child, parent) pairs.
@@ -798,6 +804,7 @@ async def ingest_file(
         owner:            Owner string (e.g. "florian") — from StateDB row.
         rag_cfg:          config["rag"] dict — embedding_model, ollama_url.
         state_db:         StateDB instance for ingestion status tracking.
+        registry_db:      RegistryDB holding the ragnart projects. Attachment reads it.
         qdrant_client:    Qdrant client in local persistent mode (NAS).
         tag:              Optional tag derived by the NFS scanner (e.g. "certifications").
         embed_concurrency: Max parallel Ollama embedding requests per file.
@@ -820,6 +827,10 @@ async def ingest_file(
     file_name     = Path(file_path).name
     raw_file_type = Path(file_path).suffix.lstrip(".").lower()
 
+    # The source (store) this item belongs to, from its key prefix. schema.py is the one
+    # place that rule lives, so ingest does not repeat it.
+    source_id = source_id_for_key(file_path)
+
     # Only text-like files get the size cap, the NUL sniff and the replacement-character check.
     is_text_like = is_text_like_path(file_path)
 
@@ -829,6 +840,8 @@ async def ingest_file(
         #
         # Ensures re-ingestion of a modified file never leaves duplicate points.
         # Even if the collection is brand-new, deleting 0 matching points is valid.
+        # Both conditions are required: a source_path alone is not enough to name the
+        # points of one item, because another source could hold the same path string.
         # ------------------------------------------------------------------
         ensure_collection(qdrant_client)
         qdrant_client.delete(
@@ -837,9 +850,13 @@ async def ingest_file(
                 filter=Filter(
                     must=[
                         FieldCondition(
+                            key=FIELD_SOURCE_ID,
+                            match=MatchValue(value=source_id),
+                        ),
+                        FieldCondition(
                             key=FIELD_SOURCE_PATH,
                             match=MatchValue(value=file_path),
-                        )
+                        ),
                     ]
                 )
             ),
@@ -935,7 +952,7 @@ async def ingest_file(
             # Rows without a path (the reserved 'global' row) cannot attach anything.
             registered_paths = [
                 (project["id"], project["path"])
-                for project in state_db.list_projects()
+                for project in registry_db.list_projects()
                 if project["path"]
             ]
             project_id = project_id_for_path(match_path, registered_paths, GLOBAL_PROJECT_ID)
@@ -946,7 +963,7 @@ async def ingest_file(
             logger.warning("Empty document, skipping: %s", file_path)
             # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
             state_db.mark_completed(
-                file_path, chunk_count=0, pipeline_version="p1", project_id=project_id,
+                file_path, chunk_count=0, pipeline_version=PIPELINE_VERSION_P1, project_id=project_id,
             )
             return
 
@@ -987,7 +1004,7 @@ async def ingest_file(
             logger.warning("No chunks produced, skipping: %s", file_path)
             # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
             state_db.mark_completed(
-                file_path, chunk_count=0, pipeline_version="p1", project_id=project_id,
+                file_path, chunk_count=0, pipeline_version=PIPELINE_VERSION_P1, project_id=project_id,
             )
             return
 
@@ -1072,6 +1089,8 @@ async def ingest_file(
                         FIELD_CHUNK_INDEX: chunk_idx,
                         FIELD_TAG:         tag,
                         # Identity and freshness fields, on every point.
+                        FIELD_SOURCE_ID:    source_id,
+                        FIELD_PIPELINE_VERSION: PIPELINE_VERSION_P1,
                         FIELD_PROJECT_ID:   project_id,
                         FIELD_SOURCE_TYPE:  source_type,
                         FIELD_MODIFIED_AT:  modified_at,
@@ -1111,7 +1130,7 @@ async def ingest_file(
             chunk_count=len(points),
             source_type=source_type,
             file_type=file_type,
-            pipeline_version="p1",
+            pipeline_version=PIPELINE_VERSION_P1,
             size_bytes=hash_size,
             content_hash=hash_md5,
             hashed_at=hashed_at,

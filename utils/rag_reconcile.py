@@ -24,6 +24,11 @@ Row kinds (see classify_row()):
                            with points. Logged loudly and NOT repaired: a human looks at it.
     not_completed          Pending, processing, failed or ignored rows. Not reconciled here.
 
+Per-source check (v0.3): for each source_id, the sum of chunk_count over its completed rows is
+compared with the number of points stored under that source_id (one facet on source_id). A mismatch
+is logged as a WARN and listed in the report. It does not repair anything and does not change the
+exit code: it is a signal for a human, not a row kind.
+
 Zombie points: facet keys that have no queue row at all. Their points are deleted, unless the
 mass-delete guard trips (see run_reconciliation()).
 
@@ -52,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
-from ragnart.schema import FIELD_SOURCE_PATH  # noqa: E402
+from ragnart.schema import FIELD_SOURCE_ID, FIELD_SOURCE_PATH, source_id_for_key  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -131,10 +136,50 @@ def count_points_by_source_path(qdrant_client: Any) -> dict[str, int]:
     return {hit.value: hit.count for hit in response.hits if hit.count > 0}
 
 
-def _source_filter(source_path: str) -> Filter:
-    """Filter matching every point stored for one source_path value. Same shape as the backfill's helper."""
+def count_points_by_source_id(qdrant_client: Any) -> dict[str, int]:
+    """
+    Return {source_id: number of points} for every source_id that has at least one point.
+
+    One facet call over the source_id payload field. A point with no source_id (not yet
+    backfilled) is in no bucket, so it is not counted here.
+    """
+    response = qdrant_client.facet(
+        collection_name=DOCUMENTS_COLLECTION,
+        key=FIELD_SOURCE_ID,
+        exact=True,
+        limit=FACET_LIMIT,
+    )
+    return {hit.value: hit.count for hit in response.hits if hit.count > 0}
+
+
+def chunk_sums_by_source(rows: list[dict]) -> dict[str, int]:
+    """
+    Return {source_id: sum of chunk_count over that source's completed rows}.
+
+    The source of a row is derived from its key with source_id_for_key(), not read from a
+    column, so the check does not depend on the backfill having run. A NULL chunk_count adds
+    nothing: the repair fills it later in the same run, and this check runs before the repairs.
+    """
+    sums: Counter = Counter()
+    for row in rows:
+        if row["status"] == "completed" and row["chunk_count"] is not None:
+            sums[source_id_for_key(row["file_path"])] += row["chunk_count"]
+    return dict(sums)
+
+
+def _source_filter(file_path: str) -> Filter:
+    """
+    Filter matching every point stored for one queue key.
+
+    Two conditions, both required: the source_id (derived from the key by source_id_for_key)
+    AND the source_path. Matching on source_path alone could reach a point of another source
+    that happens to carry the same path.
+    """
     return Filter(
-        must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=source_path))]
+        must=[
+            FieldCondition(key=FIELD_SOURCE_ID, match=MatchValue(value=source_id_for_key(file_path))),
+            FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=file_path)),
+        ]
     )
 
 
@@ -179,6 +224,7 @@ def run_reconciliation(
     Returns a summary dict, see the keys assembled at the end of this function.
     """
     points_by_key = count_points_by_source_path(qdrant_client)
+    points_by_source = count_points_by_source_id(qdrant_client)
 
     # Every queue row, whatever its status. A key with a row of any status is not a zombie.
     rows = [
@@ -221,6 +267,26 @@ def run_reconciliation(
     }
     zombie_points = sum(zombie_keys.values())
     total_points = sum(points_by_key.values())
+
+    # Per-source check: completed chunk_count sum against points stored under each source_id.
+    # A WARN only. Computed before the repairs, so it shows the state as found.
+    sums = chunk_sums_by_source(rows)
+    source_checks = []
+    for source_id in sorted(set(sums) | set(points_by_source)):
+        chunk_sum = sums.get(source_id, 0)
+        points = points_by_source.get(source_id, 0)
+        matches = chunk_sum == points
+        if not matches:
+            logger.warning(
+                "Per-source check mismatch: source_id=%s chunk_sum=%d points=%d",
+                source_id, chunk_sum, points,
+            )
+        source_checks.append({
+            "source_id": source_id,
+            "chunk_sum": chunk_sum,
+            "points": points,
+            "match": matches,
+        })
     guard_limit = max_delete_fraction * total_points
     guard_tripped = zombie_points > guard_limit
     for key, count in zombie_keys.items():
@@ -262,6 +328,8 @@ def run_reconciliation(
         "filled": len(fills),
         "requeued": len(requeues),
         "anomalies": anomalies,
+        "sources": source_checks,
+        "source_mismatches": sum(1 for check in source_checks if not check["match"]),
         "zombie_keys": zombie_keys,
         "zombie_points": zombie_points,
         "zombie_points_deleted": zombie_points_deleted,
@@ -294,6 +362,12 @@ def print_report(summary: dict) -> None:
     print(f"  anomalies (not repaired): {len(summary['anomalies'])}")
     for path, points, chunk_count in summary["anomalies"][:20]:
         print(f"    {path} — chunk_count={chunk_count} points={points}")
+    # Per-source check. A mismatch is reported only; it neither repairs nor changes the exit code.
+    print(f"  per-source check (WARN only): {summary['source_mismatches']} mismatch(es)")
+    print(f"    {'source_id':<28} {'chunk_sum':>10} {'points':>10}  match")
+    for check in summary["sources"]:
+        print(f"    {check['source_id']:<28} {check['chunk_sum']:>10} {check['points']:>10}  "
+              f"{'yes' if check['match'] else 'NO'}")
     print(f"  zombie keys:             {len(summary['zombie_keys'])}")
     print(f"  zombie points:           {summary['zombie_points']} "
           f"(of {summary['total_points']} total; limit {summary['guard_limit']:.0f})")

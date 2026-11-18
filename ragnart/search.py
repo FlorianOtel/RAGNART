@@ -32,6 +32,7 @@ from .schema import (
     FIELD_OWNER,
     FIELD_PARENT_TEXT,
     FIELD_SESSION_TITLE,
+    FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
     FIELD_TEXT,
     SPARSE_VECTOR_NAME,
@@ -183,6 +184,8 @@ async def search_rag(
         List of dicts with keys:
           content         — parent_text injected into the LLM prompt
           source_path     — full NFS path returned to the user as provenance
+          source_id       — the source the point came from (e.g. 'nas'); None on a point
+                            the source backfill has not reached yet
           score           — cosine similarity (0–1, higher = more relevant) or RRF rank
           rerank_score    — (optional) cross-encoder relevance score
           file_name       — filename for display
@@ -305,10 +308,12 @@ async def search_rag(
         )
 
     # -- 4. Unpack hits and build full results (with FIELD_TEXT for reranker) ----
+    # source_id is None for a point that the source backfill has not reached yet.
     results_full = [
         {
             "content":       (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),
             "source_path":   (hit.payload or {}).get(FIELD_SOURCE_PATH, ""),
+            "source_id":     (hit.payload or {}).get(FIELD_SOURCE_ID),
             "score":         hit.score,
             "file_name":     (hit.payload or {}).get(FIELD_FILE_NAME, ""),
             "file_type":     (hit.payload or {}).get(FIELD_FILE_TYPE, ""),

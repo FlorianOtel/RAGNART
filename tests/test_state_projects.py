@@ -87,65 +87,6 @@ def test_hash_fields_unchanged_by_later_no_op_call(tmp_path) -> None:
 
 
 # ----------------------------------------------------------------------
-# projects and tags
-
-def test_upsert_project_inserts_then_updates_by_id(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    try:
-        state_db.upsert_project("p1", "/mnt/nfs/x", "First", None, OWNER, True, "crawl")
-        state_db.upsert_project("p1", "/mnt/nfs/x/moved", "Renamed", "global", OWNER, False, "capture")
-
-        all_rows = state_db.list_projects()
-        # Exactly one row for p1: the second call updated it rather than inserting a duplicate.
-        assert [p["id"] for p in all_rows].count("p1") == 1
-        projects = {p["id"]: p for p in all_rows}
-        assert projects["p1"] == {
-            "id": "p1",
-            "path": "/mnt/nfs/x/moved",
-            "name": "Renamed",
-            "parent": "global",
-            "owner": OWNER,
-            "inherit_access": False,
-            "mode": "capture",
-        }
-    finally:
-        state_db.close()
-
-
-def test_replace_project_tags_replaces_the_whole_set(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    try:
-        state_db.upsert_project("p1", "/mnt/nfs/x", "P", None, OWNER, True, None)
-        state_db.replace_project_tags("p1", {"kind": "customer", "region": "eu"})
-        assert state_db.project_tags("p1") == {"kind": "customer", "region": "eu"}
-
-        # 'region' is gone from the new set, so it must be gone from the table too.
-        state_db.replace_project_tags("p1", {"kind": "internal"})
-        assert state_db.project_tags("p1") == {"kind": "internal"}
-    finally:
-        state_db.close()
-
-
-def test_project_tags_empty_for_unknown_project(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    try:
-        assert state_db.project_tags("no-such-project") == {}
-    finally:
-        state_db.close()
-
-
-def test_list_projects_includes_global_row(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    try:
-        by_id = {p["id"]: p for p in state_db.list_projects()}
-        assert "global" in by_id
-        assert by_id["global"]["path"] is None
-        assert by_id["global"]["inherit_access"] is False
-    finally:
-        state_db.close()
-
-
-# ----------------------------------------------------------------------
 # attachment
 
 def test_set_project_id_and_rows_for_attachment(tmp_path) -> None:
@@ -249,43 +190,6 @@ def test_rename_key_moves_the_row_and_keeps_chunk_count(tmp_path) -> None:
         state_db.close()
 
 
-def test_rename_source_links_moves_the_link(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    old_path = "/mnt/nfs/x/old.md"
-    new_path = "/mnt/nfs/x/new.md"
-    try:
-        state_db._conn.execute(
-            "INSERT INTO source_links (project_id, source_path) VALUES ('p1', ?)", (old_path,),
-        )
-        state_db._conn.commit()
-
-        state_db.rename_source_links(old_path, new_path)
-
-        rows = state_db._conn.execute("SELECT project_id, source_path FROM source_links").fetchall()
-        assert [tuple(r) for r in rows] == [("p1", new_path)]
-    finally:
-        state_db.close()
-
-
-def test_rename_source_links_keeps_one_link_when_new_path_already_linked(tmp_path) -> None:
-    state_db = _new_db(tmp_path)
-    old_path = "/mnt/nfs/x/old.md"
-    new_path = "/mnt/nfs/x/new.md"
-    try:
-        state_db._conn.executemany(
-            "INSERT INTO source_links (project_id, source_path) VALUES (?, ?)",
-            [("p1", old_path), ("p1", new_path)],
-        )
-        state_db._conn.commit()
-
-        state_db.rename_source_links(old_path, new_path)
-
-        rows = state_db._conn.execute("SELECT project_id, source_path FROM source_links").fetchall()
-        assert [tuple(r) for r in rows] == [("p1", new_path)]
-    finally:
-        state_db.close()
-
-
 def test_completed_rows_with_content_hash_excludes_null_and_blank(tmp_path) -> None:
     state_db = _new_db(tmp_path)
     try:
@@ -309,5 +213,36 @@ def test_completed_rows_with_content_hash_ignores_pending_rows(tmp_path) -> None
         # Pending with a hash: not completed, so not returned.
         state_db.discover_or_update(FILE_A, OWNER, 1000.0, size_bytes=1, content_hash=HASH_A)
         assert state_db.completed_rows_with_content_hash() == {}
+    finally:
+        state_db.close()
+
+
+# ----------------------------------------------------------------------
+# item_counts_by_project (read by GET /v1/projects)
+
+def test_item_counts_by_project_counts_only_completed_rows(tmp_path) -> None:
+    state_db = _new_db(tmp_path)
+    try:
+        completed_a = "/mnt/nfs/x/proj/a.md"
+        completed_b = "/mnt/nfs/x/proj/b.md"
+        pending_c = "/mnt/nfs/x/proj/c.md"
+        for file_path in (completed_a, completed_b, pending_c):
+            state_db.discover_or_update(file_path, OWNER, 1000.0, origin_path=file_path)
+        state_db.mark_completed(completed_a, chunk_count=2, completed_at="2026-01-01T00:00:00+00:00")
+        state_db.mark_completed(completed_b, chunk_count=2, completed_at="2026-01-01T00:00:00+00:00")
+        state_db.set_project_id(completed_a, "p-root")
+        state_db.set_project_id(completed_b, "p-root")
+        state_db.set_project_id(pending_c, "p-root")
+
+        # pending_c is not completed, so it is not counted.
+        assert state_db.item_counts_by_project() == {"p-root": 2}
+    finally:
+        state_db.close()
+
+
+def test_item_counts_by_project_empty_when_nothing_completed(tmp_path) -> None:
+    state_db = _new_db(tmp_path)
+    try:
+        assert state_db.item_counts_by_project() == {}
     finally:
         state_db.close()

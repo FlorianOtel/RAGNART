@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 from qdrant_client.models import FacetResponse, FacetValueHit, FilterSelector
 
+from ragnart.schema import source_id_for_key
 from ragnart.state import StateDB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -40,12 +41,24 @@ def state_db(tmp_path):
     db.close()
 
 
-def _qdrant(points_by_key: dict[str, int]) -> MagicMock:
-    """A Qdrant mock whose facet() answers with the given {source_path: point count}."""
+def _qdrant(points_by_key: dict[str, int], points_by_source: dict[str, int] | None = None) -> MagicMock:
+    """
+    A Qdrant mock whose facet() answers per key: on source_path with points_by_key, on source_id
+    with points_by_source. When points_by_source is not given it is derived from the keys, so the
+    two facets agree unless a test says otherwise.
+    """
+    if points_by_source is None:
+        points_by_source = {}
+        for key, count in points_by_key.items():
+            source = source_id_for_key(key)
+            points_by_source[source] = points_by_source.get(source, 0) + count
+
+    def facet(collection_name, key, exact, limit):
+        table = points_by_key if key == "source_path" else points_by_source
+        return FacetResponse(hits=[FacetValueHit(value=k, count=c) for k, c in table.items()])
+
     client = MagicMock(name="qdrant")
-    client.facet.return_value = FacetResponse(
-        hits=[FacetValueHit(value=key, count=count) for key, count in points_by_key.items()]
-    )
+    client.facet.side_effect = facet
     return client
 
 
@@ -203,7 +216,7 @@ def test_zombie_points_are_deleted_under_the_guard(reconcile_module, state_db):
     kwargs = client.delete.call_args.kwargs
     assert kwargs["wait"] is True
     assert isinstance(kwargs["points_selector"], FilterSelector)
-    assert kwargs["points_selector"].filter.must[0].match.value == "/nas/zombie.md"
+    assert kwargs["points_selector"].filter.must[1].match.value == "/nas/zombie.md"
     assert summary["zombie_points_deleted"] == 3
     assert summary["guard_tripped"] is False
     assert reconcile_module.exit_code(summary) == 0
@@ -222,6 +235,20 @@ def test_zombie_delete_is_refused_when_the_guard_trips(reconcile_module, state_d
     assert reconcile_module.exit_code(summary) == 1
 
 
+def test_zombie_delete_filter_names_source_id_and_source_path(reconcile_module, state_db):
+    # The item filter is two conditions: the source_id derived from the key AND the source_path.
+    _seed(state_db, "/nas/live.md", chunk_count=100)
+    client = _qdrant({"/nas/live.md": 100, "claude-session://gone": 3})
+
+    _run(reconcile_module, state_db, client)
+
+    flt = client.delete.call_args.kwargs["points_selector"].filter
+    assert [(c.key, c.match.value) for c in flt.must] == [
+        ("source_id", "claude-linux-shared-nfs"),
+        ("source_path", "claude-session://gone"),
+    ]
+
+
 def test_zero_count_facet_values_are_ignored(reconcile_module, state_db):
     # A facet value with count 0 has no points. It must not count as a zombie key.
     _seed(state_db, "/nas/live.md", chunk_count=1)
@@ -233,17 +260,64 @@ def test_zero_count_facet_values_are_ignored(reconcile_module, state_db):
     assert summary["zombie_keys"] == {}
 
 
-def test_facet_is_one_call_not_one_count_per_row(reconcile_module, state_db):
+def test_facet_is_one_call_per_field_not_one_count_per_row(reconcile_module, state_db):
+    # One facet on source_path (per key) and one on source_id (per source). Never a count per row.
     for index in range(3):
         _seed(state_db, f"/nas/f{index}.md", chunk_count=1)
     client = _qdrant({f"/nas/f{index}.md": 1 for index in range(3)})
 
     _run(reconcile_module, state_db, client)
 
-    client.facet.assert_called_once()
-    assert client.facet.call_args.kwargs["exact"] is True
-    assert client.facet.call_args.kwargs["key"] == "source_path"
+    keys = [call.kwargs["key"] for call in client.facet.call_args_list]
+    assert sorted(keys) == ["source_id", "source_path"]
+    assert all(call.kwargs["exact"] is True for call in client.facet.call_args_list)
     client.count.assert_not_called()
+
+
+def test_per_source_check_matches_when_chunk_sums_equal_points(reconcile_module, state_db):
+    _seed(state_db, "/nas/a.md", chunk_count=2)
+    _seed(state_db, "claude-session://u1", chunk_count=3)
+    client = _qdrant({"/nas/a.md": 2, "claude-session://u1": 3})
+
+    summary = _run(reconcile_module, state_db, client)
+
+    assert summary["sources"] == [
+        {"source_id": "claude-linux-shared-nfs", "chunk_sum": 3, "points": 3, "match": True},
+        {"source_id": "nas", "chunk_sum": 2, "points": 2, "match": True},
+    ]
+    assert summary["source_mismatches"] == 0
+
+
+def test_per_source_mismatch_is_reported_but_changes_neither_repairs_nor_exit_code(
+    reconcile_module, state_db, caplog
+):
+    # Every key agrees with its own chunk_count, but the source_id facet says the nas source holds
+    # 9 points where its completed rows sum to 4. That is a WARN: no row is touched, exit code 0.
+    _seed(state_db, "/nas/a.md", chunk_count=4)
+    client = _qdrant({"/nas/a.md": 4}, points_by_source={"nas": 9})
+
+    with caplog.at_level(logging.WARNING):
+        summary = _run(reconcile_module, state_db, client)
+
+    assert summary["sources"] == [{"source_id": "nas", "chunk_sum": 4, "points": 9, "match": False}]
+    assert summary["source_mismatches"] == 1
+    assert summary["anomalies"] == []
+    assert summary["filled"] == 0 and summary["requeued"] == 0
+    assert reconcile_module.exit_code(summary) == 0
+    assert "Per-source check mismatch: source_id=nas chunk_sum=4 points=9" in caplog.text
+
+
+def test_per_source_check_uses_the_key_not_the_source_id_column(reconcile_module, state_db):
+    # The sum is grouped by the key's prefix. The source_id column is not set in this test
+    # (the backfill has not run), and the check still groups the claude row under its own source.
+    _seed(state_db, "claude-session://u2", chunk_count=5)
+    client = _qdrant({"claude-session://u2": 5})
+
+    summary = _run(reconcile_module, state_db, client)
+
+    assert summary["sources"] == [
+        {"source_id": "claude-linux-shared-nfs", "chunk_sum": 5, "points": 5, "match": True},
+    ]
 
 
 def test_truncated_facet_aborts_the_run(reconcile_module, state_db, monkeypatch):
@@ -275,3 +349,15 @@ def test_dry_run_makes_no_writes(reconcile_module, state_db):
     assert summary["requeued"] == 1
     assert summary["zombie_points"] == 2
     assert summary["zombie_points_deleted"] == 0
+
+
+def test_print_report_shows_the_per_source_rows(reconcile_module, state_db, capsys):
+    _seed(state_db, "/nas/a.md", chunk_count=2)
+    client = _qdrant({"/nas/a.md": 2}, points_by_source={"nas": 5})
+    summary = _run(reconcile_module, state_db, client, dry_run=True)
+
+    reconcile_module.print_report(summary)
+
+    out = capsys.readouterr().out
+    assert "per-source check (WARN only): 1 mismatch(es)" in out
+    assert "nas" in out and "NO" in out

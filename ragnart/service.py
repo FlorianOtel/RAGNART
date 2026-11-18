@@ -21,8 +21,9 @@ from fastapi import FastAPI, HTTPException, Query
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from ragnart import search_rag
-from ragnart.cli import FatalError, open_queue_read_only
+from ragnart.cli import FatalError, open_queue_read_only, open_registry_read_only
 from ragnart.collection import ensure_collection, get_client
+from ragnart.registry import RegistryDB
 from ragnart.schema import GLOBAL_PROJECT_ID
 from ragnart.scope import ScopeError, resolve_scope
 from ragnart.search import resolve_max_hits_per_source
@@ -77,6 +78,28 @@ def _require_state_db() -> StateDB:
     return state_db
 
 
+def _open_registry_db() -> RegistryDB | None:
+    """
+    Open the hub registry read-only for scope resolution and /v1/projects.
+
+    A missing or unreadable registry is logged loudly and returns None, the same
+    tolerance as the queue database. The endpoints that need it then answer 503.
+    """
+    try:
+        return open_registry_read_only(_config)
+    except FatalError as exc:
+        logger.warning("Hub registry unavailable at startup — scope endpoints will answer 503: %s", exc)
+        return None
+
+
+def _require_registry_db() -> RegistryDB:
+    """Return the startup-opened RegistryDB, or answer 503 when it could not be opened."""
+    registry_db = app.state.registry_db
+    if registry_db is None:
+        raise HTTPException(status_code=503, detail="Hub registry unavailable")
+    return registry_db
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting RAGNART search service...")
@@ -106,11 +129,15 @@ async def lifespan(app: FastAPI):
     # the latest committed data, so changes the sync process commits show up
     # on the next request.
     app.state.state_db = _open_state_db()
+    # The hub registry (projects, tags, sources) is opened with the same lifecycle.
+    app.state.registry_db = _open_registry_db()
 
     yield
 
     if app.state.state_db is not None:
         app.state.state_db.close()
+    if app.state.registry_db is not None:
+        app.state.registry_db.close()
     logger.info("RAGNART search service shut down cleanly.")
 
 
@@ -129,7 +156,10 @@ async def search(
     # answered with HTTP 422 by FastAPI before this handler runs. Repeated values
     # are unioned (see ragnart/scope.py).
     scope: list[str] = Query(...,
-                             description="Required. 'all', '<path>', '<path>/', or 'tag:<key>=<value>'; repeatable"),
+                             description=(
+                                 "Required. 'all', '<source>:<path>', '<source>:<path>/', "
+                                 "or 'tag:<key>=<value>'; repeatable"
+                             )),
     user: str | None = Query(None),
     top_k: int = Query(5, ge=1, le=100),
     file_types: list[str] | None = Query(None),
@@ -151,7 +181,7 @@ async def search(
     # Resolve the scope before any embedding or Qdrant call, so a bad scope fails
     # fast. The echo says exactly which projects were searched.
     try:
-        project_filter, scope_echo = resolve_scope(scope, _require_state_db())
+        project_filter, scope_echo = resolve_scope(scope, _require_registry_db())
     except ScopeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -201,16 +231,19 @@ async def projects(user: str | None = Query(None)):
     """
     List the RAGNART projects plus the reserved `global` row.
 
-    Each entry has id, path, name, parent, owner, mode, tags and item_count.
+    Each entry has id, path, name, owner, source_id (the project's home source), tags
+    and item_count. The projects and tags come from the hub registry; item_count is
+    counted from the queue database. Both must be open, or the endpoint answers 503.
     `global` has no path and is always listed. Other projects are listed only
     when their owner is `user` or `la-familia`; with no `user`, every project is
     listed. Order: `global` first, then by path.
     """
+    registry_db = _require_registry_db()
     state_db = _require_state_db()
     item_counts = state_db.item_counts_by_project()
 
     visible = [
-        p for p in state_db.list_projects()
+        p for p in registry_db.list_projects()
         if user is None
         or p["id"] == GLOBAL_PROJECT_ID
         or p["owner"] in (user, _SHARED_OWNER)
@@ -223,10 +256,9 @@ async def projects(user: str | None = Query(None)):
                 "id": p["id"],
                 "path": p["path"],
                 "name": p["name"],
-                "parent": p["parent"],
                 "owner": p["owner"],
-                "mode": p["mode"],
-                "tags": state_db.project_tags(p["id"]),
+                "source_id": p["home_source_id"],
+                "tags": registry_db.project_tags(p["id"]),
                 "item_count": item_counts.get(p["id"], 0),
             }
             for p in visible

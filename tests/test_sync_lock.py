@@ -5,7 +5,8 @@ The lock must be taken before StateDB is opened. When another writer holds it, t
 sync must exit with EXIT_LOCK_HELD and must not touch the queue database at all.
 
 Nothing here takes the real lock file. acquire_or_exit is replaced by a stub, and
-StateDB is replaced by a Mock, so the production queue and lock are never touched.
+StateDB and RegistryDB are replaced by Mocks, so the production queue, the production
+registry and the lock are never touched.
 main() still reads the real ragnart.yaml, but only for reading.
 """
 
@@ -46,8 +47,10 @@ def test_lock_held_exits_with_constant_and_opens_no_state_db(sync_module, monkey
         sys.exit(EXIT_LOCK_HELD)
 
     state_db_factory = MagicMock(name="StateDB")
+    registry_db_factory = MagicMock(name="RegistryDB")
     monkeypatch.setattr(sync_module, "acquire_or_exit", refuse_lock)
     monkeypatch.setattr(sync_module, "StateDB", state_db_factory)
+    monkeypatch.setattr(sync_module, "RegistryDB", registry_db_factory)
     monkeypatch.setattr(sys, "argv", ["rag_sync_nfs.py", "--user", "tester"])
 
     with pytest.raises(SystemExit) as exc_info:
@@ -55,3 +58,4 @@ def test_lock_held_exits_with_constant_and_opens_no_state_db(sync_module, monkey
 
     assert exc_info.value.code == EXIT_LOCK_HELD
     state_db_factory.assert_not_called()
+    registry_db_factory.assert_not_called()

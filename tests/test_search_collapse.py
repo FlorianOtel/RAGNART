@@ -26,6 +26,7 @@ from ragnart.schema import (
     FIELD_OWNER,
     FIELD_PARENT_TEXT,
     FIELD_PROJECT_ID,
+    FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
 )
 
@@ -182,6 +183,25 @@ def test_search_results_carry_content_hash_and_locations(stub_search):
     assert results[0]["locations"] == ["A"]
     assert results[1]["content_hash"] is None
     assert results[1]["locations"] == ["Z"]
+
+
+def test_search_results_carry_source_id_and_none_when_the_point_has_none(stub_search):
+    # A point the source backfill has reached carries source_id; one it has not reached reads as None.
+    with_source = SimpleNamespace(
+        payload={
+            FIELD_SOURCE_PATH: "A",
+            FIELD_PARENT_TEXT: "text from A",
+            FIELD_CONTENT_HASH: "h1",
+            FIELD_SOURCE_ID: "nas",
+        },
+        score=1.0,
+    )
+    without_source = _hit("Z", None)
+
+    results, _ = _run_search([with_source, without_source], user_id=None, limit=10)
+
+    assert results[0]["source_id"] == "nas"
+    assert results[1]["source_id"] is None
 
 
 # ---------------------------------------------------------------------------

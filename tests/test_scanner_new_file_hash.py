@@ -38,7 +38,7 @@ def _config(root) -> dict:
 def _row(state_db: StateDB, file_path: str):
     """Return the queue row for file_path as a dict-like sqlite row, or None."""
     return state_db._conn.execute(
-        "SELECT size_bytes, content_hash, hashed_at FROM ingestion_queue WHERE file_path = ?",
+        "SELECT size_bytes, content_hash, hashed_at, source_id FROM ingestion_queue WHERE file_path = ?",
         (file_path,),
     ).fetchone()
 
@@ -61,6 +61,8 @@ def test_new_file_gets_size_hash_and_hashed_at_after_one_scan(tmp_path) -> None:
     assert row["size_bytes"] == len("hello world")
     assert row["content_hash"] == _md5("hello world")
     assert row["hashed_at"] is not None
+    # A NAS path carries the NAS source id (v0.3, design §4.7).
+    assert row["source_id"] == "nas"
     assert result["new_hashes"] == {path: _md5("hello world")}
 
 

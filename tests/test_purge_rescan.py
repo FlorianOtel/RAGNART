@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from ragnart import ingest
-from ragnart.schema import FIELD_PARENT_TEXT
+from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_ID, FIELD_SOURCE_PATH
 from ragnart.state import StateDB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,17 +49,24 @@ class FakeQdrant:
     Stand-in for the Qdrant client.
 
     Serves the parent texts given per source_path (one entry per point), and records
-    every delete with its wait flag. Filters are read back to find the source_path.
+    every delete with its wait flag and its source_id. Filters are read back by field name,
+    since an item filter names both source_id and source_path.
     """
 
     def __init__(self, texts_by_path: dict[str, list[str]] | None = None) -> None:
         self.texts_by_path = texts_by_path or {}
         self.deleted: list[str] = []
         self.delete_waits: list[bool] = []
+        self.deleted_source_ids: list[str] = []
 
     @staticmethod
-    def _path_of(flt) -> str:
-        return flt.must[0].match.value
+    def _condition(flt, key: str) -> str:
+        """The value of the must-condition on one payload field."""
+        return next(c.match.value for c in flt.must if c.key == key)
+
+    @classmethod
+    def _path_of(cls, flt) -> str:
+        return cls._condition(flt, FIELD_SOURCE_PATH)
 
     def count(self, collection_name, count_filter=None, exact=True):
         return SimpleNamespace(count=len(self.texts_by_path.get(self._path_of(count_filter), [])))
@@ -71,7 +78,8 @@ class FakeQdrant:
         return points, None  # a single page; next offset is None
 
     def delete(self, collection_name, points_selector, wait=True):
-        self.deleted.append(points_selector.filter.must[0].match.value)
+        self.deleted.append(self._condition(points_selector.filter, FIELD_SOURCE_PATH))
+        self.deleted_source_ids.append(self._condition(points_selector.filter, FIELD_SOURCE_ID))
         self.delete_waits.append(wait)
 
 
@@ -367,3 +375,22 @@ def test_dry_run_never_touches_the_lock(rescan, db, nfs_root, tmp_path, monkeypa
     lock_mock.assert_not_called()
     assert qdrant.deleted == []
     assert _row(db, pdf)["status"] == "completed"
+
+
+def test_item_filter_names_source_id_and_source_path_on_the_read_and_the_delete(rescan, db, nfs_root):
+    # Every item filter is two conditions: the source_id derived from the key AND the source_path.
+    # A NAS path belongs to the nas source, so both the filter and the recorded delete carry 'nas'.
+    pdf = str(nfs_root / "paper.pdf")
+    _add_completed(db, pdf)
+    qdrant = FakeQdrant({pdf: [GARBAGE]})
+    _, candidates = rescan.scan_completed(db._db_path, qdrant, _admission(rescan, nfs_root))
+
+    rescan.apply_candidates(db, qdrant, candidates)
+
+    assert qdrant.deleted == [pdf]
+    assert qdrant.deleted_source_ids == ["nas"]
+    flt = rescan._source_filter(pdf)
+    assert [(c.key, c.match.value) for c in flt.must] == [
+        (FIELD_SOURCE_ID, "nas"),
+        (FIELD_SOURCE_PATH, pdf),
+    ]

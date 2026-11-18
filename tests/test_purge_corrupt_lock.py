@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ragnart.lock import EXIT_LOCK_HELD
-from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_PATH
+from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_ID, FIELD_SOURCE_PATH
 from ragnart.state import StateDB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -98,3 +98,19 @@ def test_dry_run_never_touches_the_lock(purge_corrupt, main_env, monkeypatch):
 
     lock_mock.assert_not_called()
     main_env.delete.assert_not_called()
+
+
+def test_confirm_delete_filter_names_source_id_and_source_path(purge_corrupt, main_env, monkeypatch):
+    # The item filter on the delete is two conditions: the source_id derived from the path AND
+    # the source_path. A NAS path belongs to the nas source.
+    monkeypatch.setattr(purge_corrupt, "acquire_or_exit", MagicMock(name="acquire_or_exit"))
+    monkeypatch.setattr(sys, "argv", ["rag_purge_corrupt.py", "--confirm"])
+
+    purge_corrupt.main()
+
+    main_env.delete.assert_called_once()
+    flt = main_env.delete.call_args.kwargs["points_selector"].filter
+    assert [(c.key, c.match.value) for c in flt.must] == [
+        (FIELD_SOURCE_ID, "nas"),
+        (FIELD_SOURCE_PATH, CORRUPT_PATH),
+    ]

@@ -30,9 +30,60 @@ FIELD_INGESTED_AT = "ingested_at"   # time this point was ingested (datetime-ind
 FIELD_CONTENT_HASH = "content_hash" # MD5 of the source content; change/duplicate detection, not security
 SPARSE_VECTOR_NAME = "sparse_text"   # named sparse vector space in the Qdrant collection
 
+FIELD_SOURCE_ID = "source_id"               # the source (store) the point came from; see SOURCE_ID_* below
+FIELD_PIPELINE_VERSION = "pipeline_version" # version of the ingestion pipeline that produced the point
+
 # Reserved project id for items that do not belong to a user-defined project.
 # Every item carries it until ragnart projects are introduced.
 GLOBAL_PROJECT_ID = "global"
+
+
+# ---------------------------------------------------------------------------
+# Source ids (v0.3). A source id names a store, not a connector type: one per
+# configured source. Reserved words (tag, name, all, project, web, none, global)
+# can never be source ids; that rule is enforced when a source is registered.
+# ---------------------------------------------------------------------------
+
+SOURCE_ID_NAS = "nas"                                       # filesystem connector: the NAS crawl roots
+SOURCE_ID_CLAUDE_LINUX_SHARED_NFS = "claude-linux-shared-nfs"  # Claude Code transcripts under the NFS-shared ~/.claude/projects
+SOURCE_ID_OPENCODE_K11 = "opencode-k11"                     # OpenCode server on K11 (Server 2)
+
+# The sources whose connector has the ragnart_projects capability, that is, the
+# sources that can hold ragnart projects (design §4.5). scope.py reads this set
+# instead of importing ragnart.connectors, because that module pulls in the
+# ingestion code (docling), which the search service must never load.
+# tests/test_connectors.py keeps this set in step with the connector table.
+SOURCES_HOLDING_PROJECTS = frozenset({SOURCE_ID_NAS})
+
+# The pipeline version every point and queue row carries from v0.3 on.
+PIPELINE_VERSION_P1 = "p1"
+
+# Key prefixes that name a non-filesystem source. A key with neither prefix is a
+# filesystem path, and belongs to the NAS source.
+_CLAUDE_KEY_PREFIX = "claude-session://"
+_OPENCODE_KEY_PREFIX = "opencode://"
+
+
+def source_id_for_key(key: str) -> str:
+    """
+    Return the source id of an item from its queue key.
+
+    This is the only place the key-prefix rule is written. A key starting with
+    'claude-session://' belongs to the Claude Code source, one starting with
+    'opencode://' to the OpenCode source, and any other key is a NAS path.
+
+    Args:
+        key: The ingestion-queue key (file_path column): a NAS path, a
+             claude-session:// key or an opencode:// key.
+
+    Returns:
+        One of the SOURCE_ID_* constants.
+    """
+    if key.startswith(_CLAUDE_KEY_PREFIX):
+        return SOURCE_ID_CLAUDE_LINUX_SHARED_NFS
+    if key.startswith(_OPENCODE_KEY_PREFIX):
+        return SOURCE_ID_OPENCODE_K11
+    return SOURCE_ID_NAS
 
 
 # ---------------------------------------------------------------------------

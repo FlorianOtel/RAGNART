@@ -36,9 +36,11 @@ from ragnart.collection import DOCUMENTS_COLLECTION, get_client
 # Single-writer lock: --confirm deletes Qdrant points, so it takes the same lock as the other writers.
 from ragnart.lock import acquire_or_exit, lock_path_from_config
 from ragnart.schema import (
+    FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
     FIELD_PARENT_TEXT,
     FIELD_OWNER,
+    source_id_for_key,
 )
 # Shared gate rule and threshold: the same definition the ingest pipeline uses.
 from ragnart.textquality import GATE_THRESHOLD, printable_ratio
@@ -300,13 +302,18 @@ def main() -> None:
             try:
                 qdrant_client.delete(
                     collection_name=DOCUMENTS_COLLECTION,
+                    # Item filter: source_id AND source_path, so the delete cannot reach another source's points.
                     points_selector=FilterSelector(
                         filter=Filter(
                             must=[
                                 FieldCondition(
+                                    key=FIELD_SOURCE_ID,
+                                    match=MatchValue(value=source_id_for_key(path)),
+                                ),
+                                FieldCondition(
                                     key=FIELD_SOURCE_PATH,
                                     match=MatchValue(value=path),
-                                )
+                                ),
                             ]
                         )
                     ),

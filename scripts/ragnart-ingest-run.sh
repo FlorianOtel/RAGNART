@@ -98,6 +98,17 @@ DB_PATH="${DATA_ROOT}/sqlite/rag_state.db"
 sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | tee -a "$LOGFILE" || \
   log "WARN: WAL checkpoint failed (non-fatal)"
 
+# The hub registry (v0.3) gets the same checkpoint when it exists. Before the registry migration
+# the file is absent, and that is not an error.
+REGISTRY_PATH="${DATA_ROOT}/sqlite/hub_registry.db"
+if [[ -e "$REGISTRY_PATH" ]]; then
+    log "--- hub_registry WAL checkpoint ---"
+    sqlite3 "$REGISTRY_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | tee -a "$LOGFILE" || \
+      log "WARN: hub_registry WAL checkpoint failed (non-fatal)"
+else
+    log "--- hub_registry WAL checkpoint skipped: no hub_registry.db ---"
+fi
+
 # Snapshot policy: at most one restore pair per day. Ingestion itself runs 4x/day and
 # is idempotent, so a restore to the last daily pair loses nothing that the next run
 # will not re-ingest. Snapshot when the newest pair on the NAS is older than

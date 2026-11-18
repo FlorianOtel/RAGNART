@@ -3,8 +3,10 @@ Tests for GET /v1/projects (ragnart/service.py).
 
 No live Qdrant or NAS database is used:
   - get_client() and ensure_collection() are replaced, as in test_service_health.py.
-  - The queue database is a real StateDB in tmp_path (service_state_db fixture in
-    tests/conftest.py), seeded through the public StateDB methods.
+  - The hub registry is a real RegistryDB in tmp_path (service_registry_db fixture in
+    tests/conftest.py). The projects and tags come from it.
+  - The queue database is a real StateDB in tmp_path (service_state_db fixture). The
+    item counts come from it.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import ragnart.service as service
-from ragnart.schema import GLOBAL_PROJECT_ID
+from ragnart.cli import FatalError
+from ragnart.schema import GLOBAL_PROJECT_ID, SOURCE_ID_NAS
 
 FLORIAN_RAGNART = "/mnt/nfs/Florian/Gin-AI/projects/RAGNART"
 FLORIAN_OTHER = "/mnt/nfs/Florian/Gin-AI/projects/Other"
@@ -44,21 +47,22 @@ def _seed_completed(db, file_path: str, owner: str, project_id: str) -> None:
 
 
 @pytest.fixture
-def seeded(service_state_db):
+def seeded(service_state_db, service_registry_db):
     """Projects owned by florian, eva and la-familia, with completed items in some of them."""
-    db = service_state_db
-    db.upsert_project("proj-ragnart", FLORIAN_RAGNART, "RAGNART", None, "florian", True, "crawl")
-    db.replace_project_tags("proj-ragnart", {"kind": "code", "lang": "python"})
-    db.upsert_project("proj-other", FLORIAN_OTHER, "Other", None, "florian", True, "crawl")
-    db.upsert_project("proj-eva", EVA_PROJECT, "Notes", None, "eva", True, "crawl")
-    db.upsert_project("proj-shared", SHARED_PROJECT, "Shared", None, "la-familia", True, "crawl")
+    registry = service_registry_db
+    registry.upsert_project("proj-ragnart", FLORIAN_RAGNART, "RAGNART", "florian", SOURCE_ID_NAS)
+    registry.replace_project_tags("proj-ragnart", {"kind": "code", "lang": "python"})
+    registry.upsert_project("proj-other", FLORIAN_OTHER, "Other", "florian", SOURCE_ID_NAS)
+    registry.upsert_project("proj-eva", EVA_PROJECT, "Notes", "eva", SOURCE_ID_NAS)
+    registry.upsert_project("proj-shared", SHARED_PROJECT, "Shared", "la-familia", SOURCE_ID_NAS)
 
     # Two completed items in RAGNART, one in Eva's project. A pending item must not count.
+    db = service_state_db
     _seed_completed(db, "/mnt/nfs/Florian/Gin-AI/projects/RAGNART/a.md", "florian", "proj-ragnart")
     _seed_completed(db, "/mnt/nfs/Florian/Gin-AI/projects/RAGNART/b.md", "florian", "proj-ragnart")
     _seed_completed(db, "/mnt/nfs/Eva/projects/Notes/c.md", "eva", "proj-eva")
     db.discover_or_update("/mnt/nfs/Florian/Gin-AI/projects/RAGNART/pending.md", "florian", 1000.0)
-    return db
+    return registry
 
 
 def test_projects_endpoint_lists_global_and_discovered_projects(seeded, served):
@@ -78,17 +82,23 @@ def test_projects_endpoint_lists_global_and_discovered_projects(seeded, served):
     ]
 
     by_id = {p["id"]: p for p in projects}
-    # The global row has no path and no owner.
-    assert by_id[GLOBAL_PROJECT_ID]["path"] is None
-    assert by_id[GLOBAL_PROJECT_ID]["tags"] == {}
-    # A discovered project carries every documented field, with its tags.
+    # The global row has no path, no owner and no home source.
+    assert by_id[GLOBAL_PROJECT_ID] == {
+        "id": GLOBAL_PROJECT_ID,
+        "path": None,
+        "name": "Global",
+        "owner": None,
+        "source_id": None,
+        "tags": {},
+        "item_count": 0,
+    }
+    # A discovered project carries the v0.3 fields, with its tags. No parent, no mode.
     assert by_id["proj-ragnart"] == {
         "id": "proj-ragnart",
         "path": FLORIAN_RAGNART,
         "name": "RAGNART",
-        "parent": None,
         "owner": "florian",
-        "mode": "crawl",
+        "source_id": SOURCE_ID_NAS,
         "tags": {"kind": "code", "lang": "python"},
         "item_count": 2,
     }
@@ -125,3 +135,28 @@ def test_projects_endpoint_includes_item_count(seeded, served):
         "proj-ragnart": 2,
         "proj-shared": 0,
     }
+
+
+def test_projects_endpoint_returns_503_when_registry_is_missing(seeded, served, monkeypatch):
+    def unavailable(config):
+        raise FatalError("cannot open hub registry read-only")
+
+    monkeypatch.setattr(service, "open_registry_read_only", unavailable)
+    with TestClient(service.app) as client:
+        response = client.get("/v1/projects")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Hub registry unavailable"}
+
+
+def test_projects_endpoint_returns_503_when_queue_is_missing(seeded, served, monkeypatch):
+    # The item counts come from the queue, so a missing queue also answers 503.
+    def unavailable(config):
+        raise FatalError("cannot open queue database read-only")
+
+    monkeypatch.setattr(service, "open_queue_read_only", unavailable)
+    with TestClient(service.app) as client:
+        response = client.get("/v1/projects")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Queue database unavailable"}

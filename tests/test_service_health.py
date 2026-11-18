@@ -5,8 +5,9 @@ No live Qdrant or model is used:
   - get_client() and ensure_collection() are replaced in the service module,
     so the lifespan does not contact Qdrant and does not load any model.
   - httpx.get() is replaced, so /health never makes a real HTTP call.
-  - The lifespan opens the queue database read-only; an empty tmp StateDB is
-    used instead of the NAS database (see the `service_state_db` fixture).
+  - The lifespan opens the queue database and the hub registry read-only; empty tmp
+    ones are used instead of the NAS databases (see `service_state_db` and
+    `service_registry_db` in tests/conftest.py).
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ def qdrant_client(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _queue_db(service_state_db):
-    """Every test here starts the service, whose lifespan opens the queue DB; use a tmp one."""
+def _queue_db(service_state_db, service_registry_db):
+    """Every test here starts the service, whose lifespan opens the queue DB and the registry; use tmp ones."""
     return service_state_db
 
 

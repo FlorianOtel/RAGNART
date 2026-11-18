@@ -43,9 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
+from ragnart.cli import open_registry
 from ragnart.collection import ensure_collection, get_client
 from ragnart.ingest import ingest_file
 from ragnart.lock import acquire_or_exit, lock_path_from_config
+from ragnart.registry import RegistryDB
 from ragnart.state import StateDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -68,6 +70,7 @@ _SUMMARY_EVERY = 10
 
 async def run(
     state_db: StateDB,
+    registry_db: RegistryDB,
     qdrant_client,
     rag_cfg: dict,
     embed_concurrency: int,
@@ -101,6 +104,8 @@ async def run(
                     owner=row["owner"],
                     rag_cfg=rag_cfg,
                     state_db=state_db,
+                    # The ragnart projects, read per item so a sync run's changes apply at once.
+                    registry_db=registry_db,
                     qdrant_client=qdrant_client,
                     embed_concurrency=embed_concurrency,
                     # Where the bytes are read (claude-session keys need it) and the
@@ -194,6 +199,10 @@ def main() -> None:
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/RAGNART--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)
+    # The hub registry holds the ragnart projects that ingest attaches items to. The daemon
+    # opens it for writing (as it does the queue) under the lock taken above, and closes
+    # it in the same place as state_db.
+    registry_db = open_registry(config)
     qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
     ensure_collection(qdrant_client)
 
@@ -201,6 +210,7 @@ def main() -> None:
     if counts_before["pending"] == 0:
         print("No pending files. Run rag_sync_nfs.py first.")
         state_db.close()
+        registry_db.close()
         return
 
     logger.info(
@@ -212,6 +222,7 @@ def main() -> None:
         asyncio.run(
             run(
                 state_db,
+                registry_db,
                 qdrant_client,
                 rag_cfg,
                 embed_concurrency=args.batch,
@@ -229,6 +240,7 @@ def main() -> None:
     print(f"  failed     : {counts_after['failed']}")
 
     state_db.close()
+    registry_db.close()
 
 
 if __name__ == "__main__":

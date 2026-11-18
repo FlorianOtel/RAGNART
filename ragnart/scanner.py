@@ -27,6 +27,7 @@ from .hashing import hash_file
 from .opencode_client import get_json, load_password
 from .projects import parse_project_toml
 from .ragignore import RagIgnoreMatcher
+from .schema import source_id_for_key
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
@@ -322,6 +323,7 @@ def scan_nfs_roots(
                     size_bytes=size_bytes,
                     content_hash=content_hash,
                     hashed_at=hashed_at,
+                    source_id=source_id_for_key(filepath),
                 )
                 existing_paths.add(filepath)
                 scanned += 1
@@ -496,6 +498,7 @@ def scan_claude_chats(
             origin_path=filepath,
             source_type="claude_session",
             file_type="claude_chat",
+            source_id=source_id_for_key(key),
         )
         existing_paths.add(key)
 
@@ -627,6 +630,7 @@ def scan_opencode_sessions(
                 mtime,
                 source_type="opencode_session",
                 file_type="opencode",
+                source_id=source_id_for_key(path),
             )
             existing_paths.add(path)
             scanned += 1

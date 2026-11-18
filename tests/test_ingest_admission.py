@@ -17,13 +17,19 @@ from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
 
 from ragnart import ingest
+from ragnart.registry import RegistryDB
 from ragnart.schema import (
     FIELD_CONTENT_HASH,
     FIELD_INGESTED_AT,
     FIELD_MODIFIED_AT,
+    FIELD_PIPELINE_VERSION,
     FIELD_PROJECT_ID,
+    FIELD_SOURCE_ID,
+    FIELD_SOURCE_PATH,
     FIELD_SOURCE_TYPE,
     GLOBAL_PROJECT_ID,
+    SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
+    SOURCE_ID_NAS,
 )
 from ragnart.state import StateDB
 
@@ -31,6 +37,13 @@ from ragnart.state import StateDB
 # ---------------------------------------------------------------------------
 # Helpers and fixtures
 # ---------------------------------------------------------------------------
+
+def _empty_registry() -> MagicMock:
+    """Return a RegistryDB stand-in with no ragnart projects, so attachment resolves to global."""
+    registry_db = MagicMock(spec=RegistryDB)
+    registry_db.list_projects.return_value = []
+    return registry_db
+
 
 @pytest.fixture(autouse=True)
 def _no_live_services(monkeypatch):
@@ -60,6 +73,7 @@ def _run_ingest(file_path: Path, rag_cfg: dict | None = None) -> MagicMock:
             owner="tester",
             rag_cfg=rag_cfg or {},
             state_db=state_db,
+            registry_db=_empty_registry(),
             qdrant_client=qdrant_client,
         )
     )
@@ -113,7 +127,7 @@ class TestDoclingFailureHandling:
             asyncio.run(
                 ingest.ingest_file(
                     str(file_path), owner="tester", rag_cfg={},
-                    state_db=state_db, qdrant_client=MagicMock(),
+                    state_db=state_db, registry_db=_empty_registry(), qdrant_client=MagicMock(),
                 )
             )
 
@@ -313,6 +327,7 @@ class TestClaudeSessionDispatch:
                     owner="tester",
                     rag_cfg={},
                     state_db=state_db,
+                    registry_db=_empty_registry(),
                     qdrant_client=MagicMock(),
                 )
             )
@@ -333,6 +348,7 @@ class TestClaudeSessionDispatch:
                 owner="tester",
                 rag_cfg={},
                 state_db=state_db,
+                registry_db=_empty_registry(),
                 qdrant_client=MagicMock(),
             )
         )
@@ -360,6 +376,7 @@ class TestClaudeSessionDispatch:
                 owner="tester",
                 rag_cfg={},
                 state_db=state_db,
+                registry_db=_empty_registry(),
                 qdrant_client=MagicMock(),
             )
         )
@@ -388,6 +405,7 @@ class TestClaudeSessionDispatch:
                 owner="tester",
                 rag_cfg={},
                 state_db=state_db,
+                registry_db=_empty_registry(),
                 qdrant_client=qdrant_client,
             )
         )
@@ -419,6 +437,7 @@ class TestClaudeSessionDispatch:
                 owner="tester",
                 rag_cfg={},
                 state_db=state_db,
+                registry_db=_empty_registry(),
                 qdrant_client=qdrant_client,
                 last_modified=1_700_000_000.0,
             )
@@ -469,6 +488,7 @@ class TestPlainJsonlOutsideClaudeLayout:
                 owner="tester",
                 rag_cfg={},
                 state_db=state_db,
+                registry_db=_empty_registry(),
                 qdrant_client=MagicMock(),
             )
         )
@@ -481,24 +501,23 @@ class TestPlainJsonlOutsideClaudeLayout:
 # Project attachment: project_id on every point and in mark_completed
 # ---------------------------------------------------------------------------
 
-def _real_state_db(tmp_path, projects: dict[str, str]) -> StateDB:
+def _real_dbs(tmp_path, projects: dict[str, str]) -> tuple[StateDB, RegistryDB]:
     """
-    Return a real StateDB in tmp_path with the given {project_id: path} rows registered.
+    Return a real queue and a real registry in tmp_path, with the given {project_id: path} registered.
 
-    The 'global' row is seeded by the schema migrations, so it is present as well,
+    The 'global' row is seeded by the registry migrations, so it is present as well,
     which exercises the path-less row being skipped during matching.
     """
     state_db = StateDB(str(tmp_path / "rag_state.db"))
+    registry_db = RegistryDB(str(tmp_path / "hub_registry.db"))
     for project_id, project_path in projects.items():
-        state_db.upsert_project(
-            project_id, project_path, project_id, None, "tester", True, None,
-        )
+        registry_db.upsert_project(project_id, project_path, project_id, "tester", SOURCE_ID_NAS)
     # Spy on mark_completed while keeping the real behaviour.
     state_db.mark_completed = MagicMock(wraps=state_db.mark_completed)
-    return state_db
+    return state_db, registry_db
 
 
-def _ingest_with_points(file_path, state_db, origin_path=None):
+def _ingest_with_points(file_path, state_db, registry_db, origin_path=None):
     """Run ingest_file with a fake embedding and return the Qdrant mock that received the points."""
     qdrant_client = MagicMock()
     asyncio.run(
@@ -508,6 +527,7 @@ def _ingest_with_points(file_path, state_db, origin_path=None):
             owner="tester",
             rag_cfg={},
             state_db=state_db,
+            registry_db=registry_db,
             qdrant_client=qdrant_client,
         )
     )
@@ -533,9 +553,9 @@ class TestProjectAttachment:
         file_path = project_dir / "notes" / "plan.md"
         file_path.parent.mkdir()
         file_path.write_text("Quarterly plan for the backup rotation.", encoding="utf-8")
-        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
 
-        qdrant_client = _ingest_with_points(file_path, state_db)
+        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
 
         points = _all_points(qdrant_client)
         assert points
@@ -548,9 +568,9 @@ class TestProjectAttachment:
         file_path = tmp_path / "elsewhere" / "plan.md"
         file_path.parent.mkdir()
         file_path.write_text("Unrelated notes.", encoding="utf-8")
-        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
 
-        qdrant_client = _ingest_with_points(file_path, state_db)
+        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
 
         points = _all_points(qdrant_client)
         assert points
@@ -563,10 +583,10 @@ class TestProjectAttachment:
         transcript = _write_claude_transcript(
             tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(launch_dir),
         )
-        state_db = _real_state_db(tmp_path, {"alpha": str(project_dir)})
+        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
 
         qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, origin_path=transcript,
+            "claude-session://abc", state_db, registry_db, origin_path=transcript,
         )
 
         points = _all_points(qdrant_client)
@@ -582,10 +602,10 @@ class TestProjectAttachment:
         transcript = _write_claude_transcript(
             tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="",
         )
-        state_db = _real_state_db(tmp_path, {"alpha": str(tmp_path)})
+        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(tmp_path)})
 
         qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, origin_path=transcript,
+            "claude-session://abc", state_db, registry_db, origin_path=transcript,
         )
 
         points = _all_points(qdrant_client)
@@ -603,13 +623,69 @@ class TestProjectAttachment:
         transcript = _write_claude_transcript(
             tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(link_dir / "sub"),
         )
-        state_db = _real_state_db(tmp_path, {"alpha": str(real_dir)})
+        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(real_dir)})
 
         qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, origin_path=transcript,
+            "claude-session://abc", state_db, registry_db, origin_path=transcript,
         )
 
         points = _all_points(qdrant_client)
         assert points
         assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
         assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
+
+
+# ---------------------------------------------------------------------------
+# v0.3 source fields: source_id on the delete filter and on every point, pipeline_version p1
+# ---------------------------------------------------------------------------
+
+class TestSourceFields:
+    """Every item carries its source_id and pipeline_version, and the replace delete names both source_id and source_path."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_embeddings(self, _no_live_services, monkeypatch):
+        # Real embeddings are replaced by one dummy vector per chunk; no sparse vectors.
+        _no_live_services.side_effect = _one_vector_per_text
+        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
+
+    def test_replace_delete_filter_requires_source_id_and_source_path(self, tmp_path):
+        # The delete runs before any parsing, so one NAS file is enough to inspect its filter.
+        file_path = tmp_path / "notes.md"
+        file_path.write_text("Some notes about the backup rotation.", encoding="utf-8")
+        state_db, registry_db = _real_dbs(tmp_path, {})
+
+        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
+
+        delete_call = qdrant_client.delete.call_args
+        conditions = delete_call.kwargs["points_selector"].filter.must
+        by_key = {condition.key: condition.match.value for condition in conditions}
+        # Exactly two conditions: the source and the path. A path alone is not enough.
+        assert by_key == {FIELD_SOURCE_ID: SOURCE_ID_NAS, FIELD_SOURCE_PATH: str(file_path)}
+
+    def test_nas_points_carry_source_id_nas_and_pipeline_version_p1(self, tmp_path):
+        file_path = tmp_path / "notes.md"
+        file_path.write_text("Some notes about the backup rotation.", encoding="utf-8")
+        state_db, registry_db = _real_dbs(tmp_path, {})
+
+        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_SOURCE_ID] == SOURCE_ID_NAS for p in points)
+        assert all(p.payload[FIELD_PIPELINE_VERSION] == "p1" for p in points)
+        assert state_db.mark_completed.call_args.kwargs["pipeline_version"] == "p1"
+
+    def test_claude_session_points_carry_the_claude_source_id(self, tmp_path):
+        transcript = _write_claude_transcript(
+            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="/x",
+        )
+        state_db, registry_db = _real_dbs(tmp_path, {})
+
+        qdrant_client = _ingest_with_points(
+            "claude-session://abc", state_db, registry_db, origin_path=transcript,
+        )
+
+        points = _all_points(qdrant_client)
+        assert points
+        assert all(p.payload[FIELD_SOURCE_ID] == SOURCE_ID_CLAUDE_LINUX_SHARED_NFS for p in points)
+        assert all(p.payload[FIELD_PIPELINE_VERSION] == "p1" for p in points)

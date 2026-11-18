@@ -124,6 +124,11 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         "INSERT OR IGNORE INTO projects (id, path, name, parent, owner, inherit_access, mode) "
         "VALUES ('global', NULL, 'Global', NULL, NULL, 0, NULL)",
     ]),
+    (3, [
+        # v0.3: the source (store) each row came from, e.g. 'nas'. Additive only; rows that
+        # predate this column stay NULL until the source backfill sets them (design §4.7).
+        "ALTER TABLE ingestion_queue ADD COLUMN source_id TEXT",
+    ]),
 ]
 
 
@@ -224,11 +229,12 @@ class StateDB:
         size_bytes: int | None = None,
         content_hash: str | None = None,
         hashed_at: str | None = None,
+        source_id: str | None = None,
     ) -> None:
         """
         Register a newly discovered file or re-queue it for ingestion.
 
-        The identity fields (origin_path, source_type, file_type), the optional
+        The identity fields (origin_path, source_type, file_type, source_id), the optional
         size_bytes/content_hash/hashed_at, and first_seen_at are written only on
         insert: they are set once, at discovery. The update branches below leave
         them alone. The hash is computed by the scanner for new rows only, so a
@@ -269,11 +275,11 @@ class StateDB:
             self._conn.execute(
                 "INSERT INTO ingestion_queue "
                 "(file_path, owner, last_modified, status, origin_path, source_type, file_type, "
-                " size_bytes, content_hash, hashed_at, first_seen_at) "
-                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                " size_bytes, content_hash, hashed_at, first_seen_at, source_id) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     file_path, owner, last_modified, origin_path, source_type, file_type,
-                    size_bytes, content_hash, hashed_at, _now(),
+                    size_bytes, content_hash, hashed_at, _now(), source_id,
                 ),
             )
         elif origin_changed:
@@ -440,92 +446,6 @@ class StateDB:
         ).fetchone()
         return row is not None
 
-    def upsert_project(
-        self,
-        project_id: str,
-        path: str | None,
-        name: str | None,
-        parent: str | None,
-        owner: str | None,
-        inherit_access: bool,
-        mode: str | None,
-    ) -> None:
-        """
-        Insert a ragnart project, or update the existing row with the same id.
-
-        inherit_access is stored as 0/1, the column's INTEGER form. Never call this
-        for the reserved 'global' id: its row is seeded by migration 2 and is not
-        a marker project.
-        """
-        self._conn.execute(
-            "INSERT INTO projects (id, path, name, parent, owner, inherit_access, mode) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET "
-            "    path = excluded.path, name = excluded.name, parent = excluded.parent, "
-            "    owner = excluded.owner, inherit_access = excluded.inherit_access, "
-            "    mode = excluded.mode",
-            (project_id, path, name, parent, owner, int(inherit_access), mode),
-        )
-        self._conn.commit()
-
-    def replace_project_tags(self, project_id: str, tags: dict[str, str]) -> None:
-        """
-        Replace the whole tag set of one project with `tags`.
-
-        Deletes every existing tag for the project, then inserts the new set, in one
-        transaction. A tag removed from the marker file therefore disappears here too.
-        """
-        self._conn.execute("DELETE FROM project_tags WHERE project_id = ?", (project_id,))
-        self._conn.executemany(
-            "INSERT INTO project_tags (project_id, key, value) VALUES (?, ?, ?)",
-            [(project_id, key, value) for key, value in tags.items()],
-        )
-        self._conn.commit()
-
-    def list_projects(self) -> list[dict]:
-        """
-        Return every row of the projects table, including the reserved 'global' row.
-
-        Each dict has id, path, name, parent, owner, inherit_access (bool) and mode.
-        """
-        cur = self._conn.execute(
-            "SELECT id, path, name, parent, owner, inherit_access, mode "
-            "FROM projects ORDER BY id"
-        )
-        return [
-            {
-                "id": row["id"],
-                "path": row["path"],
-                "name": row["name"],
-                "parent": row["parent"],
-                "owner": row["owner"],
-                "inherit_access": bool(row["inherit_access"]),
-                "mode": row["mode"],
-            }
-            for row in cur.fetchall()
-        ]
-
-    def project_tags(self, project_id: str) -> dict[str, str]:
-        """Return the tag set of one project as a {key: value} dict. Empty dict if it has none."""
-        cur = self._conn.execute(
-            "SELECT key, value FROM project_tags WHERE project_id = ? ORDER BY key",
-            (project_id,),
-        )
-        return {row["key"]: row["value"] for row in cur.fetchall()}
-
-    def project_ids_by_tag(self, key: str, value: str) -> list[str]:
-        """
-        Return the ids of every ragnart project whose tag `key` equals `value`.
-
-        The result is sorted and empty when no project carries that exact tag.
-        Used by scope resolution for `tag:<key>=<value>` terms.
-        """
-        cur = self._conn.execute(
-            "SELECT project_id FROM project_tags WHERE key = ? AND value = ? ORDER BY project_id",
-            (key, value),
-        )
-        return [row["project_id"] for row in cur.fetchall()]
-
     def item_counts_by_project(self) -> dict[str, int]:
         """
         Return the number of completed queue items per project_id.
@@ -622,19 +542,6 @@ class StateDB:
         )
         self._conn.commit()
 
-    def rename_source_links(self, old_path: str, new_path: str) -> None:
-        """
-        Move every source_links row from old_path to new_path.
-
-        OR REPLACE handles a project that already links new_path: the old row is
-        rewritten onto the same (project_id, new_path) key, so the link survives once.
-        """
-        self._conn.execute(
-            "UPDATE OR REPLACE source_links SET source_path = ? WHERE source_path = ?",
-            (new_path, old_path),
-        )
-        self._conn.commit()
-
     def completed_rows_with_content_hash(self) -> dict[str, str]:
         """
         Return {file_path: content_hash} for completed rows that have a usable hash.
@@ -689,22 +596,6 @@ class StateDB:
             }
             for row in cur.fetchall()
         }
-
-    def remove_project(self, project_id: str) -> None:
-        """
-        Delete a project row and every row keyed on it: tags, project links and source links.
-
-        Items attached to the project are not touched here. The sync planner re-attaches
-        them in the same run. Never call this for the reserved 'global' id.
-        """
-        self._conn.execute("DELETE FROM project_tags WHERE project_id = ?", (project_id,))
-        self._conn.execute(
-            "DELETE FROM project_links WHERE project_id = ? OR linked_project_id = ?",
-            (project_id, project_id),
-        )
-        self._conn.execute("DELETE FROM source_links WHERE project_id = ?", (project_id,))
-        self._conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Worker state transitions

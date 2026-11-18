@@ -103,6 +103,13 @@ def test_scan_claude_chats_excludes_journal_and_rekeys(tmp_path) -> None:
             f"claude-session://{UUID}/agent-A": direct,
             f"claude-session://{UUID}/agent-B": workflow,
         }
+
+        # Main session and subagent keys all carry the Claude Code source id (v0.3).
+        source_ids = {
+            row["file_path"]: row["source_id"]
+            for row in state_db._conn.execute("SELECT file_path, source_id FROM ingestion_queue").fetchall()
+        }
+        assert set(source_ids.values()) == {"claude-linux-shared-nfs"}
     finally:
         state_db.close()
 

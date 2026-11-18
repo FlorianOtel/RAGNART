@@ -69,7 +69,7 @@ from ragnart.ingest import fffd_ratio, is_text_like_path  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.ragignore import RagIgnoreMatcher  # noqa: E402
 from ragnart.scanner import is_includable  # noqa: E402
-from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_PATH  # noqa: E402
+from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_ID, FIELD_SOURCE_PATH, source_id_for_key  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
 from ragnart.textquality import GATE_THRESHOLD, printable_ratio, sniff_binary_text  # noqa: E402
 
@@ -178,9 +178,18 @@ def admission_from_config(config: dict) -> Admission:
 # ---------------------------------------------------------------------------
 
 def _source_filter(file_path: str) -> Filter:
-    """Filter matching every point stored for one source file."""
+    """
+    Filter matching every point stored for one source file.
+
+    Two conditions, both required: the source_id (derived from the key by source_id_for_key)
+    AND the source_path. Matching on source_path alone could reach a point of another source
+    that happens to carry the same path. Used by the reads (count, scroll) and the delete.
+    """
     return Filter(
-        must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=file_path))]
+        must=[
+            FieldCondition(key=FIELD_SOURCE_ID, match=MatchValue(value=source_id_for_key(file_path))),
+            FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=file_path)),
+        ]
     )
 
 

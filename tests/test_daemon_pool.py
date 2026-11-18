@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ragnart.registry import RegistryDB
 from ragnart.state import StateDB
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,14 @@ def state_db(tmp_path):
     db.close()
 
 
+@pytest.fixture
+def registry_db(tmp_path):
+    """A real hub registry in tmp_path. The pool passes it through to ingest_file, which the fake ignores."""
+    db = RegistryDB(str(tmp_path / "state" / "hub_registry.db"))
+    yield db
+    db.close()
+
+
 def _queue(state_db: StateDB, count: int) -> list[str]:
     """Insert `count` pending rows. paths[0] is the oldest (lowest rowid)."""
     paths = [f"/fake/nfs/file{index:03d}.md" for index in range(count)]
@@ -54,11 +63,11 @@ def _fake_ingest(delay_for, calls: list[str], finished: list[str] | None = None)
     """
 
     async def fake_ingest_file(
-        *, file_path, owner, rag_cfg, state_db, qdrant_client, embed_concurrency,
+        *, file_path, owner, rag_cfg, state_db, registry_db, qdrant_client, embed_concurrency,
         origin_path=None, last_modified=None,
     ):
-        # origin_path and last_modified are accepted because the real worker always
-        # passes them. The fake does not use them.
+        # registry_db, origin_path and last_modified are accepted because the real worker
+        # always passes them. The fake does not use them.
         calls.append(file_path)
         await asyncio.sleep(delay_for(file_path))
         state_db.mark_completed(file_path)
@@ -68,7 +77,7 @@ def _fake_ingest(delay_for, calls: list[str], finished: list[str] | None = None)
     return fake_ingest_file
 
 
-def test_fast_items_complete_while_slow_item_is_still_running(daemon_module, state_db, monkeypatch):
+def test_fast_items_complete_while_slow_item_is_still_running(daemon_module, state_db, registry_db, monkeypatch):
     """
     With 3 workers and a slow first file, the other files finish first. A batch barrier
     would have made the fast files wait for the slow one.
@@ -82,13 +91,13 @@ def test_fast_items_complete_while_slow_item_is_still_running(daemon_module, sta
 
     monkeypatch.setattr(daemon_module, "ingest_file", _fake_ingest(delay, calls, finished))
 
-    asyncio.run(daemon_module.run(state_db, None, {}, embed_concurrency=1, file_workers=3))
+    asyncio.run(daemon_module.run(state_db, registry_db, None, {}, embed_concurrency=1, file_workers=3))
 
     assert finished[-1] == paths[0]
     assert set(finished) == set(paths)
 
 
-def test_uniform_items_throughput_scales_with_workers(daemon_module, state_db, monkeypatch):
+def test_uniform_items_throughput_scales_with_workers(daemon_module, state_db, registry_db, monkeypatch):
     """
     12 files of 0.1s each with 3 workers take about 0.4s. Run one at a time they would
     take about 1.2s, so the bound of 0.8s shows that the files run concurrently.
@@ -99,21 +108,21 @@ def test_uniform_items_throughput_scales_with_workers(daemon_module, state_db, m
     monkeypatch.setattr(daemon_module, "ingest_file", _fake_ingest(lambda _p: 0.1, calls))
 
     started = time.monotonic()
-    asyncio.run(daemon_module.run(state_db, None, {}, embed_concurrency=1, file_workers=3))
+    asyncio.run(daemon_module.run(state_db, registry_db, None, {}, embed_concurrency=1, file_workers=3))
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.8
     assert state_db.get_counts()["completed"] == 12
 
 
-def test_each_file_ingested_exactly_once(daemon_module, state_db, monkeypatch):
+def test_each_file_ingested_exactly_once(daemon_module, state_db, registry_db, monkeypatch):
     """Across 4 workers and 20 files, every file is ingested once and none is skipped."""
     paths = _queue(state_db, 20)
     calls: list[str] = []
 
     monkeypatch.setattr(daemon_module, "ingest_file", _fake_ingest(lambda _p: 0.001, calls))
 
-    asyncio.run(daemon_module.run(state_db, None, {}, embed_concurrency=1, file_workers=4))
+    asyncio.run(daemon_module.run(state_db, registry_db, None, {}, embed_concurrency=1, file_workers=4))
 
     assert sorted(calls) == sorted(paths)
     assert len(calls) == len(set(calls))

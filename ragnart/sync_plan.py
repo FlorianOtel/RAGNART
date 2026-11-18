@@ -37,9 +37,17 @@ from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchVa
 
 from .collection import DOCUMENTS_COLLECTION
 from .moves import detect_moves
-from .projects import project_id_for_path, resolve_parent
+from .projects import project_id_for_path
+from .registry import RegistryDB
 from .scanner import include_extensions_from_config, is_includable
-from .schema import FIELD_PROJECT_ID, FIELD_SOURCE_PATH, GLOBAL_PROJECT_ID
+from .schema import (
+    FIELD_PROJECT_ID,
+    FIELD_SOURCE_ID,
+    FIELD_SOURCE_PATH,
+    GLOBAL_PROJECT_ID,
+    SOURCE_ID_NAS,
+    source_id_for_key,
+)
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
@@ -65,8 +73,7 @@ class SyncPlan:
     reappeared:         tombstoned rows the scan found again.
     attachment_changes: key -> new project_id. The key is the row's key after this plan's
                         moves, because attachment is applied after them.
-    project_upserts:    marker dicts (path, owner, name, id, inherit_access, mode, tags),
-                        plus 'parent' (the enclosing project's id, or None).
+    project_upserts:    marker dicts (path, owner, name, id, inherit_access, mode, tags).
     project_removals:   project ids whose marker is no longer found.
     stale_rows:         non-completed rows whose source is gone. They have no points, so
                         their queue row is removed at once.
@@ -109,13 +116,15 @@ def _gone_reason(path: str, include_exts: frozenset[str]) -> str:
 
 
 def _plan_projects(
-    state_db: StateDB,
+    registry_db: RegistryDB,
     markers: list[dict],
     owners: list[str] | None,
     skipped: bool,
 ) -> tuple[list[dict], list[str], list[tuple[str, str]]]:
     """
     Work out project upserts, removals and the project set used for attachment.
+
+    Projects live in the hub registry, so the existing ones are read from registry_db.
 
     Returns (upserts, removals, attach_projects). attach_projects is a list of (id, path)
     for every project that still exists after this run, markers included.
@@ -146,7 +155,7 @@ def _plan_projects(
         kept_markers.append(marker)
 
     # The reserved 'global' row is never a marker project, so it is never removed.
-    existing = [p for p in state_db.list_projects() if p["id"] != GLOBAL_PROJECT_ID]
+    existing = [p for p in registry_db.list_projects() if p["id"] != GLOBAL_PROJECT_ID]
     removals: list[str] = []
     if not skipped:
         for project in existing:
@@ -162,23 +171,11 @@ def _plan_projects(
         p for p in existing if p["id"] not in claimed_ids and p["id"] not in removed
     ]
 
-    # Parent resolution. A marker's parent is its longest enclosing project path
-    # among every project that exists after this run. A marker row wins over a stored
-    # row that shares its path.
-    known_paths = [p["path"] for p in kept_existing if p["path"]] + [m["path"] for m in kept_markers]
-    id_by_path = {p["path"]: p["id"] for p in kept_existing if p["path"]}
-    id_by_path.update({m["path"]: m["id"] for m in kept_markers})
-
-    upserts: list[dict] = []
-    for marker in kept_markers:
-        parent_path = resolve_parent(marker["path"], known_paths)
-        parent_id = id_by_path[parent_path] if parent_path is not None else None
-        upserts.append({**marker, "parent": parent_id})
-
+    # Attachment needs every project that exists after this run: the kept stored ones and the markers.
     attach_projects = [(p["id"], p["path"]) for p in kept_existing if p["path"]] + [
         (m["id"], m["path"]) for m in kept_markers
     ]
-    return upserts, removals, attach_projects
+    return kept_markers, removals, attach_projects
 
 
 def _plan_vanished(
@@ -283,6 +280,7 @@ def _plan_attachment(
 
 def build_sync_plan(
     state_db: StateDB,
+    registry_db: RegistryDB,
     scan_result: dict,
     config: dict,
     now_iso: str,
@@ -295,6 +293,7 @@ def build_sync_plan(
 
     Args:
         state_db:         Open StateDB. Read only here.
+        registry_db:      Open RegistryDB. Read only here: it supplies the existing projects.
         scan_result:      {"nfs": ..., "chats": ..., "opencode": ...}, the three scanners' returns.
         config:           Full ragnart.yaml dict. Reads rag.sync.max_delete_fraction and the include extensions.
         now_iso:          The run's time, ISO-8601 UTC. Written to missing_since, and the purge cutoff is taken from it.
@@ -340,7 +339,7 @@ def build_sync_plan(
     # Projects. Markers are upserted even when a root was skipped: they only describe
     # what is present, and a skipped root only ever hides markers (so no removal).
     plan.project_upserts, plan.project_removals, attach_projects = _plan_projects(
-        state_db, nfs["project_markers"], owners, plan.skipped,
+        registry_db, nfs["project_markers"], owners, plan.skipped,
     )
 
     # Reappearance. Only the rows the scan actually saw can be found again.
@@ -377,14 +376,25 @@ def build_sync_plan(
 
 
 def _source_filter(source_path: str) -> Filter:
-    """Filter matching every point stored for one source_path value."""
+    """
+    Filter matching the points of one item: its source_id AND its source_path.
+
+    `source_path` is the item's queue key. Its source_id is derived from the key by
+    source_id_for_key(), the one place the key-prefix rule is written. Both conditions
+    are named, so only this source's points for this item can match.
+    """
     return Filter(
-        must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=source_path))]
+        must=[
+            FieldCondition(
+                key=FIELD_SOURCE_ID, match=MatchValue(value=source_id_for_key(source_path))
+            ),
+            FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=source_path)),
+        ]
     )
 
 
 def _set_payload_for_path(qdrant_client: Any, source_path: str, payload: dict) -> None:
-    """Merge `payload` into every point currently stored under source_path."""
+    """Merge `payload` into every point stored for the item at source_path (its source_id and source_path)."""
     qdrant_client.set_payload(
         collection_name=DOCUMENTS_COLLECTION,
         payload=payload,
@@ -394,7 +404,7 @@ def _set_payload_for_path(qdrant_client: Any, source_path: str, payload: dict) -
 
 
 def _delete_points_for_path(qdrant_client: Any, source_path: str) -> None:
-    """Delete every point stored under source_path. Any exception propagates; SQLite keeps its row."""
+    """Delete every point stored for the item at source_path. Any exception propagates; SQLite keeps its row."""
     qdrant_client.delete(
         collection_name=DOCUMENTS_COLLECTION,
         points_selector=FilterSelector(filter=_source_filter(source_path)),
@@ -409,6 +419,7 @@ def _delete_points_for_path(qdrant_client: Any, source_path: str) -> None:
 
 def apply_sync_plan(
     state_db: StateDB,
+    registry_db: RegistryDB,
     qdrant_client: Any,
     plan: SyncPlan,
     now_iso: str,
@@ -416,9 +427,9 @@ def apply_sync_plan(
     """
     Carry out a plan. Order matters; each step is safe to repeat after a crash.
 
-    1. Projects: upsert markers and their tags; remove projects whose marker is gone.
+    1. Projects (hub registry): upsert markers and their tags; remove projects whose marker is gone.
     2. Moves: delete the scan's pending row at the new path, set source_path on the
-       old key's points (Qdrant, wait=True), then rename the SQLite row and its links.
+       old key's points (Qdrant, wait=True), then rename the SQLite row.
        A crash after the pending row is deleted leaves the move to be detected again
        on the next sync (the new file has no row, so it is hashed again). A crash after
        the Qdrant write is safe: the next sync finds the new file with no row, the old
@@ -431,19 +442,14 @@ def apply_sync_plan(
     7. Attachment: set project_id on the points (Qdrant, wait=True), then in SQLite.
     """
     # 1. Projects.
+    # Markers come from the NAS crawl, so every project they describe has the NAS source as home.
     for marker in plan.project_upserts:
-        state_db.upsert_project(
-            marker["id"],
-            marker["path"],
-            marker["name"],
-            marker["parent"],
-            marker["owner"],
-            marker["inherit_access"],
-            marker["mode"],
+        registry_db.upsert_project(
+            marker["id"], marker["path"], marker["name"], marker["owner"], SOURCE_ID_NAS,
         )
-        state_db.replace_project_tags(marker["id"], marker["tags"])
+        registry_db.replace_project_tags(marker["id"], marker["tags"])
     for project_id in plan.project_removals:
-        state_db.remove_project(project_id)
+        registry_db.remove_project(project_id)
         logger.info("Project removed (marker no longer found): %s", project_id)
 
     # 2. Moves.
@@ -455,7 +461,6 @@ def apply_sync_plan(
             raise RuntimeError(f"move target has no pending row, refusing to move: {new_path}")
         _set_payload_for_path(qdrant_client, old_path, {FIELD_SOURCE_PATH: new_path})
         state_db.rename_key(old_path, new_path, last_modified, origin_path=new_path)
-        state_db.rename_source_links(old_path, new_path)
         logger.info("Moved %s -> %s (content unchanged, no re-embed)", old_path, new_path)
 
     # 3. Reappeared.
@@ -517,7 +522,7 @@ def format_plan(plan: SyncPlan) -> str:
     lines += _section(
         "project upserts",
         [
-            f"{m['id']}  {m['path']}  name={m['name']}  parent={m['parent'] or 'none'}"
+            f"{m['id']}  {m['path']}  name={m['name']}"
             for m in plan.project_upserts
         ],
     )

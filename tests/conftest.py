@@ -48,3 +48,31 @@ def service_state_db(tmp_path, monkeypatch):
     )
     yield writable
     writable.close()
+
+
+@pytest.fixture
+def service_registry_db(tmp_path, monkeypatch):
+    """
+    Give the search service a real, tmp hub registry.
+
+    The service's lifespan opens the registry read-only through
+    ragnart.service.open_registry_read_only. This fixture creates a writable RegistryDB
+    at tmp_path (migrations applied: the three sources and the global row present), and
+    replaces the opener so the lifespan opens that same file read-only.
+
+    Returns the writable RegistryDB so a test can seed projects and tags through the
+    public RegistryDB methods, before it enters the TestClient.
+    """
+    # Imported here, not at module level, so that loading conftest does not import the service.
+    import ragnart.service as service
+    from ragnart.registry import RegistryDB
+
+    db_path = str(tmp_path / "hub_registry.db")
+    writable = RegistryDB(db_path)
+    monkeypatch.setattr(
+        service,
+        "open_registry_read_only",
+        lambda config: RegistryDB(db_path, read_only=True),
+    )
+    yield writable
+    writable.close()

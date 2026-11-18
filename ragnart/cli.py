@@ -33,6 +33,7 @@ from pathlib import Path
 import yaml
 
 from .ragignore import RagIgnoreMatcher, Verdict
+from .registry import RegistryDB
 from .scanner import include_extensions_from_config, is_includable, nfs_roots_from_config
 from .state import StateDB
 from .status import print_status
@@ -86,6 +87,36 @@ def open_queue_read_only(config: dict) -> StateDB:
         return StateDB(path, read_only=True)
     except sqlite3.Error as exc:
         raise FatalError(f"cannot open queue database read-only: {path}: {exc}") from exc
+
+
+def registry_db_path(config: dict) -> str:
+    """
+    Return the hub registry path: the same sqlite directory as the queue, in hub_registry.db.
+    """
+    base = config.get("db_base_path", _DEFAULT_DB_BASE)
+    return f"{base}/sqlite/hub_registry.db"
+
+
+def open_registry_read_only(config: dict) -> RegistryDB:
+    """
+    Open the hub registry read-only. A missing or unreadable file is fatal.
+
+    The file is never created here, unlike a normal RegistryDB open.
+    """
+    path = registry_db_path(config)
+    try:
+        return RegistryDB(path, read_only=True)
+    except sqlite3.Error as exc:
+        raise FatalError(f"cannot open hub registry read-only: {path}: {exc}") from exc
+
+
+def open_registry(config: dict) -> RegistryDB:
+    """
+    Open the hub registry for writing. Creates the file and applies pending migrations.
+
+    Used by the sync and the migration tools. No read-only command calls it.
+    """
+    return RegistryDB(registry_db_path(config))
 
 
 def build_matchers(config: dict) -> dict[str, RagIgnoreMatcher]:
