@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction)
-updated_at: 2026-11-18--11-22
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction; the web is a scope, scope and grounding not fully orthogonal)
+updated_at: 2026-11-18--12-34
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -1287,7 +1287,7 @@ left. The only per-session settings are scope and grounding (§8).
 
 | Activity | What it is | Scope and grounding |
 |---|---|---|
-| Gather | A discussion in which material is found and captured | Any. Fetching a page the operator asked for is an action, so `strict` allows it (§8.1) |
+| Gather | A discussion in which material is found and captured | A scope that includes `web`, set by the operator, or a page the operator asked for; any grounding (§8.1) |
 | Work | Ordinary session work on the material | Any |
 | Distill | A request that produces collateral | `project`, `strict` |
 | Ask | A question answered from the ragnart project | `project`, `strict`; widened only by the operator |
@@ -1663,18 +1663,21 @@ resolved scope, and `GET /v1/projects` lists the ragnart projects (§12). Not bu
 skill and commands, and the client-side values `project` and `none` (v0.4). The `/rag` command
 passes `scope=all` (§8.9).
 
-### 8.1 Two orthogonal dimensions
+### 8.1 Two different dimensions
 
-Every retrieval-backed answer is governed by two independent settings. Either can change
-without the other.
+Every answer is governed by two settings that answer different questions. **Scope** is where
+evidence may come from. **Grounding** is whether an answer may go beyond that evidence. Either can be
+changed without the other, but they are not fully orthogonal: what each means depends on the other,
+and not every combination makes sense ("Where the two meet", below).
 
-**Scope — which knowledge is searched**
+**Scope — where evidence may come from**
 
 | Value | Searches |
 |---|---|
 | `project` | The current ragnart project: its resources and collateral, the sessions it references, and the ragnart projects it references (§4.5). A ragnart project nested in its folder is not part of it, nor are the other files of its folder: they are not indexed (§1.2, deviation D). Inbox files are not searched: the agent reads them directly (§7.4) |
 | `<selection>` | ragnart projects named explicitly: names (`ACME-Q1`), paths (`~/Gin-AI/projects/AYA`), subtrees (`~/Customers/`), tag filters (`kind=customer`, `segment=ISV`), in any combination |
 | `all` | Everything the principal may read: the items outside every ragnart project (`project_id` `global`, filtered by owner and file type as today, §4.6), and all accessible ragnart projects |
+| `web` | The web, through the harness's search and fetch tools. Resolved by the client and never sent to the API (§8.8). Every page read is captured into the current ragnart project's inbox by the capture hook (§7.3), so it can be cited and checked later. Combines with any value above: `project` with `web` searches the ragnart project, then the web; `web` alone searches only the web |
 | `none` | No retrieval |
 
 **Name terms in a `<selection>`.** A name term names a ragnart project by its unique `name` (§4.5),
@@ -1690,12 +1693,28 @@ is not part of the baseline data model and is not scheduled (§4.6): a path woul
 list of ancestor directories, an item can be reached through several paths (§1.2, deviation C), and
 a path goes stale when its item moves.
 
-**Grounding — what an answer may rest on**
+**Grounding — whether an answer may go beyond the evidence**
 
 | Value | Meaning |
 |---|---|
-| `strict` | Only the material at the current scope: retrieved passages, and the inbox files of the current ragnart project, cited as inbox. Every statement cites its source. When the evidence is not there, the answer says so and stops. |
-| `open` | Retrieved material first, cited; beyond it the model's own knowledge and, as its outermost reach, the web. A statement is one of three kinds: cited from RAGNART; cited from a fetched page, which is captured (§7.3); or uncited, from the model. |
+| `strict` | Only the evidence found at the current scope: retrieved passages, pages read when the scope includes `web`, and the inbox files of the current ragnart project, cited as inbox. Every statement cites its source. When the evidence is not there, the answer says so and stops. |
+| `open` | The evidence at the scope first, cited; beyond it the model's own knowledge, marked as uncited. A statement is one of three kinds: cited from RAGNART; cited from a page read on the web, which is captured (§7.3); or uncited, from the model. |
+
+**Where the two meet.** Scope and grounding are different concepts, and each answers its own
+question, but they are not independent.
+
+- **The web is a scope, not a grounding.** The web supplies evidence: a page read is cited and
+  captured like any other source. Placed under grounding, as the outermost reach of `open`, it would
+  bundle two different widenings, more evidence and no evidence, into one switch. Then "answer only
+  from sources, with the web as a source" could not be expressed at all: reaching the web would also
+  let the model answer from its own memory. Keeping the web under scope makes `strict` with `web` the
+  librarian's way of gathering sources from the web.
+- **Not every combination makes sense.** Scope `none` with grounding `strict` asks for answers that
+  rest only on evidence while searching for none: every question can only end in "no evidence". The
+  combination is accepted, because actions still work under it (below), but it is nonsensical for
+  asking, and the client says so when it is set.
+- **A widening of either is the operator's act** (§8.4). Adding `web` to the scope is a widening like
+  any other, and the agent never makes it on its own.
 
 **What `strict` guarantees, and who guarantees it.**
 
@@ -1714,8 +1733,9 @@ an answer that used no retrieval, so RAGNART cannot detect that fault: in free c
 within the evidence is best-effort.
 
 **Actions are not answers.** Editing a file, running a command and fetching a page the operator
-asked for are actions, and `strict` allows them. Gathering therefore works under `strict`: a fetched
-page is captured into the inbox (§7.3), and an answer may then cite it as inbox.
+asked for are actions, and `strict` allows them. A page the operator asks for by name is a one-off
+`web` scope for that page: it is captured into the inbox (§7.3), and an answer may then cite it as
+inbox.
 
 ### 8.2 Defaults
 
@@ -1754,8 +1774,8 @@ When the API reports no good hit (§8.7), the answer ends there:
 
 ```
 [ragnart · scope project ACME-Q1 · grounding strict]
-No good hits in this scope. You may widen it (/ragnart scope …) or open the grounding
-(/ragnart grounding open).
+No good hits in this scope. You may widen it (/ragnart scope …, including web) or open the
+grounding (/ragnart grounding open).
 ```
 
 The response does not suggest where else to look.
@@ -1769,7 +1789,7 @@ Changes are made **only by the operator**, and always shown.
 
 | How | Effect |
 |---|---|
-| `/ragnart scope project \| <selection> \| all \| none` | Sets the scope for the rest of the conversation, until a compaction or a resume, after which the ragnart project's default applies again (§4.5) |
+| `/ragnart scope project \| <selection> \| all \| web \| none`, with `web` combinable, e.g. `/ragnart scope project web` | Sets the scope for the rest of the conversation, until a compaction or a resume, after which the ragnart project's default applies again (§4.5) |
 | `/ragnart grounding strict \| open` | Sets the grounding in the same way |
 | `/ragnart ask --scope <…> [--grounding <…>] "<question>"` | One answer at that scope; the session settings are unchanged |
 | `/ragnart source <source id>` | Sets the default source that completes a bare path term (§8.2), in the same way |
@@ -1857,9 +1877,10 @@ A hit names its item and returns the passage. It does not say where in the item 
   Qdrant. Not built (v0.4).
 - A selection (any term except `all`) never includes the `global` items, except the sessions that its
   ragnart projects reference. Only `all` includes them all.
-- `project` is resolved by the client, and `none` causes no retrieval call at all. Neither is sent
-  to the API. The client sends `project` as the `<path>` term of the current ragnart project, and one
-  path term for each ragnart project it references. It reads the references from `GET /v1/projects`
+- `project` and `web` are resolved by the client, and `none` causes no retrieval call at all. None of
+  them is sent to the API: `web` means the harness's search and fetch tools. The client sends
+  `project` as the `name:` term of the current ragnart project, and one term for each ragnart project
+  it references. It reads the references from `GET /v1/projects`
   (§12; not built, v0.4). A `none` term that is sent anyway is a path term and is answered with HTTP
   422.
 - The response **echoes the resolved scope** in `scope`: `all` (whether `all` was a term), `global`
@@ -2217,8 +2238,8 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 | D2b | A ragnart project is addressed by its `name`, unique across the hub registry without regard to case; its identity is its immutable `id` in `project.toml`; the path of its folder is metadata, which changes when the folder moves. Free tags, DB-only (§4.5) | People refer to a project by name; a path is transient, so addressing by path alone is fragile. Moves must not touch Qdrant; tags change often | `init` refuses a taken name. A scope accepts `name:<name>`; a path term still selects by location. Tag edits are row updates. A move changes the path, never the `id` or the name (D37) |
 | D3 | Tiers by lifecycle: Transient (ephemeral cache, not indexed), Archive, Runtime; one store, one pipeline, two policies: curated in a ragnart project's managed folders, static everywhere else (D32) | Captured material is noise until kept; sessions already archive the work | No transient collection; a keep places a file and commits it (D36) |
 | D3b | Project context = an on-demand listing of resources, collateral and inbox, with no index file; context implicit by location, explicit by name | No re-seeding. A file would duplicate the state database and the inbox folder, and could disagree with them | The session-start hook injects the listing |
-| D4 | Scope × grounding, orthogonal; defaults `project+strict` / `all+strict`; changes only by the operator, always shown; natural-language scope translated aloud | Librarian answers; no silent widening | Status line; `/ragnart` commands; required `scope` in the API |
-| D4d | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` reaches the model's knowledge and, outermost, the web | Different ragnart projects need different defaults; an answer given without a search must not escape `strict` | `scope` and `grounding` in `project.toml`; three kinds of statement under `open` (§8.1) |
+| D4 | Scope × grounding: two different settings, scope for where evidence may come from (`project`, a selection, `all`, `web`, `none`; `web` combines with the others) and grounding for whether an answer may go beyond it (`strict`, `open`). They are not fully orthogonal: the web is a scope because it supplies evidence, and scope `none` with `strict` is nonsensical for asking. Defaults `project+strict` / `all+strict`; changes only by the operator, always shown; natural-language scope translated aloud (§8.1) | Librarian answers; no silent widening. Placing the web under grounding bundled two widenings, more evidence and no evidence, and made "only sources, with the web as a source" inexpressible | Status line; `/ragnart` commands; required `scope` in the API. `web` is resolved by the client and never sent to the API; every page read under it is captured |
+| D4d | Default scope and grounding are tunable at three levels. `strict` governs every informational answer. `open` adds the model's own knowledge, uncited; the web is reached through scope, not grounding (D4) | Different ragnart projects need different defaults; an answer given without a search must not escape `strict` | `scope` and `grounding` in `project.toml`; three kinds of statement under `open` (§8.1) |
 | D4b | Retrieval-only | Librarian answers; clients already have models | No model gateway; client enforces strict grounding |
 | D4c | Predictable, not rigid; knobs at three levels; calibration with a labelled set; no auto-tuning | Corpus pollution is a permanent hazard; tuning needs primitives | `max_hits_per_source`, `type_weights`, `min_relevance`, `ragnart calibrate` |
 | D5 | The source is the authority (today the NAS); reconciliation repairs and fails loudly; deletion rules; single writer | Mirror SoHoAI's robustness; NAS backups cover disasters | Guards in the sync; scheduled reconciliation |
