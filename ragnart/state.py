@@ -129,6 +129,13 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         # predate this column stay NULL until the source backfill sets them (design §4.7).
         "ALTER TABLE ingestion_queue ADD COLUMN source_id TEXT",
     ]),
+    # Version 4 = the ragnart project tables (projects, project_tags, project_links,
+    # source_links, grants) were moved to the hub registry and dropped from rag_state.db.
+    # The drop is NOT done here: a migration runs automatically on open, and the drop must
+    # follow a verified copy. It is done by utils/rag_registry_migrate.py --apply
+    # --drop-legacy-tables, which also sets user_version 4. This entry carries no statements;
+    # it exists so the next migration is numbered 5.
+    (4, []),
 ]
 
 

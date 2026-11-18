@@ -18,7 +18,7 @@ import pytest
 from ragnart.state import StateDB
 
 # The schema version that the newest migration produces.
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 # Columns added by migration version 2 (ragnart/state.py _MIGRATIONS).
 NEW_COLUMNS = {
@@ -99,6 +99,20 @@ def db(db_path) -> StateDB:
 def test_fresh_db_ends_at_the_latest_schema_version(db, db_path):
     # A brand-new database runs every migration and records the newest version.
     assert _user_version(db_path) == LATEST_VERSION
+
+
+def test_migration_4_is_empty_so_legacy_tables_survive_a_fresh_db(db, db_path):
+    # Migration 4 only reserves the version number: the legacy project tables are dropped by
+    # utils/rag_registry_migrate.py --drop-legacy-tables, never by StateDB on open.
+    conn = sqlite3.connect(db_path)
+    try:
+        table_names = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+    assert _user_version(db_path) == 4
+    assert NEW_TABLES <= table_names
 
 
 def test_new_tables_and_global_row_exist(db, db_path):

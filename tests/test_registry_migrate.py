@@ -185,7 +185,7 @@ def test_verification_mismatch_refuses_the_drop(migrate, legacy, registry):
     assert report["dropped"] is False
     assert _table_exists(legacy, "projects")
     assert _table_exists(legacy, "project_tags")
-    assert _user_version(legacy) == 3
+    assert _user_version(legacy) == 4  # StateDB set 4 on open; a refused drop leaves it as is
     assert migrate.exit_code(report) == 1
 
 
@@ -197,7 +197,7 @@ def test_simulated_verification_failure_also_refuses_the_drop(migrate, legacy, r
 
     assert report["dropped"] is False
     assert _table_exists(legacy, "projects")
-    assert _user_version(legacy) == 3
+    assert _user_version(legacy) == 4  # StateDB set 4 on open; a refused drop leaves it as is
 
 
 def test_drop_removes_the_legacy_tables_and_sets_user_version_4(migrate, legacy, registry):
@@ -215,6 +215,51 @@ def test_drop_removes_the_legacy_tables_and_sets_user_version_4(migrate, legacy,
     # The registry keeps every project, tag and grant.
     assert registry.project_tags("RAGNART") == {"kind": "repo"}
     assert len(registry.list_grants()) == 1
+
+
+def test_drop_works_on_a_db_statedb_already_advanced_to_version_4(migrate, legacy, registry):
+    # StateDB has already set user_version 4 (migration 4 is empty) and the legacy tables are
+    # present. The drop must decide by table presence, so it still copies, verifies and drops.
+    _seed_legacy(legacy)
+    assert _user_version(legacy) == 4
+    assert _table_exists(legacy, "projects")
+
+    report = migrate.run_apply(legacy, registry, drop_legacy=True)
+
+    assert report["already_dropped"] is False
+    assert report["mismatches"] == []
+    assert report["dropped"] is True
+    for table in migrate.LEGACY_TABLES:
+        assert not _table_exists(legacy, table), table
+    assert _user_version(legacy) == 4
+    assert registry.project_tags("RAGNART") == {"kind": "repo"}
+
+
+def test_db_at_version_3_auto_advanced_by_statedb_still_drops(migrate, tmp_path):
+    # A database last opened at version 3 (before migration 4 existed). Opening it with StateDB
+    # sets version 4 without dropping anything; the tool must then still copy and drop.
+    path = str(tmp_path / "sqlite" / "rag_state.db")
+    first = StateDB(path)
+    _seed_legacy(first)
+    first._conn.execute("PRAGMA user_version = 3")
+    first._conn.commit()
+    first.close()
+
+    state = StateDB(path)
+    registry = RegistryDB(str(tmp_path / "sqlite" / "hub_registry.db"))
+    try:
+        assert _user_version(state) == 4
+        assert _table_exists(state, "projects")
+
+        report = migrate.run_apply(state, registry, drop_legacy=True)
+
+        assert report["mismatches"] == []
+        assert report["dropped"] is True
+        assert not _table_exists(state, "projects")
+        assert _user_version(state) == 4
+    finally:
+        registry.close()
+        state.close()
 
 
 def test_rerun_after_the_drop_is_safe(migrate, legacy, registry):
