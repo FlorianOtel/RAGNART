@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified)
-updated_at: 2026-11-18--15-37
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A entry: what was done with commit `969d741`, the four kickoff decisions, deviations, the Part 0 and Part B evidence, open items and the handover to session B); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status)
+updated_at: 2026-11-18--21-46
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -36,7 +36,147 @@ log records what happened, including what diverged.
 
 ## v0.3 -- Sources
 
-Plan: `docs/Implementation-plan.md` Section 6, v0.3. Status: **planned** (see Plan Section 9).
+Plan: `docs/Implementation-plan.md` Section 6, v0.3. Status: **in progress** (see Plan Section 9): session A done, session B planned.
+
+### 2026-11-18--19-13 to 21-41 -- v0.3 session A: sources, pipeline version, hub registry, source-qualified scope
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6 v0.3,
+the session A work items and the Definition of done. First of the two v0.3 sessions (A, B). Session A
+is one host, no change in behaviour. Part A (code) was reviewed by a separate reviewer before Part B
+(live migration) began; the review passed with one minor finding (Open items).
+
+#### What was done
+
+Commits: `969d741` (code, Part A, steps A1 to A13), `ebfa3de` (migration 4 reserved), and the docs commit that adds this entry.
+
+- **Part A, `969d741` (code):**
+  - Source ids, the key-prefix rule and the pipeline constant in `ragnart/schema.py`; `source_id` and
+    `pipeline_version` keyword indexes, so ten indexed payload fields (`ragnart/collection.py`).
+  - The connector contract as code (`ragnart/connectors.py`): a frozen `Connector` with the seven
+    elements of `docs/RAGNART-design.md` §4.7, and an instance for each of the three sources.
+  - Queue migration 3 adds `ingestion_queue.source_id` (`ragnart/state.py`); the scanner sets it at each
+    discovery site.
+  - The hub registry (`ragnart/registry.py`, `RegistryDB`, its own `user_version` from 1): `sources`,
+    `projects` with `home_source_id`, `project_tags`, `project_references`, `grants`, and the reserved
+    `global` row. The project methods move from `StateDB` to it; `rename_source_links` is deleted.
+  - Ingest, the daemon, sync and the purge and reconcile tools filter every delete, replace and
+    `set_payload` on `source_id` and `source_path`. The payload carries `source_id` and `pipeline_version`
+    `p1`. Reconciliation adds a per-source check that only warns.
+  - Scope: `<source>:<path>` terms; a bare path, or a term on a source that cannot hold ragnart projects,
+    is HTTP 422. `GET /v1/projects` drops `parent` and `mode` and adds `source_id`. Hits carry `source_id`.
+  - Tools: `utils/rag_source_backfill.py` (dry run by default, `--apply` under the lock) and
+    `utils/rag_registry_migrate.py` (copy with a row-for-row check; `--drop-legacy-tables` only after the
+    check passes, and it sets `rag_state.db` `user_version` to 4).
+  - `scripts/sqlite-qdrant-snapshot.sh` copies `hub_registry-<ts>.db` with each snapshot and rotates it
+    with its set. `scripts/ragnart-ingest-run.sh` checkpoints the registry WAL.
+- **Part B (live, no code change):** B1 registry copy; B2 restore triple; B3 payload indexes; B4 source
+  backfill; B5 search restart and checks; B6 bench; B7 restore triple before the drop; B8 drop of the
+  legacy tables; B9 checks again; B10 Definition of done; B11 timer started; B12 full run.
+- **Docs:** this entry; `docs/RAGNART-design.md` status lines; `docs/Implementation-plan.md` §3, §4, §6,
+  §7, §8 and §9. The edit of `docs/RAG-strategy.md` §9 is proposed, not made (Open items).
+- **Tests:** 517 before, 604 after.
+
+#### Kickoff decisions
+
+1. **Source ids** (Plan Section 8 item 16): `nas`, `claude-linux-shared-nfs`, `opencode-k11`. A source id
+   names a store. Pattern `[a-z0-9][a-z0-9-]*`, so no `_` and no `:`. Reserved, never source ids: `tag`,
+   `name`, `all`, `project`, `web`, `none`, `global`. Only `nas` holds ragnart projects, so a path term on
+   another source is HTTP 422 (`docs/RAGNART-design.md` §4.7, §8.8).
+2. **Hub registry** (Plan Section 8 item 17): `sqlite/hub_registry.db` in the data root, with its own
+   schema version from 1 and its own migrations. Its restore copy `hub_registry-<ts>.db` sits beside the
+   snapshot and `rag_state-<ts>.db`, and retention removes it with its set (`docs/RAGNART-design.md` §4.8,
+   §10.4).
+3. **Reshape** (Plan Section 8 item 19): `project_links` becomes `project_references` (`project_id`,
+   `kind` `session` or `project`, `target_id`, `working`). `source_links` is dropped. `parent`, `mode` and
+   `inherit_access` are dropped. `projects` gains `home_source_id`. `project_tags` and `grants` are
+   unchanged. The `global` row stays. `sources` has a secret column, empty until session B. No
+   case-insensitive unique index on `projects.name` yet; it is v0.4 (`docs/RAGNART-design.md` §4.5).
+4. **One turn, one place** is not built in session A; it is a v0.4 work item. Measured on the live
+   transcripts: 171 session pairs share 24,048 line uuids across 176 transcripts (about 9% of bytes), and
+   only 31 of them are clean subsets. Dropping the shared turns re-chunks those items and changes results,
+   which conflicts with the rule that the bench stays unchanged.
+
+#### Deviations from the plan
+
+- **Connectors are thin.** Plan Section 6 v0.3 asks for the scanners and parsers to be restated as
+  connectors. Session A adds the interface and the three instances, and the scanner and parser code does
+  not call them yet. A full rewrite was rejected for a session with no behaviour change.
+- **Bench drift after the migration (B6).** The capture after the payload backfill (`bench-after-payload.json`)
+  gave 8 of 14 against the pre-migration capture. The old code run against the migrated collection
+  (`bench-oldcode-now.json`) gives 14 of 14 against the new results, so the drift is on the data side: the
+  full-payload rewrite re-segmented Qdrant's approximate search. The operator accepted this. The two post
+  captures agree 14 of 14 (`bench-post-1.json`, `bench-post-2.json`).
+- **Timer catch-up did not fire (B11, B12).** The `Persistent` catch-up of `ragnart-ingest.timer` did not
+  run a missed job. B12 ran the production unit `ragnart-ingest.service` by hand, with `RAG_FORCE_SNAPSHOT=1`
+  set through `systemctl set-environment` and unset after the start.
+- **Immutable reads (B1).** An `immutable=1` read of the live WAL database `rag_state.db` was stale. The
+  check was repeated with a WAL-aware `mode=ro` read.
+- **Moved to v0.4.** One turn, one place (decision 4). Nothing else planned for session B moved.
+
+#### Evidence
+
+- **Part 0 (before any change):** the bench, captured twice, gave 14 of 14 (noise floor,
+  `bench-pre-diff.txt`). Projects: global 14,528 items, RAGNART 175 (`baseline-projects.json`). Restore pair
+  `2026-11-18-18-42-28` (UTC): snapshot 2.8 GiB, `rag_state.db` 246 MiB. Counts: Qdrant 348,957 points;
+  queue completed 9,915 (`file`), 4,355 (Claude Code) and 433 (OpenCode); 268 ignored.
+- **B1:** registry copy of projects 2 (global, RAGNART), tags 0, grants 0, links 0; sources 3; registry
+  `user_version` 1. `rag_state.db` `user_version` 3, with `ingestion_queue.source_id` present and 14,971 rows, all NULL.
+- **B2:** restore triple `2026-11-18-20-05-40` (UTC): snapshot, `rag_state-*.db` and `hub_registry-*.db`
+  (44 KiB). Seven sets kept, no orphan.
+- **B3:** `source_id` and `pipeline_version` keyword indexes created; `payload_schema` lists ten keys; the
+  collection is green with 348,957 points.
+- **B4:** dry-run and apply counts equal the Part 0 counts: `nas` 233,243, Claude Code 101,275, OpenCode
+  14,439 (sum 348,957), with no unknown `source_type`. Applied to 14,971 queue rows (`nas` 10,183, Claude
+  Code 4,355, OpenCode 433). Exact checks: the facets on `source_id` sum to 348,957; no point lacks
+  `source_id` or `pipeline_version`; the only `pipeline_version` is `p1`.
+- **B5:** search service restarted, healthy in about 6 s. `GET /v1/projects` 200, with item counts 14,528
+  and 175 as at baseline, `source_id` present (`nas` for RAGNART, `null` for global), and no `parent` or
+  `mode`. `scope=all` 200, hits carry `source_id`. `scope=nas:<RAGNART path>` 200, with the echo naming
+  `nas`. A bare path 422. No registry warning in the journal. `docling` not loaded by the service.
+- **B6:** `bench-after-payload.json` 8 of 14 against `bench-pre-2.json` (see Deviations). The old-code probe
+  gives 14 of 14 against the new results.
+- **B7:** restore triple `2026-11-18-20-18-34` (UTC); seven sets, no orphan. The legacy `rag_state.db`
+  tables (projects 2, tags, grants, links, source_links all 0) match the registry row for row.
+- **B8:** `--drop-legacy-tables` without `--apply` is refused by argparse (exit 2, nothing written). The
+  dry run exits 0. The apply run passed its check, dropped five legacy tables and set `rag_state.db`
+  `user_version` to 4. Tables left: `ingestion_queue`. Rows: 14,971. Integrity ok.
+- **B9:** the B5 checks repeated without a restart: `/health` ok; `GET /v1/projects` equal to the B5
+  capture; the scope checks unchanged. The journal since B8 has 20 lines and no errors.
+- **B10 (Definition of done):**
+  - `/v1/projects`: ids, paths, names, owners and item counts equal the baseline; no `parent` or `mode`;
+    `source_id` `nas`.
+  - `scope=nas:<RAGNART>` at `top_k` 5, three queries against the bare-path baselines: the `source_path`
+    sets are equal for all three; the scores are equal by rank for `ragnart` and `qdrant-payload`. For
+    `ingestion-queue` the set and the score multiset are equal, but ranks 1 and 2 swap (0.125 and 0.111).
+  - A bare path gives 422.
+  - Qdrant: `is_empty` for `source_id` is 0 and for `pipeline_version` is 0; the facet is `p1` only; the
+    per-source point counts equal the queue's completed chunk sums.
+- **B12:** run 2026-11-18 20:21:23 to 20:29:49 UTC, `Result=success`, exit 0. Sync: 13 files ingested, 0
+  failed, no errors. Reconciliation: 0 anomalies, 0 per-source mismatches. WAL checkpoints `rag_state`
+  0|0|0 and `hub_registry` 0|0|0. Snapshot triple `2026-11-18-20-28-56` (UTC) with its `hub_registry` copy;
+  seven sets, no orphan. Final bench `bench-final.json` against `bench-post-2.json`: 14 of 14. Final counts:
+  Qdrant 349,332 points (`nas` 233,248, Claude Code 101,645, OpenCode 14,439; `p1` only); the queue's
+  completed chunk sums match per source; no row has a NULL `source_id`; nothing pending or failed.
+- **Migration 4 reserved:** ragnart/state.py reserves migration 4 (no statements) for the drop done by utils/rag_registry_migrate.py, so the next migration is 5.
+
+#### Open items
+
+- **`resolve_parent`** in `ragnart/projects.py` has no production caller now (only its tests). Remove in a later session.
+- **Bench invariant wording:** proposed in the session directory file `Implementation-plan-section4-bench-rule-proposal.md`; not applied (operator decision).
+- **`docs/RAG-strategy.md` §9:** the proposal (restore triples, `hub_registry` in the full and state-database restores, `immutable=1` for copies) is in the session directory file `RAG-strategy-section9-proposed-diff.md`. Pending the operator.
+- **Reads of restore copies:** use `immutable=1`; a checkpointed copy has no WAL. A `mode=ro` read left `-shm` and `-wal` files beside the copy (B7, B12); the empty files were removed. The live `rag_state.db` is in WAL mode, so `immutable=1` must not be used on it (B1).
+- **Stalled shell:** an Actor shell stalled on `cat` waiting for stdin; it was killed during Part B.
+- **Session B next:** scope per Plan Section 6 v0.3, session B.
+
+#### Handover to session B
+
+- **Tree state:** code at `ebfa3de`; the docs commit adds this entry.
+- **Scope:** Plan Section 6 v0.3, session B (the ingestion API, a source on another host).
+- **Build on:** the registry `sources` table (secret empty); the connector interface in `ragnart/connectors.py`;
+  `SOURCES_HOLDING_PROJECTS` in `ragnart/schema.py`; the reserved source-id list (enforced at source
+  registration, which session B adds); `source_id_for_key()` in `ragnart/schema.py`, whose key-prefix rule
+  is replaced by per-source registration when other hosts arrive; the read-only `RegistryDB` for the service.
+- **Tests:** 604 pass at `969d741`; 607 at `ebfa3de`.
 
 ### 2026-11-18 -- design follow-up: the session moves into the project folder it creates; how the agent searches; no session state; open, capture, collateral, resume; the web as a scope; relocation tested; the fork verified; the switch
 
