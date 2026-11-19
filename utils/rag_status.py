@@ -69,7 +69,7 @@ _RE_EMBED_PROG = re.compile(r'Embedding progress: (\d+)/(\d+)\s+(.+)')
 
 def parse_log(log_path: str) -> dict:
     """
-    Single-pass scan of a rag_ingest_daemon log file.
+    Single-pass scan of an ingestion log file (the log the ingestion run writes).
 
     Tracks all in-flight files simultaneously (required for --workers > 1).
     With multiple workers, Processing/Chunked/Embedding lines from different
@@ -341,7 +341,7 @@ def main() -> None:
     parser.add_argument("--ignored", action="store_true", help="Detailed listing of ignored files with retry count and last error")
     parser.add_argument(
         "--watch", metavar="LOG_FILE",
-        help="Continuously monitor a rag_ingest_daemon log file (error if not given)",
+        help="Continuously monitor an ingestion log file (error if not given)",
     )
     parser.add_argument(
         "--list-pending", dest="list_pending",

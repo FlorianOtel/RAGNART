@@ -1,10 +1,9 @@
 """
 Sync plan computation for the NFS, Claude Code and OpenCode scans (RESEARCH C3, C4, C6, C10; design §4.5, §10.3).
 
-Moved here verbatim from ragnart/sync_plan.py (v0.3 session B1). This module computes the plan
-and renders it; it never writes to Qdrant. It imports no qdrant_client, so the ingestion side
-(endpoint hosts included) can plan a sync without the hub's Qdrant stack. The Qdrant half,
-apply_sync_plan(), stays in ragnart/sync_plan.py, which re-exports the names below.
+This module computes the plan and renders it; it writes nothing. It imports no qdrant_client, so the
+ingestion side (endpoint hosts included) can plan a sync without the hub Qdrant stack. Carrying the plan
+out is ragnart/sync_submit.py submit_plan(), which sends each change through the ingestion API.
 
 build_sync_plan()   reads the scan result and the queue, and works out every change
                     this run would make. It writes nothing.
@@ -36,7 +35,7 @@ from .moves import detect_moves
 from .projects import project_id_for_path
 from .registry import RegistryDB
 from .scanner import include_extensions_from_config, is_includable
-from .schema import GLOBAL_PROJECT_ID
+from .schema import GLOBAL_PROJECT_ID, SOURCE_ID_NAS
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
@@ -54,7 +53,7 @@ REASON_GRACE_EXPIRED = "tombstone grace period expired"
 @dataclass
 class SyncPlan:
     """
-    Every change one sync run will make. Built by build_sync_plan(), carried out by apply_sync_plan().
+    Every change one sync run will make. Built by build_sync_plan(), carried out by ragnart/sync_submit.py submit_plan().
 
     moves:              old key -> new key. Same content, one vanished and one new item.
     newly_missing:      completed rows that vanished this run. They are tombstoned, not deleted.
@@ -119,8 +118,11 @@ def _plan_projects(
     for every project that still exists after this run, markers included.
 
     Removal rule: an existing project whose marker was not found is removed, but only
-    when no root was skipped (a skipped root may simply not have been visited) and only
-    for owners that were scanned (`owners` is None for every owner). Its items are
+    when no root was skipped (a skipped root may simply not have been visited), only
+    for owners that were scanned (`owners` is None for every owner), and only when the
+    project is homed on the NAS source. A project homed on another source (a MBP or
+    claude-linux-shared-nfs project) was never found by this crawl, so its absence here
+    says nothing about it, and it is never planned for removal. Its items are
     re-attached to the enclosing project or global by the attachment step of the same run.
     """
     # A marker is ignored when its id is reserved, or when an earlier marker already
@@ -149,6 +151,11 @@ def _plan_projects(
     if not skipped:
         for project in existing:
             if project["id"] in claimed_ids:
+                continue
+            # Only a project homed on the NAS source is this crawl's to remove. home_source_id is
+            # compared case-insensitively, as the registry compares source ids (ragnart/scope.py).
+            # A NULL home (no source recorded) does not match, so it is never removed.
+            if (project["home_source_id"] or "").casefold() != SOURCE_ID_NAS.casefold():
                 continue
             if owners is not None and project["owner"] not in owners:
                 continue
@@ -246,7 +253,7 @@ def _plan_attachment(
     Files match by their key; sessions match by launch_dir (None means global). Matching
     is verbatim (projects.project_id_for_path). Items queued for purge are skipped, since
     they are about to lose their points. Each change is keyed by the row's key after this
-    plan's moves, because apply_sync_plan() applies the moves first.
+    plan moves, because submit_plan() sends the moves first.
     """
     purge_set = set(plan.purge_ready)
     for row in state_db.rows_for_attachment():

@@ -1,0 +1,193 @@
+{
+  "claude_session": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": "38b6f3525685f1c1b808fc06ef56b1d5",
+        "file_name": "Summarise the renewal steps.",
+        "file_type": "claude_chat",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "# Claude Code Session\n\nSession: 6f1c2a4e-1111-4222-8333-944455556666\nProject: proj  (/mnt/nfs/Florian/proj)\nDate: 2026-11-18T10:00:00Z\nModel: claude-test\nBranch: \nVersion: \n\n---\n\n**User**: Summarise the renewal steps.\n\n**Claude**: Here are the renewal steps.\n\n**User**: Thanks.",
+        "pipeline_version": "p1",
+        "project": "proj",
+        "project_id": "global",
+        "session_id": "6f1c2a4e-1111-4222-8333-944455556666",
+        "session_title": "Summarise the renewal steps.",
+        "source_id": "claude-linux-shared-nfs",
+        "source_path": "claude-session://6f1c2a4e-1111-4222-8333-944455556666",
+        "source_type": "claude_session",
+        "tag": "",
+        "text": "# Claude Code Session\n\nSession: 6f1c2a4e-1111-4222-8333-944455556666\nProject: proj  (/mnt/nfs/Florian/proj)\nDate: 2026-11-18T10:00:00Z\nModel: claude-test\nBranch: \nVersion: \n\n---\n\n**User**: Summarise the renewal steps.\n\n**Claude**: Here are the renewal steps.\n\n**User**: Thanks."
+      }
+    ],
+    "state_content_hash": "38b6f3525685f1c1b808fc06ef56b1d5",
+    "vectors": [
+      [
+        277.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "opencode_session": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": null,
+        "file_name": "Certificate renewal",
+        "file_type": "opencode",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "# Opencode Session\n\nSession: ses_abc\nLaunched from: /mnt/nfs/Florian/proj\nDate: 2023-11-14T23:13:20\nTitle: Certificate renewal\n\n---\n\n**User**: How do I renew the certificate for the printer?\n\n**Assistant**: Renew it through the portal, then copy the new file to the printer.\n\n**User**: Thanks, and where is the portal?",
+        "pipeline_version": "p1",
+        "project_id": "global",
+        "session_id": "ses_abc",
+        "session_title": "Certificate renewal",
+        "source_id": "opencode-k11",
+        "source_path": "opencode://ses_abc",
+        "source_type": "opencode_session",
+        "tag": "",
+        "text": "# Opencode Session\n\nSession: ses_abc\nLaunched from: /mnt/nfs/Florian/proj\nDate: 2023-11-14T23:13:20\nTitle: Certificate renewal\n\n---\n\n**User**: How do I renew the certificate for the printer?\n\n**Assistant**: Renew it through the portal, then copy the new file to the printer.\n\n**User**: Thanks, and where is the portal?"
+      }
+    ],
+    "state_content_hash": null,
+    "vectors": [
+      [
+        318.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "plain_md": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": "a4996cea33218e88133710616bcb9a0d",
+        "file_name": "todo.md",
+        "file_type": "md",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "# Todo\n\nRenew the printer certificate before March.\n",
+        "pipeline_version": "p1",
+        "project_id": "global",
+        "source_id": "nas",
+        "source_path": "<ROOT>/plain_md/notes/todo.md",
+        "source_type": "file",
+        "tag": "",
+        "text": "# Todo\n\nRenew the printer certificate before March.\n"
+      }
+    ],
+    "state_content_hash": "a4996cea33218e88133710616bcb9a0d",
+    "vectors": [
+      [
+        52.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "plain_txt": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": "c6f7a273172a1230d95e7caf92777011",
+        "file_name": "minutes.txt",
+        "file_type": "txt",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "Minutes of the household meeting.\nThe boiler is due a service.\n",
+        "pipeline_version": "p1",
+        "project_id": "global",
+        "source_id": "nas",
+        "source_path": "<ROOT>/plain_txt/notes/minutes.txt",
+        "source_type": "file",
+        "tag": "",
+        "text": "Minutes of the household meeting.\nThe boiler is due a service.\n"
+      }
+    ],
+    "state_content_hash": "c6f7a273172a1230d95e7caf92777011",
+    "vectors": [
+      [
+        63.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "project_attached": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": "c07fd5fe0b73137755fbf30e3374a39f",
+        "file_name": "plan.md",
+        "file_type": "md",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "# Plan\n\nThe project plan for the printer.\n",
+        "pipeline_version": "p1",
+        "project_id": "proj-1",
+        "source_id": "nas",
+        "source_path": "<ROOT>/project_attached/proj/plan.md",
+        "source_type": "file",
+        "tag": "",
+        "text": "# Plan\n\nThe project plan for the printer.\n"
+      }
+    ],
+    "state_content_hash": "c07fd5fe0b73137755fbf30e3374a39f",
+    "vectors": [
+      [
+        42.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "tagged": {
+    "chunk_count": 1,
+    "points": [
+      {
+        "chunk_index": 0,
+        "content_hash": "c5ecb3ee16a62280f94aa202258edaec",
+        "file_name": "course.md",
+        "file_type": "md",
+        "modified_at": "2023-11-14T22:13:20+00:00",
+        "owner": "florian",
+        "page": 0,
+        "parent_text": "# Course\n\nA note about a certificate course.\n",
+        "pipeline_version": "p1",
+        "project_id": "global",
+        "source_id": "nas",
+        "source_path": "<ROOT>/tagged/notes/course.md",
+        "source_type": "file",
+        "tag": "certifications",
+        "text": "# Course\n\nA note about a certificate course.\n"
+      }
+    ],
+    "state_content_hash": "c5ecb3ee16a62280f94aa202258edaec",
+    "vectors": [
+      [
+        45.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  }
+}

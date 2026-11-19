@@ -24,14 +24,37 @@ Modes (the dry-run is the default):
                           The file is written before the registration, so a secret never exists
                           without its hash, and a refused run never leaves a file behind.
 
+Secret rotation (--rotate-secret, session B2) replaces the secret of a source that already exists,
+of any kind. The source's connector and owner are kept, so --connector and --owner must not be
+given with it. The same rules apply:
+
+    --rotate-secret --id MBP                       Dry-run (the default). Reports the source it
+                                                   would rotate. Writes nothing, takes no lock.
+    --rotate-secret --id MBP --apply --secret-out  Under the ingestion lock. Refuses an id that is
+                                                   not registered (any letter case), or an existing
+                                                   --secret-out. Then:
+                                                   1. Creates --secret-out with O_EXCL and mode 0600,
+                                                      and writes the new secret.
+                                                   2. Replaces the stored hash with the hash of the
+                                                      new secret. If step 2 fails, the new secret
+                                                      file is removed; the old secret stays valid.
+                                                   The old secret stops working as soon as the hash
+                                                   is replaced (the hub reads the hash on every
+                                                   request), so the new file must reach the host
+                                                   in the same operation.
+
 Usage (run from project root):
     python utils/rag_source_register.py --id MBP --connector filesystem --owner florian
     python utils/rag_source_register.py --id MBP --connector filesystem --owner florian \\
         --apply --secret-out /path/to/secrets/MBP
+    python utils/rag_source_register.py --rotate-secret --id nas
+    python utils/rag_source_register.py --rotate-secret --id nas --apply \\
+        --secret-out /path/to/secrets/nas
 
-Exit codes: 0 when the run registered (apply) or would register (dry-run). 1 when refused: an
-invalid id, an id already registered, an existing --secret-out, or a registration that failed.
-2 for a usage error (argparse), including --apply without --secret-out.
+Exit codes: 0 when the run registered or rotated (apply) or would do so (dry-run). 1 when refused:
+an invalid id, an id already registered (register) or not registered (rotate), an existing
+--secret-out, or a write that failed. 2 for a usage error (argparse), including --apply without
+--secret-out, and --connector or --owner given with --rotate-secret.
 """
 
 from __future__ import annotations
@@ -172,14 +195,74 @@ def run_apply(
     return 0
 
 
+def run_rotate_dry_run(registry_path: str, source_id: str) -> int:
+    """Report what --rotate-secret --apply would do. Writes nothing. Returns the exit code."""
+    print("=== rag_source_register --rotate-secret (DRY-RUN) ===")
+    existing = existing_source(registry_path, source_id)
+    if existing is None:
+        print(f"REFUSED (would refuse on --apply): {source_id!r} is not registered")
+        return 1
+    print(f"would rotate the secret of: id={existing['id']} kind={existing['kind']} "
+          f"connector={existing['connector']} owner={existing['owner']}")
+    print("(dry-run: nothing written. Re-run with --apply and --secret-out to rotate.)")
+    return 0
+
+
+def run_rotate_apply(registry_path: str, source_id: str, secret_out: str) -> int:
+    """
+    Replace the stored secret hash of a registered source and write the new secret.
+
+    The caller already holds the ingestion lock. Returns the exit code. The secret is never
+    printed: only the path is reported.
+    """
+    existing = existing_source(registry_path, source_id)
+    if existing is None:
+        print(f"REFUSED: {source_id!r} is not registered. Nothing was written.")
+        return 1
+    if os.path.lexists(secret_out):
+        print(f"REFUSED: {secret_out} already exists. Nothing was written.")
+        return 1
+
+    secret = secrets.token_urlsafe(SECRET_BYTES)
+    # The file comes first: if it cannot be written, the stored hash stays as it was.
+    try:
+        write_secret_file(secret_out, secret)
+    except OSError as exc:
+        print(f"REFUSED: cannot write the secret file {secret_out}: {exc.strerror}. Nothing was rotated.")
+        return 1
+
+    registry = RegistryDB(registry_path)
+    try:
+        updated = registry.set_secret_hash(existing["id"], secret_hash(secret))
+    finally:
+        registry.close()
+    if not updated:
+        # The hash was not replaced, so the new file would be a secret the hub does not accept. Remove it.
+        os.remove(secret_out)
+        print(f"REFUSED: the hash of {existing['id']!r} was not replaced. The secret file was removed.")
+        return 1
+
+    print(f"rotated: id={existing['id']} kind={existing['kind']} "
+          f"connector={existing['connector']} owner={existing['owner']}")
+    print(f"secret written to {secret_out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Command-line entry point. Returns the process exit code (see the module docstring)."""
     parser = argparse.ArgumentParser(
-        description="Register an endpoint source on the hub and write its secret to a file."
+        description="Register an endpoint source on the hub and write its secret to a file, "
+                    "or rotate the secret of an existing source."
     )
     parser.add_argument("--id", required=True, help="The source id, e.g. MBP. Case is kept; comparisons ignore it.")
-    parser.add_argument("--connector", required=True, choices=CONNECTORS, help="The source's connector.")
-    parser.add_argument("--owner", required=True, help="The fixed owner of the source's items, e.g. florian.")
+    # --connector and --owner are needed to register, and must be absent when rotating: a rotation keeps them.
+    parser.add_argument("--connector", choices=CONNECTORS, help="The source's connector (register only).")
+    parser.add_argument("--owner", help="The fixed owner of the source's items, e.g. florian (register only).")
+    parser.add_argument(
+        "--rotate-secret",
+        action="store_true",
+        help="Replace the secret of an existing source of any kind, instead of registering a new one.",
+    )
     parser.add_argument(
         "--secret-out",
         help="Where the plaintext secret is written (created with mode 0600, never overwritten). "
@@ -187,15 +270,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Report only (the default).")
-    mode.add_argument("--apply", action="store_true", help="Register the source and write the secret file.")
+    mode.add_argument("--apply", action="store_true", help="Register the source (or rotate its secret) and write the secret file.")
     args = parser.parse_args(argv)
     if args.apply and not args.secret_out:
         parser.error("--apply needs --secret-out: the secret is written only to that file")
+    if args.rotate_secret:
+        if args.connector is not None or args.owner is not None:
+            parser.error("--rotate-secret keeps the source's connector and owner: do not pass --connector or --owner")
+    else:
+        if args.connector is None:
+            parser.error("--connector is required to register a source")
+        if args.owner is None:
+            parser.error("--owner is required to register a source")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     config = _load_config()
     registry_path = registry_db_path(config)
+    if args.rotate_secret:
+        if not args.apply:
+            # The dry-run takes no lock and writes nothing.
+            return run_rotate_dry_run(registry_path, args.id)
+        acquire_or_exit(lock_path_from_config(config))
+        return run_rotate_apply(registry_path, args.id, args.secret_out)
+
     if not args.apply:
         # The dry-run takes no lock and writes nothing.
         return run_dry_run(registry_path, args.id, args.connector, args.owner)

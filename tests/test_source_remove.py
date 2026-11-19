@@ -1,6 +1,6 @@
 """
 Tests for utils/rag_source_remove.py: the dry-run lists exactly one source's items and writes
-nothing; a hub source is refused without --allow-hub-source; --apply deletes only that source's
+nothing; a source holding ragnart projects (nas) is refused without --allow-projects-source; --apply deletes only that source's
 points (the delete filter is checked), its intake rows and its spool files, and keeps the source
 registered; the ingestion lock held means exit 75 and nothing removed.
 
@@ -93,7 +93,7 @@ def qdrant_points():
 @pytest.fixture
 def env(tmp_path, tool, monkeypatch, qdrant_points):
     """
-    A tmp ragnart.yaml, a hub registry with MBP and claude-MBP (endpoint) plus the migrated hub
+    A tmp ragnart.yaml, a hub registry with MBP and claude-MBP (endpoint) plus the seeded
     sources, intake rows and spool files for each, a fake Qdrant, and a recorder in place of the lock.
     """
     cfg = {
@@ -185,30 +185,39 @@ def test_lookup_is_case_insensitive_and_the_filter_uses_the_stored_id(tool, env,
     [(["--source", "nas"], 0), (["--source", "nas", "--apply"], 1)],
     ids=["dry-run", "apply"],
 )
-def test_hub_source_is_refused_without_the_flag_in_both_modes(tool, env, argv, lock_calls, capsys):
+def test_projects_source_is_refused_without_the_flag_in_both_modes(tool, env, argv, lock_calls, capsys):
     """
-    A hub source is refused by the dry-run and by the apply. Neither reads Qdrant or deletes. The
+    A source holding projects (nas) is refused by the dry-run and by the apply. Neither reads Qdrant or deletes. The
     apply takes the lock first (as every write does), then refuses, so it records one lock call.
     """
     rc = tool.main(argv)
 
     assert rc == 1
-    assert "hub source" in capsys.readouterr().out
+    assert "holds ragnart projects" in capsys.readouterr().out
     assert env["qdrant"].scroll_sources == []
     assert env["qdrant"].delete_sources == []
     assert len(env["lock_calls"]) == lock_calls
     assert any(sid == "nas" for sid, _ in env["qdrant"].points)
 
 
-def test_hub_source_is_listed_with_the_flag_and_applied_only_with_it(tool, env, capsys):
-    """With --allow-hub-source the dry-run lists nas, and apply removes nas points only."""
-    assert tool.main(["--source", "nas", "--allow-hub-source"]) == 0
+def test_projects_source_is_listed_with_the_flag_and_applied_only_with_it(tool, env, capsys):
+    """With --allow-projects-source the dry-run lists nas, and apply removes nas points only."""
+    assert tool.main(["--source", "nas", "--allow-projects-source"]) == 0
     assert "/mnt/nfs/Florian/x.md" in capsys.readouterr().out
 
-    assert tool.main(["--source", "nas", "--allow-hub-source", "--apply"]) == 0
+    assert tool.main(["--source", "nas", "--allow-projects-source", "--apply"]) == 0
     assert env["qdrant"].delete_sources == ["nas"]
     assert all(sid != "nas" for sid, _ in env["qdrant"].points)
     assert any(sid == "MBP" for sid, _ in env["qdrant"].points)
+
+
+def test_a_hub_kind_source_that_holds_no_projects_is_not_refused_without_the_flag(tool, env, capsys):
+    """
+    The gate follows SOURCES_HOLDING_PROJECTS, not the registry kind. claude-linux-shared-nfs is a
+    hub-kind row (seeded by the migration) that holds no projects, so the dry-run lists it with no flag.
+    """
+    assert tool.main(["--source", "claude-linux-shared-nfs"]) == 0
+    assert "items: 0" in capsys.readouterr().out
 
 
 def test_unregistered_source_is_refused(tool, env, capsys):

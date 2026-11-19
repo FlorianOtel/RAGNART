@@ -13,7 +13,7 @@ The registry is one SQLite file, sqlite/hub_registry.db, beside rag_state.db. It
 
 The ingestion queue (ingestion_queue) stays in rag_state.db (ragnart/state.py). The two
 files are separate, so each has its own schema version (PRAGMA user_version). The
-registry's schema version is 2; its migrations are in _MIGRATIONS below.
+registry's schema version is 3; its migrations are in _MIGRATIONS below.
 
 Source ids are case-preserving for storage and display, and every comparison of them is
 case-insensitive. A unique index on sources(id COLLATE NOCASE) makes 'MBP' and 'mbp' the
@@ -156,6 +156,16 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         """,
         # The intake worker takes the oldest 'received' rows, so this index serves that query.
         "CREATE INDEX IF NOT EXISTS idx_intake_status_created ON intake (status, created_at)",
+    ]),
+    (3, [
+        # Per-request fields that an upsert may carry (session B2). Each is nullable: NULL means the
+        # request did not send it, and the intake worker falls back to the source's own setting.
+        # owner is the item's owner, sent only by a source whose registry owner is NULL (multi-owner
+        # sources such as nas). tag is the item's tag. project_id is the ragnart project the item
+        # belongs to, or 'global'.
+        "ALTER TABLE intake ADD COLUMN owner TEXT",
+        "ALTER TABLE intake ADD COLUMN tag TEXT",
+        "ALTER TABLE intake ADD COLUMN project_id TEXT",
     ]),
 ]
 
@@ -304,27 +314,33 @@ class RegistryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def endpoint_sources(self) -> list[dict]:
+    def sources_with_secret(self) -> list[dict]:
         """
-        Return every endpoint source (kind 'endpoint') as {id, connector, owner, secret_hash}.
+        Return every source that holds a secret, of any kind, as {id, connector, owner, secret_hash}.
 
-        The ingestion API's auth gate compares a presented secret's hash with each of these.
-        Hub sources are left out: they have no secret, so they can never authenticate.
+        This is the set the ingestion API's auth gate compares a presented secret against. The kind
+        no longer decides who may submit: a source with a secret hash may submit, and a source
+        without one may not (its secret_hash is NULL). The hash is returned for the comparison only.
         """
         cur = self._conn.execute(
-            "SELECT id, connector, owner, secret_hash FROM sources WHERE kind = 'endpoint' ORDER BY id"
+            "SELECT id, connector, owner, secret_hash FROM sources "
+            "WHERE secret_hash IS NOT NULL ORDER BY id"
         )
         return [dict(row) for row in cur.fetchall()]
 
-    def hub_source_ids(self) -> set[str]:
+    def set_secret_hash(self, source_id: str, secret_hash: str) -> bool:
         """
-        Return the ids of the hub sources (kind 'hub'): the sources the hub ingests itself.
+        Replace the stored secret hash of one source, compared case-insensitively, and return True if a row changed.
 
-        The hub-side tools (reconciliation, purges) act only on these. Endpoint sources are
-        left out, so their points are never compared, deleted or reported by those tools.
+        Used by the secret-rotation mode of utils/rag_source_register.py. Only the SHA-256 hex digest
+        is passed in and stored, never the plaintext secret. Returns False when no source has that id.
         """
-        rows = self._conn.execute("SELECT id FROM sources WHERE kind = 'hub'").fetchall()
-        return {row["id"] for row in rows}
+        cur = self._conn.execute(
+            "UPDATE sources SET secret_hash = ? WHERE id = ? COLLATE NOCASE",
+            (secret_hash, source_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # Intake: requests from endpoint sources
@@ -342,6 +358,9 @@ class RegistryDB:
         modified_at: str | None = None,
         spool_path: str | None = None,
         request_id: str | None = None,
+        owner: str | None = None,
+        tag: str | None = None,
+        project_id: str | None = None,
     ) -> str:
         """
         Record one request from an endpoint source with status 'received', and return its request id.
@@ -351,19 +370,20 @@ class RegistryDB:
         inserted with spool_path already set, and the intake worker never sees a bytes upsert
         without its file. The table checks kind (upsert, delete, change_key or change_metadata).
         metadata is a dict, stored as JSON and returned as a dict. modified_at is stored as given;
-        the API has already checked it is an ISO-8601 UTC string.
+        the API has already checked it is an ISO-8601 UTC string. owner, tag and project_id are the
+        upsert's dedicated fields (migration 3). They are stored as given, and None when absent.
         """
         if request_id is None:
             request_id = uuid.uuid4().hex
         now = _now()
         self._conn.execute(
             "INSERT INTO intake (id, source_id, kind, key, new_key, file_type, text, metadata, "
-            "modified_at, spool_path, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)",
+            "modified_at, spool_path, owner, tag, project_id, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)",
             (
                 request_id, source_id, kind, key, new_key, file_type, text,
                 None if metadata is None else json.dumps(metadata),
-                modified_at, spool_path, now, now,
+                modified_at, spool_path, owner, tag, project_id, now, now,
             ),
         )
         self._conn.commit()
@@ -376,17 +396,39 @@ class RegistryDB:
 
     def next_intake(self) -> dict | None:
         """
-        Claim the oldest 'received' request and mark it 'processing', in one statement.
+        Claim the oldest claimable 'received' request and mark it 'processing', in one statement.
 
-        The UPDATE ... RETURNING is a single SQLite statement, so two claimants cannot take the
-        same row. Oldest means the smallest created_at; rowid breaks ties, so requests stored in
-        the same microsecond keep their insertion order. Returns the claimed row, or None when no
-        request is waiting.
+        A request is claimable only when no EARLIER request of the same source still holds one of
+        the item's keys. The claim is refused while an earlier request is 'received' or 'processing'
+        and shares a key with it:
+          - 'earlier' means an older created_at, with rowid breaking ties (insertion order);
+          - the source is compared case-insensitively, as everywhere in this registry (COLLATE NOCASE);
+          - the keys are compared exactly as stored (case-sensitive, the default BINARY collation);
+          - a request's key is matched against the other request's key AND new_key, and its new_key
+            against the other's key AND new_key, so a change_key from A to B holds back a later
+            upsert of B, and an earlier upsert of A holds back a later change_key from A.
+        So requests for one item are applied strictly in order, even with several workers.
+
+        The UPDATE ... RETURNING is a single SQLite statement, so the choice and the claim happen
+        together: two claimants cannot take the same row. Returns the claimed row, or None when no
+        request is claimable (none waiting, or every waiting one is held back by an earlier one).
         """
         rows = self._conn.execute(
             "UPDATE intake SET status = 'processing', updated_at = ? "
-            "WHERE id = (SELECT id FROM intake WHERE status = 'received' "
-            "            ORDER BY created_at, rowid LIMIT 1) "
+            "WHERE id = ("
+            "  SELECT r.id FROM intake r "
+            "  WHERE r.status = 'received' "
+            "    AND NOT EXISTS ("
+            "      SELECT 1 FROM intake o "
+            "      WHERE o.source_id COLLATE NOCASE = r.source_id COLLATE NOCASE "
+            "        AND o.status IN ('received', 'processing') "
+            "        AND (o.created_at < r.created_at "
+            "             OR (o.created_at = r.created_at AND o.rowid < r.rowid)) "
+            "        AND (o.key = r.key OR o.key = r.new_key "
+            "             OR o.new_key = r.key OR o.new_key = r.new_key)"
+            "    ) "
+            "  ORDER BY r.created_at, r.rowid LIMIT 1"
+            ") "
             "RETURNING *",
             (_now(),),
         ).fetchall()

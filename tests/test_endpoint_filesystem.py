@@ -35,7 +35,7 @@ import ragnart.cli as cli
 import ragnart.endpoint as endpoint
 import ragnart.ingest_api as ingest_api
 from ragnart.cli import registry_db_path
-from ragnart.endpoint_client import HubClient
+from ragnart.endpoint_client import HubClient, HubError
 from ragnart.endpoint_state import EndpointState
 from ragnart.registry import RegistryDB
 
@@ -216,6 +216,12 @@ def state_rows(ws: SimpleNamespace) -> dict[str, dict]:
 def point(key: str) -> SimpleNamespace:
     """A Qdrant point of the MBP source, as GET /v1/items reads it (payload only)."""
     return SimpleNamespace(payload={"source_path": key, "content_hash": "h", "pipeline_version": "p1"})
+
+
+def hub_point(key: str, content_hash: str) -> SimpleNamespace:
+    """Two Qdrant points of one item, as the hub lists it: the same hash and pipeline version on both."""
+    payload = {"source_path": key, "content_hash": content_hash, "pipeline_version": "p1"}
+    return [SimpleNamespace(payload=payload), SimpleNamespace(payload=payload)]
 
 
 def complete(hub_config: dict, qdrant: MagicMock, request_id: str, key: str, chunk_count: int = 2) -> None:
@@ -713,3 +719,178 @@ def test_invalid_config_is_refused(tmp_path, patch, message):
 
     with pytest.raises(endpoint.ConfigError, match=message):
         endpoint.load_config(str(path))
+
+
+# ---------------------------------------------------------------------------
+# Session B2 (A.18): a 422 is a request error, nothing is deleted, the row is left for the next run
+# ---------------------------------------------------------------------------
+
+def _refuse_as_bad_request(action, source, client):
+    """Stands in for the upload: the hub answers 422, as it does for a malformed request."""
+    raise HubError(422, "bad request (test)")
+
+
+def test_422_on_a_new_file_records_no_row_and_the_next_run_submits_it(ws, hub_config, monkeypatch, caplog):
+    """A 422 is not an admission decision: no row is recorded and an ERROR names the cause. The next run sends it."""
+    (ws.root / "notes.md").write_bytes(b"hello")
+    real_send = endpoint._send_upsert
+    monkeypatch.setattr(endpoint, "_send_upsert", _refuse_as_bad_request)
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        assert run(ws, now=NOW) == 0
+
+    assert intake_rows(hub_config) == []
+    assert state_rows(ws) == {}
+    assert any(record.levelno == logging.ERROR and "422" in record.getMessage() for record in caplog.records)
+
+    monkeypatch.setattr(endpoint, "_send_upsert", real_send)
+    assert run(ws, now=NOW) == 0
+    assert len(upserts_for(hub_config, str(ws.root / "notes.md"))) == 1
+
+
+def test_422_on_an_edited_file_deletes_nothing_and_keeps_the_old_row(ws, hub_config, qdrant, monkeypatch):
+    """An indexed file whose edit is answered 422: no delete is sent, and the row keeps its old completed state and hash."""
+    key = settle_first_upload(ws, hub_config, qdrant)
+    (ws.root / "notes.md").write_bytes(b"a longer, edited body")
+    monkeypatch.setattr(endpoint, "_send_upsert", _refuse_as_bad_request)
+
+    assert run(ws, now=NOW) == 0
+
+    assert [row for row in intake_rows(hub_config) if row["kind"] == "delete"] == []
+    row = state_rows(ws)[key]
+    assert (row["status"], row["content_hash"]) == ("completed", _md5(b"hello"))
+
+
+# ---------------------------------------------------------------------------
+# Session B2 (A.18): re-submission after a pipeline version change, capped per run
+# ---------------------------------------------------------------------------
+
+def test_completed_item_on_an_older_pipeline_is_submitted_again(ws, hub_config, qdrant, monkeypatch):
+    """/v1/info reports p2 while the points say p1: the completed item is sent again, and its row is pending."""
+    key = settle_first_upload(ws, hub_config, qdrant)
+    monkeypatch.setattr(ingest_api, "PIPELINE_VERSION_P1", "p2")
+
+    assert run(ws, now=NOW) == 0
+
+    assert len(upserts_for(hub_config, key)) == 2
+    assert state_rows(ws)[key]["status"] == "pending"
+
+
+def test_older_pipeline_resubmission_is_capped_per_run(ws, hub_config, qdrant, monkeypatch):
+    """Three items on p1 with /v1/info at p2 and a batch of two: two are sent in the first run, the third in the next."""
+    names = ["a.md", "b.md", "c.md"]
+    keys = [str(ws.root / name) for name in names]
+    for name in names:
+        (ws.root / name).write_bytes(name.encode("utf-8"))
+    assert run(ws, now=NOW) == 0
+    registry = RegistryDB(registry_db_path(hub_config))
+    try:
+        for key in keys:
+            registry.update_intake(upserts_for(hub_config, key)[0]["id"], status="completed", chunk_count=2)
+    finally:
+        registry.close()
+    qdrant.scroll.return_value = ([point(key) for key in keys], None)
+    assert run(ws, now=NOW) == 0
+    monkeypatch.setattr(ingest_api, "PIPELINE_VERSION_P1", "p2")
+
+    assert run(ws, now=NOW, resubmit_batch_size=2) == 0
+    assert [len(upserts_for(hub_config, key)) for key in keys] == [2, 2, 1]
+
+    # The first two are still waiting for a worker, so only the third is due now.
+    assert run(ws, now=NOW, resubmit_batch_size=2) == 0
+    assert [len(upserts_for(hub_config, key)) for key in keys] == [2, 2, 2]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "200", 1.5])
+def test_resubmit_batch_size_must_be_a_whole_number_of_one_or_more(ws, value):
+    """A zero, negative, boolean, text or fractional batch size is a configuration error."""
+    cfg = yaml.safe_load(ws.config.read_text(encoding="utf-8"))
+    cfg["resubmit_batch_size"] = value
+    ws.config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    with pytest.raises(endpoint.ConfigError):
+        endpoint.load_config(str(ws.config))
+
+
+# ---------------------------------------------------------------------------
+# Session B2 (A.18): --rebuild-from-hub
+# ---------------------------------------------------------------------------
+
+def _rebuild(ws: SimpleNamespace):
+    return endpoint.rebuild_from_hub(endpoint.load_config(str(ws.config)))
+
+
+def test_rebuild_refuses_a_state_that_already_holds_rows_before_any_hub_call(ws, hub_config, sent):
+    """A state with rows is never rebuilt over: the refusal comes before the hub is asked for its listing."""
+    (ws.root / "notes.md").write_bytes(b"hello")
+    assert run(ws, now=NOW) == 0
+    before = len(sent)
+
+    with pytest.raises(RuntimeError, match="already holds"):
+        _rebuild(ws)
+
+    assert len(sent) == before
+
+
+def test_rebuild_restores_a_file_row_from_the_hub_and_sends_no_upload(ws, hub_config, qdrant, sent):
+    """The restored row carries the hub's hash, and the rebuild itself sends only the listing read."""
+    key = str(ws.root / "notes.md")
+    (ws.root / "notes.md").write_bytes(b"hello")
+    qdrant.scroll.return_value = (hub_point(key, _md5(b"hello")), None)
+    before = len(sent)
+
+    counts = _rebuild(ws)
+
+    assert counts["restored"] == 1
+    assert [request.method for request in sent[before:]] == ["GET"]
+    row = state_rows(ws)[key]
+    assert (row["status"], row["content_hash"], row["chunk_count"]) == ("completed", _md5(b"hello"), 2)
+
+
+def test_after_a_file_rebuild_an_unchanged_file_is_not_submitted_again(ws, hub_config, qdrant):
+    """The placeholder stat makes the next run hash the file; equal to the hub's hash, it is not sent again."""
+    key = str(ws.root / "notes.md")
+    (ws.root / "notes.md").write_bytes(b"hello")
+    qdrant.scroll.return_value = (hub_point(key, _md5(b"hello")), None)
+    _rebuild(ws)
+
+    assert run(ws, now=NOW) == 0
+
+    assert intake_rows(hub_config) == []
+    assert state_rows(ws)[key]["size"] == len(b"hello")
+
+
+def test_after_a_file_rebuild_a_file_that_differs_from_the_hub_is_submitted(ws, hub_config, qdrant):
+    """A file whose bytes differ from the hub's hash is found changed on the next run, and is submitted."""
+    key = str(ws.root / "notes.md")
+    (ws.root / "notes.md").write_bytes(b"edited while the state was lost")
+    qdrant.scroll.return_value = (hub_point(key, _md5(b"hello")), None)
+    _rebuild(ws)
+
+    assert run(ws, now=NOW) == 0
+
+    assert len(upserts_for(hub_config, key)) == 1
+
+
+def test_a_file_missing_after_a_rebuild_is_marked_missing_by_the_next_run(ws, hub_config, qdrant):
+    """A restored file row with no file on disk is missing on the next run, and its grace period starts then."""
+    gone = str(ws.root / "gone.md")
+    (ws.root / "other.md").write_bytes(b"still here")
+    qdrant.scroll.return_value = (hub_point(gone, _md5(b"old")), None)
+    _rebuild(ws)
+
+    assert run(ws, now=NOW) == 0
+
+    assert state_rows(ws)[gone]["missing_since"] == NOW.isoformat(timespec="seconds")
+
+
+def test_the_command_line_refuses_a_rebuild_over_a_non_empty_state(ws, hub_config):
+    """main(run --rebuild-from-hub) on a state with rows logs the refusal and exits 1; nothing is restored."""
+    (ws.root / "notes.md").write_bytes(b"hello")
+    assert run(ws, now=NOW) == 0
+
+    code = endpoint.main(["run", "--config", str(ws.config), "--rebuild-from-hub"])
+
+    assert code == endpoint.EXIT_FAILED
+    assert len(state_rows(ws)) == 1
+

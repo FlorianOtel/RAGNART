@@ -2,7 +2,7 @@
 Tests for the hub-registry schema in ragnart/registry.py: migration 1, the seeds and the open modes.
 
 Covers:
-  - a fresh registry reaching user_version 2 with the six tables;
+  - a fresh registry reaching user_version 3 with the six tables;
   - the three seeded sources (secret_hash NULL, kind 'hub') and the reserved 'global' project row;
   - migration 2 on a registry at version 1: the rename, the new columns, the hub kinds, the
     case-insensitive unique index, and the same schema as a fresh registry;
@@ -25,7 +25,7 @@ from ragnart.registry import RegistryDB
 from ragnart.schema import SOURCE_ID_CLAUDE_LINUX_SHARED_NFS, SOURCE_ID_NAS, SOURCE_ID_OPENCODE_K11
 
 # The schema version that the newest registry migration produces.
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 # The six tables: five from migration 1, plus intake from migration 2.
 TABLES = {"sources", "projects", "project_tags", "project_references", "grants", "intake"}
@@ -99,12 +99,11 @@ def test_secret_column_is_renamed_to_secret_hash(tmp_path) -> None:
         db.close()
 
 
-def test_seeded_sources_are_hub_kind_and_hub_source_ids_lists_them(tmp_path) -> None:
+def test_seeded_sources_are_hub_kind(tmp_path) -> None:
     db = RegistryDB(str(tmp_path / "hub_registry.db"))
     try:
         kinds = {row["id"]: row["kind"] for row in db._conn.execute("SELECT id, kind FROM sources")}
         assert kinds == {source_id: "hub" for source_id in HUB_SOURCE_IDS}
-        assert db.hub_source_ids() == HUB_SOURCE_IDS
     finally:
         db.close()
 
@@ -142,7 +141,6 @@ def test_version_one_registry_upgrades_to_the_same_schema_as_a_fresh_one(tmp_pat
         assert _table_columns(upgraded, "intake") == _table_columns(fresh, "intake")
         assert _index_names(upgraded, "sources") == _index_names(fresh, "sources")
         assert _index_names(upgraded, "intake") == _index_names(fresh, "intake")
-        assert upgraded.hub_source_ids() == HUB_SOURCE_IDS
     finally:
         upgraded.close()
         fresh.close()
@@ -246,3 +244,50 @@ def test_read_only_open_reads_and_refuses_writes(tmp_path) -> None:
             reader.upsert_project("pid-x", "/nas/x", "X", "tester", SOURCE_ID_NAS)
     finally:
         reader.close()
+
+
+# ---------------------------------------------------------------------------
+# Migration 3: owner, tag and project_id on intake
+# ---------------------------------------------------------------------------
+
+INTAKE_B2_COLUMNS = ("owner", "tag", "project_id")
+
+
+def test_fresh_intake_has_the_three_nullable_b2_columns(tmp_path) -> None:
+    db = RegistryDB(str(tmp_path / "hub_registry.db"))
+    try:
+        columns = {column[1]: column for column in _table_columns(db, "intake")}
+        for name in INTAKE_B2_COLUMNS:
+            assert name in columns
+            # PRAGMA table_info: index 3 is notnull. Every new column is nullable.
+            assert columns[name][3] == 0
+    finally:
+        db.close()
+
+
+def test_migration_three_adds_the_columns_and_keeps_existing_rows(tmp_path, monkeypatch) -> None:
+    """A version-2 registry with an intake row upgrades in place: the row survives and the new columns are NULL."""
+    old_path = str(tmp_path / "old" / "hub_registry.db")
+    with monkeypatch.context() as patch:
+        # Open with migrations 1 and 2 only, so the registry is at version 2.
+        patch.setattr(registry_module, "_MIGRATIONS", registry_module._MIGRATIONS[:2])
+        old = RegistryDB(old_path)
+        # The version-2 table has no owner, tag or project_id, so the row is written with the old columns.
+        old._conn.execute(
+            "INSERT INTO intake (id, source_id, kind, key, status, created_at, updated_at) "
+            "VALUES ('row-1', 'MBP', 'delete', '/Users/fotel/MBP/a.md', 'received', "
+            "'2026-11-19T00:00:00', '2026-11-19T00:00:00')"
+        )
+        old._conn.commit()
+        old.close()
+
+    upgraded = RegistryDB(old_path)
+    try:
+        assert _user_version(upgraded) == LATEST_VERSION
+        names = {column[1] for column in _table_columns(upgraded, "intake")}
+        assert set(INTAKE_B2_COLUMNS) <= names
+        row = upgraded.intake_by_id("row-1")
+        assert row["key"] == "/Users/fotel/MBP/a.md"
+        assert [row[name] for name in INTAKE_B2_COLUMNS] == [None, None, None]
+    finally:
+        upgraded.close()

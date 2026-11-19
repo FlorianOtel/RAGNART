@@ -1,19 +1,19 @@
 """
-Tests for utils/rag_purge_rescan.py.
+Tests for utils/rag_purge_rescan.py, the read-only rescan report (session B2, A.16).
 
-Everything runs on a temporary SQLite file, real files in a temporary NFS root, and a
-fake Qdrant client that serves stored texts and records deletes. No Qdrant server is
-contacted, and the production queue is never opened.
+Everything runs on a temporary SQLite file, real files in a temporary NFS root, and a fake Qdrant client that
+serves stored texts. The fake has no delete method: a write would raise AttributeError, so the report cases
+fail loudly if the tool ever tries to change anything. No Qdrant server is contacted, and the production queue
+is never opened.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import sys
 import sqlite3
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -46,27 +46,24 @@ def rescan(monkeypatch):
 
 class FakeQdrant:
     """
-    Stand-in for the Qdrant client.
+    Stand-in for the read side of the Qdrant client.
 
-    Serves the parent texts given per source_path (one entry per point), and records
-    every delete with its wait flag and its source_id. Filters are read back by field name,
-    since an item filter names both source_id and source_path.
+    Serves the parent texts given per source_path (one entry per point). Filters are read back by field name,
+    since every item filter names both source_id and source_path. There is deliberately no delete method.
     """
 
     def __init__(self, texts_by_path: dict[str, list[str]] | None = None) -> None:
         self.texts_by_path = texts_by_path or {}
-        self.deleted: list[str] = []
-        self.delete_waits: list[bool] = []
-        self.deleted_source_ids: list[str] = []
+        self.filters: list = []
 
     @staticmethod
     def _condition(flt, key: str) -> str:
         """The value of the must-condition on one payload field."""
         return next(c.match.value for c in flt.must if c.key == key)
 
-    @classmethod
-    def _path_of(cls, flt) -> str:
-        return cls._condition(flt, FIELD_SOURCE_PATH)
+    def _path_of(self, flt) -> str:
+        self.filters.append(flt)
+        return self._condition(flt, FIELD_SOURCE_PATH)
 
     def count(self, collection_name, count_filter=None, exact=True):
         return SimpleNamespace(count=len(self.texts_by_path.get(self._path_of(count_filter), [])))
@@ -76,11 +73,6 @@ class FakeQdrant:
         texts = self.texts_by_path.get(self._path_of(scroll_filter), [])
         points = [SimpleNamespace(payload={FIELD_PARENT_TEXT: text}) for text in texts]
         return points, None  # a single page; next offset is None
-
-    def delete(self, collection_name, points_selector, wait=True):
-        self.deleted.append(self._condition(points_selector.filter, FIELD_SOURCE_PATH))
-        self.deleted_source_ids.append(self._condition(points_selector.filter, FIELD_SOURCE_ID))
-        self.delete_waits.append(wait)
 
 
 def _config(root: Path, max_text_bytes: int = 1000, max_chunks: int = 5000) -> dict:
@@ -148,28 +140,17 @@ def _admission(rescan, root: Path, **overrides):
     return rescan.admission_from_config(_config(root, **overrides))
 
 
-def test_pdf_below_gate_is_reparsed_on_apply_and_untouched_on_dry_run(rescan, db, nfs_root):
+def test_pdf_below_gate_is_listed_as_a_reparse_candidate_and_nothing_is_written(rescan, db, nfs_root):
     pdf = str(nfs_root / "paper.pdf")
     _add_completed(db, pdf)
     qdrant = FakeQdrant({pdf: [GARBAGE, GARBAGE]})
-    admission = _admission(rescan, nfs_root)
 
-    # Dry-run: classified, but nothing deleted and the row stays completed.
-    counts, candidates = rescan.scan_completed(db._db_path, qdrant, admission)
+    counts, candidates = rescan.scan_completed(db._db_path, qdrant, _admission(rescan, nfs_root))
+
     assert counts[rescan.REPARSE_GATE] == 1
     assert [c.action for c in candidates] == [rescan.ACTION_REPARSE]
-    assert qdrant.deleted == []
+    assert candidates[0].points == 2  # the fake holds two points for this path
     assert _row(db, pdf)["status"] == "completed"
-
-    # Apply: points deleted with wait=True, then the row is requeued with retries cleared.
-    rescan.apply_candidates(db, qdrant, candidates)
-    assert qdrant.deleted == [pdf]
-    assert qdrant.delete_waits == [True]
-    row = _row(db, pdf)
-    assert row["status"] == "pending"
-    assert row["retry_count"] == 0
-    assert row["skip_reason"] is None
-    assert row["error_msg"] is None
 
 
 def test_ragignore_excluded_row_is_left_alone(rescan, db, nfs_root):
@@ -181,7 +162,6 @@ def test_ragignore_excluded_row_is_left_alone(rescan, db, nfs_root):
 
     assert counts[rescan.SKIP_RAGIGNORE] == 1
     assert candidates == []
-    assert qdrant.deleted == []
     assert _row(db, secret)["status"] == "completed"
 
 
@@ -196,11 +176,10 @@ def test_csv_row_is_skipped_as_not_included_even_though_file_exists(rescan, db, 
     assert (nfs_root / "data.csv").exists()
     assert counts[rescan.SKIP_NOT_INCLUDED] == 1
     assert candidates == []
-    assert qdrant.deleted == []
     assert _row(db, csv_path)["status"] == "completed"
 
 
-def test_text_over_size_cap_is_deleted_and_marked_ignored_on_apply(rescan, db, nfs_root):
+def test_text_over_size_cap_is_listed_as_an_ignore_candidate(rescan, db, nfs_root):
     notes = str(nfs_root / "notes.txt")
     _add_completed(db, notes)
     qdrant = FakeQdrant({notes: ["stored chunk"]})
@@ -208,16 +187,12 @@ def test_text_over_size_cap_is_deleted_and_marked_ignored_on_apply(rescan, db, n
     counts, candidates = rescan.scan_completed(db._db_path, qdrant, _admission(rescan, nfs_root))
 
     assert counts[rescan.IGNORE_TOO_LARGE_BYTES] == 1
+    assert [c.action for c in candidates] == [rescan.ACTION_IGNORE]
     assert candidates[0].reason == "too large: 2000 bytes > 1000 byte cap"
-    rescan.apply_candidates(db, qdrant, candidates)
-    assert qdrant.deleted == [notes]
-    assert qdrant.delete_waits == [True]
-    row = _row(db, notes)
-    assert row["status"] == "ignored"
-    assert row["skip_reason"] == "too large: 2000 bytes > 1000 byte cap"
+    assert _row(db, notes)["status"] == "completed"
 
 
-def test_row_over_chunk_cap_is_marked_ignored(rescan, db, nfs_root):
+def test_row_over_chunk_cap_is_listed_as_an_ignore_candidate(rescan, db, nfs_root):
     clean = str(nfs_root / "clean.md")
     _add_completed(db, clean)
     # Three points against a cap of two.
@@ -242,33 +217,25 @@ def test_clean_text_row_is_kept(rescan, db, nfs_root):
     assert candidates == []
 
 
-def test_transient_rows_requeued_only_on_apply(rescan, db, nfs_root):
+def test_transient_rows_are_listed_and_not_reset(rescan, db, nfs_root):
     slow = str(nfs_root / "paper.pdf")
     server = str(nfs_root / "clean.md")
     binary = str(nfs_root / "notes.txt")
     _add_ignored(db, slow, "docling failed: timed out after 0ns")
     _add_ignored(db, server, "500 Internal Server Error from Qdrant")
     _add_ignored(db, binary, "binary content: 10% printable chars")
-    qdrant = FakeQdrant()
 
-    # Dry-run: the two transient rows are candidates, the binary row is not.
-    counts, candidates = rescan.scan_transient(db._db_path, qdrant)
+    # The two transient rows are listed, the binary row is not. Nothing is reset.
+    counts, candidates = rescan.scan_transient(db._db_path, FakeQdrant())
     assert counts[rescan.REQUEUE_TRANSIENT] == 2
     assert sorted(c.file_path for c in candidates) == sorted([slow, server])
-    assert _row(db, slow)["status"] == "ignored"
-
-    # Apply: both become pending with retries cleared, and no Qdrant delete is issued.
-    rescan.apply_candidates(db, qdrant, candidates)
+    assert all(c.action == rescan.ACTION_REQUEUE for c in candidates)
     for path in (slow, server):
-        row = _row(db, path)
-        assert row["status"] == "pending"
-        assert row["retry_count"] == 0
-        assert row["skip_reason"] is None
+        assert _row(db, path)["status"] == "ignored"
     assert _row(db, binary)["status"] == "ignored"
-    assert qdrant.deleted == []
 
 
-def test_main_dry_run_writes_nothing_and_never_opens_statedb(rescan, db, nfs_root, tmp_path, monkeypatch):
+def test_main_report_writes_nothing_and_never_opens_statedb(rescan, db, nfs_root, tmp_path, monkeypatch):
     pdf = str(nfs_root / "paper.pdf")
     _add_completed(db, pdf)
     qdrant = FakeQdrant({pdf: [GARBAGE]})
@@ -283,18 +250,33 @@ def test_main_dry_run_writes_nothing_and_never_opens_statedb(rescan, db, nfs_roo
     monkeypatch.setattr(rescan, "CONFIG_PATH", config_path)
     monkeypatch.setattr(rescan, "get_client", lambda url, timeout=60: qdrant)
 
-    def _forbidden(*args, **kwargs):
-        raise AssertionError("dry-run must not construct StateDB")
-
-    monkeypatch.setattr(rescan, "StateDB", _forbidden)
+    # The report imports no StateDB at all, so the queue cannot be opened for writing from here.
+    assert not hasattr(rescan, "StateDB")
 
     rescan.main(["--save", str(tsv_path)])
 
-    assert qdrant.deleted == []
     assert _row(db, pdf)["status"] == "completed"
     lines = tsv_path.read_text().splitlines()
     assert lines[0] == "action\tcategory\tpoints\tfile_path\treason"
     assert lines[1].startswith(f"{rescan.ACTION_REPARSE}\t{rescan.REPARSE_GATE}\t1\t{pdf}\t")
+
+
+def test_the_apply_flag_is_refused_as_a_usage_error(rescan, db, nfs_root, tmp_path, monkeypatch):
+    config_path = tmp_path / "ragnart.yaml"
+    config_path.write_text(yaml.safe_dump(_config(nfs_root)))
+    monkeypatch.setattr(rescan, "CONFIG_PATH", config_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        rescan.main(["--apply"])
+
+    assert exc_info.value.code == 2
+
+
+def test_the_tool_has_no_write_path_no_lock_and_no_delete(rescan):
+    """The report imports neither the single-writer lock nor the write helpers; a write cannot be reached."""
+    assert not hasattr(rescan, "acquire_or_exit")
+    assert not hasattr(rescan, "apply_candidates")
+    assert not hasattr(rescan, "delete_points")
 
 
 def test_text_like_predicate_is_the_shared_ingest_definition():
@@ -308,89 +290,18 @@ def test_text_like_predicate_is_the_shared_ingest_definition():
     assert ingest.fffd_ratio("ab�") == pytest.approx(1 / 3)
 
 
-# ---------------------------------------------------------------------------
-# Single-writer lock: --apply takes it, dry-run never does.
-# ---------------------------------------------------------------------------
-
-def _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch) -> None:
-    """Point main() at a temporary ragnart.yaml that carries rag.ingest_lock."""
-    config = _config(nfs_root)
-    config["db_base_path"] = str(tmp_path / "db")
-    config["rag"]["ingest_lock"] = str(tmp_path / "rag-ingest.lock")
-    config_path = tmp_path / "ragnart.yaml"
-    config_path.write_text(yaml.safe_dump(config))
-    monkeypatch.setattr(rescan, "CONFIG_PATH", config_path)
-
-
-def test_apply_with_lock_held_exits_with_constant_and_applies_nothing(
-    rescan, db, nfs_root, tmp_path, monkeypatch
-):
-    from ragnart.lock import EXIT_LOCK_HELD
-
+def test_reads_filter_names_source_id_and_source_path(rescan, db, nfs_root):
+    # Every read's filter is two conditions: the source_id derived from the key AND the source_path.
+    # A NAS path belongs to the nas source, so the filter carries 'nas' and the path.
     pdf = str(nfs_root / "paper.pdf")
     _add_completed(db, pdf)
     qdrant = FakeQdrant({pdf: [GARBAGE]})
-    _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch)
 
-    monkeypatch.setattr(rescan, "get_client", lambda url, timeout=60: qdrant)
+    rescan.scan_completed(db._db_path, qdrant, _admission(rescan, nfs_root))
 
-    # Simulate another writer holding the lock: the apply branch must stop right here.
-    def _held(lock_path):
-        sys.exit(EXIT_LOCK_HELD)
-
-    monkeypatch.setattr(rescan, "acquire_or_exit", _held)
-
-    # If the lock check were skipped, these would fire and fail the test.
-    def _forbidden(*args, **kwargs):
-        raise AssertionError("lock held: must not reach StateDB or apply_candidates")
-
-    monkeypatch.setattr(rescan, "StateDB", _forbidden)
-    monkeypatch.setattr(rescan, "apply_candidates", _forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        rescan.main(["--apply"])
-
-    assert exc.value.code == EXIT_LOCK_HELD
-    assert qdrant.deleted == []
-    assert _row(db, pdf)["status"] == "completed"
-
-
-def test_dry_run_never_touches_the_lock(rescan, db, nfs_root, tmp_path, monkeypatch):
-    pdf = str(nfs_root / "paper.pdf")
-    _add_completed(db, pdf)
-    qdrant = FakeQdrant({pdf: [GARBAGE]})
-    _write_config_with_lock(rescan, tmp_path, nfs_root, monkeypatch)
-
-    monkeypatch.setattr(rescan, "get_client", lambda url, timeout=60: qdrant)
-    lock_mock = MagicMock(name="acquire_or_exit")
-    monkeypatch.setattr(rescan, "acquire_or_exit", lock_mock)
-
-    def _forbidden(*args, **kwargs):
-        raise AssertionError("dry-run must not construct StateDB")
-
-    monkeypatch.setattr(rescan, "StateDB", _forbidden)
-
-    rescan.main([])
-
-    lock_mock.assert_not_called()
-    assert qdrant.deleted == []
-    assert _row(db, pdf)["status"] == "completed"
-
-
-def test_item_filter_names_source_id_and_source_path_on_the_read_and_the_delete(rescan, db, nfs_root):
-    # Every item filter is two conditions: the source_id derived from the key AND the source_path.
-    # A NAS path belongs to the nas source, so both the filter and the recorded delete carry 'nas'.
-    pdf = str(nfs_root / "paper.pdf")
-    _add_completed(db, pdf)
-    qdrant = FakeQdrant({pdf: [GARBAGE]})
-    _, candidates = rescan.scan_completed(db._db_path, qdrant, _admission(rescan, nfs_root))
-
-    rescan.apply_candidates(db, qdrant, candidates)
-
-    assert qdrant.deleted == [pdf]
-    assert qdrant.deleted_source_ids == ["nas"]
-    flt = rescan._source_filter(pdf)
-    assert [(c.key, c.match.value) for c in flt.must] == [
-        (FIELD_SOURCE_ID, "nas"),
-        (FIELD_SOURCE_PATH, pdf),
-    ]
+    assert qdrant.filters
+    for flt in qdrant.filters:
+        assert [(c.key, c.match.value) for c in flt.must] == [
+            (FIELD_SOURCE_ID, "nas"),
+            (FIELD_SOURCE_PATH, pdf),
+        ]

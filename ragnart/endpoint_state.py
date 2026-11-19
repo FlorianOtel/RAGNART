@@ -124,6 +124,10 @@ class EndpointState:
         cursor = self._conn.execute("SELECT * FROM items WHERE source_id = ?", (source_id,))
         return {row["key"]: dict(row) for row in cursor.fetchall()}
 
+    def count_rows(self) -> int:
+        """The number of item rows across every source. A rebuild from the hub is allowed only when this is 0."""
+        return self._conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+
     # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------

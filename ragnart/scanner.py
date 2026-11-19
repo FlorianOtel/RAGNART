@@ -22,6 +22,7 @@ import os
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .hashing import hash_file
 from .opencode_client import get_json, load_password
@@ -397,6 +398,93 @@ def claude_jsonl_key(path: Path) -> str | None:
     return f"claude-session://{path.stem}"
 
 
+class ClaudeSessionWinners(NamedTuple):
+    """
+    The result of walking the claude_chats roots (see collect_claude_session_winners()).
+
+    best:             key -> (mtime, filepath, owner) of the winning copy of each session.
+    walked_roots:     (root, transcripts seen under it) for every root that could be walked.
+    unreachable_roots: roots that are not a directory (or have no path). They were not walked.
+    """
+
+    best: dict[str, tuple[float, str, str]]
+    walked_roots: list[tuple[str, int]]
+    unreachable_roots: list[str]
+
+
+def collect_claude_session_winners(
+    roots_cfg: list[dict],
+    user_filter: str | None = None,
+) -> ClaudeSessionWinners:
+    """
+    Walk the claude_chats roots and pick the winning copy of each session key. Nothing is written.
+
+    This is the walk shared by scan_claude_chats() (which then writes the queue) and by the NAS
+    rebuild (ragnart/sync_reconcile.py), which reads the same winners without writing. Both must
+    pick the same copy, so the rule lives here once.
+
+    Rules:
+      - a root that is not a directory is reported in unreachable_roots and not walked;
+      - a real file is counted once, even when followlinks reaches it through two paths;
+      - a workflow journal has no key and is skipped before the dedup;
+      - all copies of one key compete: the newest mtime wins, and an exact tie goes to the greatest
+        path (comparing (mtime, path) tuples makes the choice deterministic).
+
+    Args:
+        roots_cfg:   config["claude_chats"]["roots"], a list of {path, owner} dicts.
+        user_filter: If set, only roots whose owner matches are walked.
+    """
+    visited_real_files: set[str] = set()
+    best_by_key: dict[str, tuple[float, str, str]] = {}
+    walked_roots: list[tuple[str, int]] = []
+    unreachable_roots: list[str] = []
+
+    for entry in roots_cfg:
+        root = entry.get("path", "")
+        owner = entry.get("owner", "")
+        if user_filter and owner != user_filter:
+            continue
+        if not root or not os.path.isdir(root):
+            logger.warning("claude_chats root not accessible, skipping: %s", root)
+            unreachable_roots.append(root)
+            continue
+
+        root_count = 0
+        logger.info("Scanning claude chats: %s  (owner=%s)", root, owner)
+
+        for dirpath, _dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
+            for filename in filenames:
+                if not filename.endswith(".jsonl"):
+                    continue
+                filepath = os.path.join(dirpath, filename)
+                # The queue key is the session identity. None means the file is excluded
+                # (a workflow journal): skip it before the dedup, so it never reaches
+                # existing_paths and the next sync removes any row it had.
+                key = claude_jsonl_key(Path(filepath))
+                if key is None:
+                    continue
+                real_filepath = os.path.realpath(filepath)
+                if real_filepath in visited_real_files:
+                    continue
+                visited_real_files.add(real_filepath)
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+                root_count += 1
+
+                # Newest mtime wins. Comparing (mtime, path) tuples breaks an exact tie by
+                # the greatest path, so the choice is deterministic.
+                best = best_by_key.get(key)
+                if best is None or (mtime, filepath) > (best[0], best[1]):
+                    best_by_key[key] = (mtime, filepath, owner)
+
+        logger.info("  → %d transcript(s) found in %s", root_count, root)
+        walked_roots.append((root, root_count))
+
+    return ClaudeSessionWinners(best_by_key, walked_roots, unreachable_roots)
+
+
 def scan_claude_chats(
     state_db: StateDB,
     config: dict,
@@ -435,62 +523,15 @@ def scan_claude_chats(
         logger.info("No claude_chats roots configured — skipping chat scan")
         return {"scanned": 0, "existing_paths": set(), "skipped_roots": []}
 
-    skipped_roots: list[str] = []
-    visited_real_files: set[str] = set()
-
     # Pass 1: walk every root and keep the best copy of each key. Nothing is written
-    # yet, because two copies of one key may sit under different roots.
-    # best_by_key maps key -> (mtime, filepath, owner) of the current winner.
-    best_by_key: dict[str, tuple[float, str, str]] = {}
-    # (root, transcripts seen under it) for the empty-root check in pass 2.
-    walked_roots: list[tuple[str, int]] = []
-
-    for entry in roots_cfg:
-        root = entry.get("path", "")
-        owner = entry.get("owner", "")
-        if user_filter and owner != user_filter:
-            continue
-        if not root or not os.path.isdir(root):
-            logger.warning("claude_chats root not accessible, skipping: %s", root)
-            skipped_roots.append(root)
-            continue
-
-        root_count = 0
-        logger.info("Scanning claude chats: %s  (owner=%s)", root, owner)
-
-        for dirpath, _dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
-            for filename in filenames:
-                if not filename.endswith(".jsonl"):
-                    continue
-                filepath = os.path.join(dirpath, filename)
-                # The queue key is the session identity. None means the file is excluded
-                # (a workflow journal): skip it before the dedup, so it never reaches
-                # existing_paths and the next sync removes any row it had.
-                key = claude_jsonl_key(Path(filepath))
-                if key is None:
-                    continue
-                real_filepath = os.path.realpath(filepath)
-                if real_filepath in visited_real_files:
-                    continue
-                visited_real_files.add(real_filepath)
-                try:
-                    mtime = os.path.getmtime(filepath)
-                except OSError:
-                    continue
-                root_count += 1
-
-                # Newest mtime wins. Comparing (mtime, path) tuples breaks an exact tie by
-                # the greatest path, so the choice is deterministic.
-                best = best_by_key.get(key)
-                if best is None or (mtime, filepath) > (best[0], best[1]):
-                    best_by_key[key] = (mtime, filepath, owner)
-
-        logger.info("  → %d transcript(s) found in %s", root_count, root)
-        walked_roots.append((root, root_count))
+    # yet, because two copies of one key may sit under different roots. The walk is
+    # shared with the NAS rebuild (collect_claude_session_winners).
+    winners = collect_claude_session_winners(roots_cfg, user_filter)
+    skipped_roots: list[str] = list(winners.unreachable_roots)
 
     # Pass 2: one write per key, from its winning copy.
     existing_paths: set[str] = set()
-    for key, (mtime, filepath, owner) in best_by_key.items():
+    for key, (mtime, filepath, owner) in winners.best.items():
         state_db.discover_or_update(
             key,
             owner,
@@ -506,7 +547,7 @@ def scan_claude_chats(
     # scan leaves it. A root that yielded no transcripts while the queue still holds rows
     # whose origin_path lies under it is treated as unreachable, as scan_nfs_roots does
     # for NFS roots. Its rows must not be deleted. The check is read-only.
-    for root, root_count in walked_roots:
+    for root, root_count in winners.walked_roots:
         if root_count == 0 and state_db.count_origin_with_prefix(os.path.join(root, "")) > 0:
             logger.warning(
                 "claude_chats root %s yielded 0 transcripts but the queue has rows under it; "
@@ -516,7 +557,7 @@ def scan_claude_chats(
             skipped_roots.append(root)
 
     return {
-        "scanned": len(best_by_key),
+        "scanned": len(winners.best),
         "existing_paths": existing_paths,
         "skipped_roots": skipped_roots,
     }

@@ -14,8 +14,9 @@ What is removed, and what is kept:
     separate decision and this tool never does it.
 
 The source is looked up case-insensitively (RegistryDB.source_by_id), and every filter uses the
-stored id. A hub source (kind 'hub': nas, claude-linux-shared-nfs, opencode-k11) is refused unless
---allow-hub-source is given, so a hub's points cannot be removed by accident.
+stored id. A source that holds ragnart projects (SOURCES_HOLDING_PROJECTS in ragnart/schema.py: nas) is
+refused unless --allow-projects-source is given, so its projects' points cannot be removed by accident.
+The registry kind is not part of this rule: a source of any kind that holds no projects is removable.
 
 Modes (the dry-run is the default):
 
@@ -30,10 +31,11 @@ Modes (the dry-run is the default):
 Usage (run from project root):
     python utils/rag_source_remove.py --source MBP                  # dry-run (default)
     python utils/rag_source_remove.py --source MBP --apply
-    python utils/rag_source_remove.py --source nas --allow-hub-source
+    python utils/rag_source_remove.py --source nas --allow-projects-source
 
 Exit codes: 0 when the dry-run listed, or the apply removed. 1 when refused: the source is not
-registered, the registry file is absent, or a hub source was named without --allow-hub-source.
+registered, the registry file is absent, or a source holding projects was named without
+--allow-projects-source.
 75 when --apply finds the ingestion lock held (taken by acquire_or_exit, which exits).
 """
 
@@ -56,15 +58,12 @@ from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 from ragnart.ingest_api import _scroll_source_points, group_points_by_key  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.registry import RegistryDB  # noqa: E402
-from ragnart.schema import FIELD_SOURCE_ID  # noqa: E402
+from ragnart.schema import FIELD_SOURCE_ID, SOURCES_HOLDING_PROJECTS  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "ragnart.yaml"
-
-# The registry kind of the hub's own sources. Only these need --allow-hub-source.
-HUB_KIND = "hub"
 
 
 # ---------------------------------------------------------------------------
@@ -91,14 +90,19 @@ def find_source(registry_path: str, source_id: str) -> dict | None:
         registry.close()
 
 
-def refusal_for(source: dict | None, source_name: str, allow_hub: bool) -> str | None:
-    """The reason the removal must stop, or None. Used by both the dry-run and the apply."""
+def refusal_for(source: dict | None, source_name: str, allow_projects: bool) -> str | None:
+    """
+    The reason the removal must stop, or None. Used by both the dry-run and the apply.
+
+    A source whose stored id is in SOURCES_HOLDING_PROJECTS holds ragnart projects, so its points include
+    project content. It is refused unless allow_projects is set. The registry kind does not decide this.
+    """
     if source is None:
         return f"no source is registered as {source_name!r}. Nothing was read or removed."
-    if source["kind"] == HUB_KIND and not allow_hub:
+    if source["id"] in SOURCES_HOLDING_PROJECTS and not allow_projects:
         return (
-            f"{source['id']!r} is a hub source (kind 'hub'). Its points are the hub's own content. "
-            "Pass --allow-hub-source to remove it anyway. Nothing was read or removed."
+            f"{source['id']!r} holds ragnart projects (SOURCES_HOLDING_PROJECTS). Its points include "
+            "project content. Pass --allow-projects-source to remove it anyway. Nothing was read or removed."
         )
     return None
 
@@ -143,14 +147,14 @@ def _print_items(plan: dict) -> None:
 # Dry-run and apply
 # ---------------------------------------------------------------------------
 
-def run_dry_run(client, registry_path: str, source_name: str, allow_hub: bool) -> int:
+def run_dry_run(client, registry_path: str, source_name: str, allow_projects: bool) -> int:
     """List what --apply would remove. Writes nothing and takes no lock. Returns the exit code."""
     print("=== rag_source_remove (DRY-RUN) ===")
     if not Path(registry_path).exists():
         print(f"REFUSED: the hub registry {registry_path} is absent. Nothing was read or removed.")
         return 1
     source = find_source(registry_path, source_name)
-    reason = refusal_for(source, source_name, allow_hub)
+    reason = refusal_for(source, source_name, allow_projects)
     if reason:
         print(f"REFUSED: {reason}")
         return 1
@@ -167,7 +171,7 @@ def run_dry_run(client, registry_path: str, source_name: str, allow_hub: bool) -
     return 0
 
 
-def run_apply(client, registry_path: str, source_name: str, allow_hub: bool) -> int:
+def run_apply(client, registry_path: str, source_name: str, allow_projects: bool) -> int:
     """
     Delete one source's points, intake rows and spool files. The caller already holds the lock.
 
@@ -181,7 +185,7 @@ def run_apply(client, registry_path: str, source_name: str, allow_hub: bool) -> 
     registry = RegistryDB(registry_path)
     try:
         source = registry.source_by_id(source_name)
-        reason = refusal_for(source, source_name, allow_hub)
+        reason = refusal_for(source, source_name, allow_projects)
         if reason:
             print(f"REFUSED: {reason}")
             return 1
@@ -222,9 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--source", required=True, help="The source id, e.g. MBP. Case is ignored for the lookup.")
     parser.add_argument(
-        "--allow-hub-source",
+        "--allow-projects-source",
         action="store_true",
-        help="Permit removing a hub source (kind 'hub'). Without it, a hub source is refused.",
+        help="Permit removing a source that holds ragnart projects (SOURCES_HOLDING_PROJECTS). "
+             "Without it, such a source is refused.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="List what would be removed (the default).")
@@ -239,11 +244,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.apply:
         # The dry-run takes no lock and writes nothing: the registry is opened read-only.
-        return run_dry_run(client, registry_path, args.source, args.allow_hub_source)
+        return run_dry_run(client, registry_path, args.source, args.allow_projects_source)
 
     # Apply: take the single-writer ingestion lock before the registry or Qdrant is written.
     acquire_or_exit(lock_path_from_config(config))
-    return run_apply(client, registry_path, args.source, args.allow_hub_source)
+    return run_apply(client, registry_path, args.source, args.allow_projects_source)
 
 
 if __name__ == "__main__":

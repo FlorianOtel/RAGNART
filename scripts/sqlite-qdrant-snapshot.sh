@@ -26,28 +26,31 @@
 # Env:   RAGNART_DATA_ROOT  (default /mnt/nfs/__Backups/RAGNART--databases)
 set -euo pipefail
 
-# --- Single-writer guard: this script must run under the ingestion lock ---------------
-# Why: the SQLite WAL checkpoint, the Qdrant snapshot and the copy of rag_state.db
-# are one logical point-in-time pair. No other writer (sync, ingest daemon, purge,
-# reset) may change the index between those steps, so the whole body runs under the
-# single ingestion lock (ragnart/lock.py; path = rag.ingest_lock in ragnart.yaml).
+# --- Single-writer guard: this script must run under BOTH locks -----------------------
+# Why: the SQLite WAL checkpoints, the Qdrant snapshot and the copies of rag_state.db and hub_registry.db
+# are one logical point-in-time pair. The index writers (the intake worker and hub maintenance) hold the
+# index lock (rag.ingest_lock in ragnart.yaml), and the NAS ingestion run holds the NAS lock
+# (rag.nas_ingest.lock). The whole body runs with both held, so neither writer can change the state between
+# these steps.
 #
-# How: when the run script (scripts/ragnart-ingest-run.sh) already holds the lock, the
-# `held` check succeeds and the body runs. When this script is started standalone,
-# the check fails, so `exec` replaces this process with the `run` wrapper. The wrapper
-# takes the lock and re-invokes this script, and the second invocation finds the lock
-# held by its ancestor and runs the body.
+# How: the body runs only when this process is under both lock holders. Otherwise `exec` replaces this
+# process with a `run --which index` wrapper. That wrapper takes the index lock and runs a `run --which nas`
+# wrapper, which takes the NAS lock and re-invokes this script. The index lock is taken first, then the NAS
+# lock. Each take fails fast with exit 75 (EXIT_LOCK_HELD) when another writer holds it, and nothing is written.
 #
-# The project directory is resolved from this file's own location, so the guard works
-# both when called by the run script and when an operator runs it directly. The venv
-# python is named explicitly so that a bare python3 without pyyaml cannot be used.
+# When the NAS run script (scripts/ragnart-ingest-run.sh) already holds the NAS lock, the nested
+# `run --which nas` finds that lock held by its ancestor, so it takes nothing new and the body runs under it.
+#
+# The project directory is resolved from this file's own location, so the guard works both when called by the
+# run script and when an operator runs it directly. The venv python is named explicitly so that a bare python3
+# without pyyaml cannot be used.
 SELF="$(readlink -f "$0")"
 PROJECT_DIR="$(dirname "$SELF")/.."
 VENV_PY="$HOME/Gin-AI/.Gin-AI-python-3.12/bin/python"
 # `ragnart` is importable only from the project root, so run the guard from there.
 cd "$PROJECT_DIR"
-if ! "$VENV_PY" -m ragnart.lock held; then
-    exec "$VENV_PY" -m ragnart.lock run -- bash "$SELF" "$@"
+if ! { "$VENV_PY" -m ragnart.lock held --which index && "$VENV_PY" -m ragnart.lock held --which nas; }; then
+    exec "$VENV_PY" -m ragnart.lock run --which index -- "$VENV_PY" -m ragnart.lock run --which nas -- bash "$SELF" "$@"
 fi
 
 QDRANT_URL="http://192.168.1.93:6333"
@@ -82,8 +85,8 @@ for stale in ${STALE_NAMES}; do
 done
 
 # --- Safety net 2: remove partial downloads left by an earlier crashed run -----------
-# Only one snapshot run can be active at a time (it runs inside the single
-# ragnart-ingest.service oneshot), so any *.tmp here is stale.
+# Only one snapshot can be active at a time: it takes both locks, so a second one exits 75
+# before it gets here. Any *.tmp here is therefore stale.
 find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.tmp" -print -delete \
     | sed "s|^|$(date -u +%Y-%m-%dT%H:%M:%SZ)  Deleted stale partial download: |"
 
@@ -158,7 +161,7 @@ log "SQLite copy complete ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "${SQLITE
 
 # The hub registry travels with the same pair, under the same timestamp. Its WAL is folded
 # into the main file first, so the copy alone holds every committed change (the -wal file is
-# not copied). This script holds the ingestion lock, so nothing writes to it during the copy.
+# not copied). This script holds both locks, so nothing writes to it during the copy.
 if [[ -e "${REGISTRY_DB}" ]]; then
     log "Checkpointing hub_registry WAL..."
     sqlite3 "${REGISTRY_DB}" "PRAGMA wal_checkpoint(TRUNCATE);"

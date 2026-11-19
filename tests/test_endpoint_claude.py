@@ -34,7 +34,9 @@ import ragnart.endpoint as endpoint
 import ragnart.ingest_api as ingest_api
 from ragnart.cli import registry_db_path
 from ragnart.endpoint_client import HubClient
+from ragnart.chat_render import _parse_claude_chat
 from ragnart.endpoint_state import EndpointState
+from ragnart.hashing import hash_text
 from ragnart.registry import RegistryDB
 
 CLAUDE_SOURCE = "claude-MBP"
@@ -506,3 +508,77 @@ def test_dry_run_writes_nothing(ws, hub_config, sent, caplog):
     assert not ws.state_db.exists()
     assert {request.method for request in sent} == {"GET"}, "a dry run only reads"
     assert f"would upsert {key_of(uuid)}" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Session B2 (A.18): --rebuild-from-hub for sessions
+# ---------------------------------------------------------------------------
+
+def _rendered_hash(path: Path) -> str:
+    """The md5 of a transcript's rendered text, the hash the hub keeps for a session it ingested."""
+    text, _metadata, _launch_dir = _parse_claude_chat(path)
+    return hash_text(text)
+
+
+def _listed(key: str, content_hash: str) -> list[SimpleNamespace]:
+    """Two Qdrant points of one session, as the hub lists it."""
+    payload = {"source_path": key, "content_hash": content_hash, "pipeline_version": "p1"}
+    return [SimpleNamespace(payload=payload), SimpleNamespace(payload=payload)]
+
+
+def _rebuild(ws: SimpleNamespace):
+    return endpoint.rebuild_from_hub(endpoint.load_config(str(ws.config)))
+
+
+def test_rebuild_restores_a_session_whose_rendered_text_matches_and_sends_nothing(ws, hub_config, qdrant, sent):
+    """A session on disk whose rendered md5 equals the hub's hash is restored; the rebuild sends only the listing read."""
+    uuid = "22222222-aaaa-4bbb-8ccc-000000000021"
+    path = write_transcript(ws.root / "proj" / f"{uuid}.jsonl", uuid, "rebuild this")
+    key = key_of(uuid)
+    qdrant.scroll.return_value = (_listed(key, _rendered_hash(path)), None)
+    before = len(sent)
+
+    counts = _rebuild(ws)
+
+    assert counts["restored"] == 1
+    assert [request.method for request in sent[before:]] == ["GET"]
+    row = state_rows(ws)[key]
+    assert (row["status"], row["chunk_count"]) == ("completed", 2)
+
+    # The next run re-renders the session (its placeholder stat never matches), finds the same hash, and sends nothing.
+    assert run(ws, now=NOW) == 0
+    assert intake_rows(hub_config) == []
+
+
+def test_rebuild_leaves_a_session_whose_text_changed_without_a_row_so_it_is_submitted_again(ws, hub_config, qdrant):
+    """A session whose rendered text no longer matches the hub's hash gets no row, and the next run submits it as new."""
+    uuid = "22222222-aaaa-4bbb-8ccc-000000000022"
+    write_transcript(ws.root / "proj" / f"{uuid}.jsonl", uuid, "changed since the hub's ingest")
+    key = key_of(uuid)
+    qdrant.scroll.return_value = (_listed(key, "hash-of-an-older-text"), None)
+
+    counts = _rebuild(ws)
+
+    assert counts["session_resubmit"] == 1
+    assert state_rows(ws) == {}
+    assert run(ws, now=NOW) == 0
+    assert len(upserts_for(hub_config, key)) == 1
+
+
+def test_rebuild_restores_a_session_not_on_disk_so_its_grace_period_runs(ws, hub_config, qdrant):
+    """A session with no transcript is restored completed, and the next run marks it missing (grace starts then)."""
+    keep_uuid = "22222222-aaaa-4bbb-8ccc-000000000023"
+    gone_uuid = "22222222-aaaa-4bbb-8ccc-000000000024"
+    keep_path = write_transcript(ws.root / "proj" / f"{keep_uuid}.jsonl", keep_uuid, "stays")
+    keep_key, gone_key = key_of(keep_uuid), key_of(gone_uuid)
+    # One listing holds both sessions. The gone one is listed, but has no transcript on disk.
+    qdrant.scroll.return_value = (
+        _listed(keep_key, _rendered_hash(keep_path)) + _listed(gone_key, "any"), None,
+    )
+    counts = _rebuild(ws)
+    assert (counts["restored"], counts["session_gone"]) == (2, 1)
+
+    assert run(ws, now=NOW) == 0
+
+    assert state_rows(ws)[gone_key]["missing_since"] == NOW.isoformat(timespec="seconds")
+

@@ -222,3 +222,185 @@ def test_stdout_and_stderr_never_contain_the_secret(tool, env, capsys):
     assert secret not in captured.err
     assert f"secret written to {secret_file}" in captured.out
     assert "id=MBP kind=endpoint connector=filesystem owner=florian" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Secret rotation (--rotate-secret)
+# ---------------------------------------------------------------------------
+
+def _seed_endpoint(env, source_id: str = "MBP", connector: str = "filesystem", owner: str = "florian") -> str:
+    """Register an endpoint source directly in the registry, with a known hash. Returns the hash."""
+    known_hash = "e" * 64
+    registry = _registry(env)
+    try:
+        registry.register_source(source_id, connector, "endpoint", owner, known_hash)
+    finally:
+        registry.close()
+    return known_hash
+
+
+def _stored_hash(env, source_id: str):
+    registry = _registry(env)
+    try:
+        row = registry.source_by_id(source_id)
+    finally:
+        registry.close()
+    return None if row is None else row["secret_hash"]
+
+
+def _rotate_args(source_id: str, secret_out: Path | None = None) -> list[str]:
+    args = ["--rotate-secret", "--id", source_id]
+    if secret_out is not None:
+        args += ["--apply", "--secret-out", str(secret_out)]
+    return args
+
+
+def test_rotate_dry_run_writes_nothing_and_takes_no_lock(tool, env, capsys):
+    """The rotation dry-run reports the source, and leaves the stored hash, the files and the lock alone."""
+    old_hash = _seed_endpoint(env)
+
+    rc = tool.main(_rotate_args("MBP"))
+
+    assert rc == 0
+    assert "would rotate the secret of: id=MBP kind=endpoint connector=filesystem owner=florian" in capsys.readouterr().out
+    assert _stored_hash(env, "MBP") == old_hash
+    assert list((env["tmp"] / "secrets").iterdir()) == []
+    assert env["lock_calls"] == []
+
+
+def test_rotate_refuses_an_unknown_id_in_dry_run_and_apply(tool, env):
+    """A source that is not registered cannot be rotated. Neither mode writes a secret file."""
+    secret_file = env["tmp"] / "secrets" / "ghost"
+
+    assert tool.main(_rotate_args("ghost")) == 1
+    assert tool.main(_rotate_args("ghost", secret_file)) == 1
+    assert not secret_file.exists()
+    assert env["lock_calls"] == [str(env["tmp"] / "rag-ingest.lock")]
+
+
+def test_rotate_apply_replaces_the_hash_with_the_hash_of_the_new_file(tool, env):
+    """After --apply the stored hash is the SHA-256 of the new file's content, and the old hash is gone."""
+    old_hash = _seed_endpoint(env)
+    secret_file = env["tmp"] / "secrets" / "MBP"
+
+    rc = tool.main(_rotate_args("MBP", secret_file))
+
+    assert rc == 0
+    secret = secret_file.read_text(encoding="utf-8")
+    assert _stored_hash(env, "MBP") == hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    assert _stored_hash(env, "MBP") != old_hash
+    assert len(env["lock_calls"]) == 1
+
+
+def test_rotate_writes_the_new_secret_with_mode_0600(tool, env):
+    """The rotated secret file is created with owner-only permissions."""
+    _seed_endpoint(env)
+    secret_file = env["tmp"] / "secrets" / "MBP"
+
+    tool.main(_rotate_args("MBP", secret_file))
+
+    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+
+
+def test_rotate_keeps_the_kind_connector_and_owner_of_a_hub_source(tool, env, capsys):
+    """Rotating works on a hub source (here the seeded nas row) and changes nothing but its hash."""
+    secret_file = env["tmp"] / "secrets" / "nas"
+    registry = _registry(env)
+    try:
+        before = registry.source_by_id("nas")
+    finally:
+        registry.close()
+
+    rc = tool.main(_rotate_args("nas", secret_file))
+
+    assert rc == 0
+    registry = _registry(env)
+    try:
+        after = registry.source_by_id("nas")
+    finally:
+        registry.close()
+    assert (after["kind"], after["connector"], after["owner"]) == (before["kind"], before["connector"], before["owner"])
+    assert after["secret_hash"] is not None
+    assert "rotated: id=nas kind=hub connector=filesystem owner=None" in capsys.readouterr().out
+
+
+def test_rotate_matches_the_id_in_any_letter_case(tool, env):
+    """Rotating 'mbp' finds the source registered as 'MBP', and keeps the stored case."""
+    _seed_endpoint(env, "MBP")
+    secret_file = env["tmp"] / "secrets" / "mbp"
+
+    assert tool.main(_rotate_args("mbp", secret_file)) == 0
+
+    secret = secret_file.read_text(encoding="utf-8")
+    registry = _registry(env)
+    try:
+        row = registry.source_by_id("MBP")
+    finally:
+        registry.close()
+    assert row["id"] == "MBP"
+    assert row["secret_hash"] == hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def test_rotate_refuses_an_existing_secret_out_and_keeps_the_hash(tool, env):
+    """An existing --secret-out is refused, its content is kept, and the stored hash does not change."""
+    old_hash = _seed_endpoint(env)
+    secret_file = env["tmp"] / "secrets" / "MBP"
+    secret_file.write_text("old-content", encoding="utf-8")
+
+    rc = tool.main(_rotate_args("MBP", secret_file))
+
+    assert rc == 1
+    assert secret_file.read_text(encoding="utf-8") == "old-content"
+    assert _stored_hash(env, "MBP") == old_hash
+
+
+def test_rotate_removes_the_new_file_when_the_hash_is_not_replaced(tool, env, monkeypatch):
+    """If the hash cannot be replaced after the file is written, the new file is removed and the refusal is reported."""
+    old_hash = _seed_endpoint(env)
+    monkeypatch.setattr(tool.RegistryDB, "set_secret_hash", lambda self, source_id, secret_hash: False)
+    secret_file = env["tmp"] / "secrets" / "MBP"
+
+    rc = tool.main(_rotate_args("MBP", secret_file))
+
+    assert rc == 1
+    assert not secret_file.exists()
+    assert _stored_hash(env, "MBP") == old_hash
+
+
+@pytest.mark.parametrize("extra", [["--connector", "filesystem"], ["--owner", "eva"]])
+def test_rotate_with_connector_or_owner_is_a_usage_error(tool, env, extra):
+    """A rotation keeps the source's connector and owner, so passing either is a usage error."""
+    with pytest.raises(SystemExit) as exc:
+        tool.main(["--rotate-secret", "--id", "MBP", *extra])
+    assert exc.value.code == 2
+    assert env["lock_calls"] == []
+
+
+def test_rotate_apply_without_secret_out_is_a_usage_error(tool, env):
+    """--rotate-secret --apply needs --secret-out, like the register apply."""
+    with pytest.raises(SystemExit) as exc:
+        tool.main(["--rotate-secret", "--id", "MBP", "--apply"])
+    assert exc.value.code == 2
+    assert env["lock_calls"] == []
+
+
+def test_register_without_connector_or_owner_is_a_usage_error(tool, env):
+    """Registering still needs --connector and --owner, now checked after parsing."""
+    with pytest.raises(SystemExit) as exc:
+        tool.main(["--id", "MBP", "--owner", "florian"])
+    assert exc.value.code == 2
+
+
+def test_rotate_stdout_and_stderr_never_contain_the_secret(tool, env, capsys):
+    """The rotated secret reaches only its file: neither output stream carries it."""
+    _seed_endpoint(env)
+    secret_file = env["tmp"] / "secrets" / "MBP"
+
+    rc = tool.main(_rotate_args("MBP", secret_file))
+
+    captured = capsys.readouterr()
+    secret = secret_file.read_text(encoding="utf-8")
+    assert rc == 0
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert f"secret written to {secret_file}" in captured.out

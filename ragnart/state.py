@@ -134,8 +134,14 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
     # The drop is NOT done here: a migration runs automatically on open, and the drop must
     # follow a verified copy. It is done by utils/rag_registry_migrate.py --apply
     # --drop-legacy-tables, which also sets user_version 4. This entry carries no statements;
-    # it exists so the next migration is numbered 5.
+    # it is the reserved slot for that drop.
     (4, []),
+    # Version 5 (session B2): the hub request a row is waiting on. A row in 'processing' has
+    # been submitted to the ingestion API, and request_id names that request. The status poll
+    # (ragnart/sync_poll.py) asks the hub about it. NULL for every row that has no request.
+    (5, [
+        "ALTER TABLE ingestion_queue ADD COLUMN request_id TEXT",
+    ]),
 ]
 
 
@@ -193,36 +199,6 @@ class StateDB:
             logger.info("Applied ingestion-queue schema migration %d", version)
 
     # ------------------------------------------------------------------
-    # Startup
-
-    def crash_recovery(self) -> list[str]:
-        """
-        Reset any rows stuck in 'processing' back to 'pending'.
-
-        Call once on daemon startup. Files left in 'processing' after a crash
-        or OOM kill are re-queued rather than staying stuck indefinitely.
-
-        Returns the list of file paths that were reset (for operator logging).
-        """
-        cur = self._conn.execute(
-            "SELECT file_path FROM ingestion_queue WHERE status = 'processing'"
-        )
-        stuck = [row["file_path"] for row in cur.fetchall()]
-        if stuck:
-            self._conn.execute(
-                "UPDATE ingestion_queue "
-                "SET status = 'pending', started_at = NULL, progress_detail = NULL "
-                "WHERE status = 'processing'"
-            )
-            self._conn.commit()
-            logger.warning(
-                "Crash recovery: reset %d stuck file(s) to pending: %s",
-                len(stuck),
-                stuck,
-            )
-        return stuck
-
-    # ------------------------------------------------------------------
     # Discovery
 
     def discover_or_update(
@@ -256,8 +232,7 @@ class StateDB:
         - Modified:    disk mtime > stored mtime → reset to 'pending' (any status,
                        including 'ignored' — the file was replaced on disk).
         - Failed:      status = 'failed' (mtime unchanged) → reset to 'pending'
-                       with retry_count = 0 so the daemon gives it a fresh set of
-                       retries. Failed files have no Qdrant points (step 0 of the
+                       with retry_count = 0, so it gets a fresh set of retries. Failed files have no Qdrant points (step 0 of the
                        worker loop deleted them before the failure), so no Qdrant
                        cleanup is needed.
         - Ignored:     status = 'ignored' (mtime unchanged) → no-op. The file is
@@ -442,7 +417,7 @@ class StateDB:
     # ------------------------------------------------------------------
     # Sync support: existence checks, projects, attachment, moves, tombstones.
     #
-    # These methods are called by the sync planner (ragnart/sync_plan.py). They
+    # These methods are called by the sync planner (ragnart/sync_plan_core.py). They
     # only read or write SQLite. Qdrant work stays in the caller.
 
     def row_exists(self, file_path: str) -> bool:
@@ -623,44 +598,74 @@ class StateDB:
             )
         return [row["file_path"] for row in cur.fetchall()]
 
-    def claim_next_pending(self) -> dict | None:
+    def mark_processing(self, file_path: str, request_id: str | None = None) -> None:
         """
-        Claim the oldest pending row: pending → processing, in one call.
+        Transition pending → processing; record start timestamp.
 
-        Returns {"file_path", "owner", "origin_path", "last_modified"} for the claimed
-        row, or None when no row is pending. The continuous worker pool in utils/rag_ingest_daemon.py calls
-        this once each time a worker becomes free.
-
-        Why no explicit SQL transaction is needed: the daemon's workers are asyncio
-        coroutines on a single OS thread, and this method contains no `await`. Nothing
-        else on the event loop can run between the SELECT and the UPDATE, so no other
-        worker can claim the same row in between. The `status = 'pending'` guard on the
-        UPDATE keeps it from touching a row that has already left 'pending'.
+        request_id (session B2) is the ingestion API request the row now waits on. It is
+        stored as given, so the default None clears it: a processing row with no request
+        id has no outstanding request. The sync poll (ragnart/sync_poll.py) reads it back.
         """
-        row = self._conn.execute(
-            "SELECT file_path, owner, origin_path, last_modified FROM ingestion_queue "
-            "WHERE status = 'pending' ORDER BY rowid LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
-
-        claimed = dict(row)
         self._conn.execute(
             "UPDATE ingestion_queue "
-            "SET status = 'processing', started_at = ?, progress_detail = 'starting' "
-            "WHERE file_path = ? AND status = 'pending'",
-            (_now(), claimed["file_path"]),
+            "SET status = 'processing', started_at = ?, progress_detail = 'starting', request_id = ? "
+            "WHERE file_path = ?",
+            (_now(), request_id, file_path),
         )
         self._conn.commit()
-        return claimed
 
-    def mark_processing(self, file_path: str) -> None:
-        """Transition pending → processing; record start timestamp."""
+    def processing_rows_with_request_id(self) -> list[dict]:
+        """
+        Return {file_path, request_id, source_id} for every processing row that names a request.
+
+        These are the rows whose outcome the hub has not yet reported. A processing row with
+        no request id is left out: it has nothing to ask the hub about.
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, request_id, source_id FROM ingestion_queue "
+            "WHERE status = 'processing' AND request_id IS NOT NULL ORDER BY rowid"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def pending_rows(self) -> list[dict]:
+        """
+        Return the pending rows the sync will submit, oldest first, with the fields a submission needs.
+
+        Each dict has file_path, owner, origin_path, last_modified, file_type and source_id.
+        origin_path is the file the bytes are read from (a claude-session key is not a path).
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, owner, origin_path, last_modified, file_type, source_id "
+            "FROM ingestion_queue WHERE status = 'pending' ORDER BY rowid"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def set_launch_dir(self, file_path: str, launch_dir: str | None) -> None:
+        """
+        Record the launch directory of a session row before its hub outcome is known.
+
+        Attachment (rows_for_attachment) reads launch_dir from completed rows. A session is
+        submitted while pending, so its launch_dir is stored at submission, not only at
+        completion. A NULL launch_dir (a file, or a session with no cwd) is stored as NULL.
+        """
         self._conn.execute(
-            "UPDATE ingestion_queue "
-            "SET status = 'processing', started_at = ?, progress_detail = 'starting' "
-            "WHERE file_path = ?",
-            (_now(), file_path),
+            "UPDATE ingestion_queue SET launch_dir = ? WHERE file_path = ?",
+            (launch_dir, file_path),
+        )
+        self._conn.commit()
+
+    def set_fingerprint(self, file_path: str, size_bytes: int, content_hash: str, hashed_at: str) -> None:
+        """
+        Record the size, MD5 and hash time of the bytes a submission sent (session B2).
+
+        ragnart/sync_submit.py calls this when the hub accepts an upload, with the values of the
+        exact file it hashed for that upload. The scanner does not use these columns to decide
+        whether a file changed: discover_or_update() compares mtime only. They feed move detection
+        (ragnart/sync_plan_core.py) and must describe the content the hub holds for this row.
+        """
+        self._conn.execute(
+            "UPDATE ingestion_queue SET size_bytes = ?, content_hash = ?, hashed_at = ? WHERE file_path = ?",
+            (size_bytes, content_hash, hashed_at, file_path),
         )
         self._conn.commit()
 
@@ -723,6 +728,43 @@ class StateDB:
             f"UPDATE ingestion_queue SET {', '.join(set_clauses)} WHERE file_path = ?",
             params,
         )
+        self._conn.commit()
+
+    def insert_completed_rows(self, rows: list[dict]) -> None:
+        """
+        Insert every row as 'completed', in one transaction: all of them are written, or none is.
+
+        Used by the NAS rebuild (ragnart/sync_reconcile.py rebuild_from_hub), which must not leave a
+        half-written state behind: a database that holds some rows would refuse the retried rebuild.
+
+        Each dict holds the columns of ingestion_queue to set (file_path and owner are required). A
+        key whose value is None is left out, so the column keeps its default, as mark_completed() does.
+        status, first_seen_at and completed_at are set here: every row is completed at insert time.
+
+        Any error (for example a duplicate file_path) rolls the whole batch back, and the error is
+        raised again to the caller. Nothing is committed in that case.
+        """
+        # One timestamp for the batch, so every restored row carries the same first-seen time.
+        now = _now()
+        # The transaction is opened by hand. Every other method here commits after each statement,
+        # which would end a surrounding transaction, so this method is the one place that holds it.
+        self._conn.execute("BEGIN")
+        try:
+            for row in rows:
+                columns = {column: value for column, value in row.items() if value is not None}
+                columns.update(status="completed", first_seen_at=now, completed_at=now)
+                # The column names are fixed literals from the rebuild's code, never caller input, so
+                # building the SQL from them is safe. The values are bound as parameters.
+                names = ", ".join(columns)
+                placeholders = ", ".join("?" for _ in columns)
+                self._conn.execute(
+                    f"INSERT INTO ingestion_queue ({names}) VALUES ({placeholders})",
+                    list(columns.values()),
+                )
+        except BaseException:
+            # Undo every row of the batch, then let the error reach the caller unchanged.
+            self._conn.rollback()
+            raise
         self._conn.commit()
 
     def mark_failed(self, file_path: str, error: str) -> None:
@@ -861,6 +903,19 @@ class StateDB:
             cur = self._conn.execute(
                 "SELECT file_path, status FROM ingestion_queue ORDER BY file_path"
             )
+        return [dict(row) for row in cur.fetchall()]
+
+    def rows_for_reconcile(self) -> list[dict]:
+        """
+        Return the fields the NAS reconcile compares with the hub listing, for every queue row.
+
+        Each dict has file_path, status, owner, project_id and chunk_count. Read by ragnart/sync_reconcile.py
+        (session B2, step A.10); the reconcile filters the rows by source itself. chunk_count is needed to tell
+        a zero-chunk completion (no points, never listed by the hub) from a row whose count is unrecorded (NULL).
+        """
+        cur = self._conn.execute(
+            "SELECT file_path, status, owner, project_id, chunk_count FROM ingestion_queue ORDER BY file_path"
+        )
         return [dict(row) for row in cur.fetchall()]
 
     def get_ignored(self, owner: str | None = None) -> list[dict]:

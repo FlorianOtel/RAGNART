@@ -2,7 +2,7 @@
 ragnart/opencode_client.py — minimal HTTP client for the OpenCode 2.x server.
 
 Used by scanner.scan_opencode_sessions() (session discovery) and
-ingest._parse_opencode_session() (session content).
+chat_render._parse_opencode_session() (session content).
 
 OpenCode 2.x requires HTTP Basic auth (user "opencode", password from the
 server's OPENCODE_SERVER_PASSWORD). Its JSON API lives under /api/...; the

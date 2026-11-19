@@ -70,7 +70,7 @@ def test_connector_enumerate_and_fetch_are_the_existing_functions_by_reference()
 
     assert FILESYSTEM.fetch is ragnart.ingest._parse_to_text
     assert CLAUDE_CODE.fetch is ragnart.ingest._parse_claude_chat
-    assert OPENCODE.fetch is ragnart.ingest._parse_opencode_session
+    assert OPENCODE.fetch is ragnart.chat_render._parse_opencode_session
 
 
 def test_every_contract_element_is_present_and_non_empty():

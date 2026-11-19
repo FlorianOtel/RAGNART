@@ -4,7 +4,7 @@ Tests for ragnart/intake_worker.py, the hub's intake worker (v0.3 B1).
 The registry is a real RegistryDB in a temporary directory, so the intake rows, the spool files and
 the status transitions are the real ones. Qdrant is a MagicMock, and the embedder is an AsyncMock:
 no live service is used and the production lock file is never taken (acquire_or_exit is stubbed in
-the lock test, as tests/test_daemon_lock.py does).
+the lock test).
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ragnart import ingest, intake_worker, registry as registry_module
+from ragnart.ingest import IngestResult
 from ragnart.lock import EXIT_LOCK_HELD
 from ragnart.registry import RegistryDB
 from ragnart.schema import FIELD_FILE_NAME, FIELD_SOURCE_PATH
@@ -182,12 +183,10 @@ class TestFailures:
     def test_failed_upload_records_error_keeps_spool_and_next_request_still_runs(
         self, registry, qdrant, tmp_path, monkeypatch,
     ):
-        # The first embedding call fails; every later call succeeds.
-        calls = {"count": 0}
-
+        # The embedding of the failing upload fails; every other embedding succeeds. The failure is
+        # keyed on the upload's text, not on call order: with a worker pool the requests interleave.
         async def flaky_embed(texts, **_kwargs):
-            calls["count"] += 1
-            if calls["count"] == 1:
+            if any("failing upload" in text for text in texts):
                 raise RuntimeError("embedder down")
             return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
@@ -412,3 +411,269 @@ class TestOrderAndLock:
         monkeypatch.setattr(intake_worker, "ensure_collection", lambda _client: None)
 
         assert intake_worker.main() == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-item fields: owner, tag and project_id reach ingest_content (session B2, A.4)
+# ---------------------------------------------------------------------------
+
+class TestPerItemFields:
+    def test_bytes_upsert_on_a_no_fixed_owner_source_writes_the_rows_owner_tag_and_project(
+        self, registry, qdrant, tmp_path,
+    ):
+        # nas has no fixed owner: the row names the item's owner, and carries its tag and project.
+        registry.upsert_project("proj-1", "/mnt/nfs/Florian/proj", "My Project", "florian", "nas")
+        request_id = "req-nas-fields"
+        spool = _spool(tmp_path, request_id, b"# Certificate\n\nA note about a certificate course.\n")
+        registry.insert_intake(
+            "nas", "upsert", "/mnt/nfs/Florian/proj/cert.md",
+            file_type="md", spool_path=spool, request_id=request_id,
+            owner="florian", tag="certifications", project_id="proj-1",
+        )
+
+        assert _drain(registry, qdrant) == 1
+
+        assert registry.intake_by_id(request_id)["status"] == "completed"
+        points = [p for call in qdrant.upsert.call_args_list for p in call.kwargs["points"]]
+        assert points
+        for point in points:
+            assert point.payload["owner"] == "florian"
+            assert point.payload["tag"] == "certifications"
+            assert point.payload["project_id"] == "proj-1"
+            assert point.payload["source_id"] == "nas"
+
+    def test_missing_row_fields_fall_back_to_the_source_owner_no_tag_and_global(self, registry, qdrant):
+        # A fixed-owner source (MBP) sends no owner, tag or project: the points get the source's owner,
+        # an empty tag and the global project, as B1 wrote them.
+        request_id = "req-fallback"
+        registry.insert_intake(
+            "claude-MBP", "upsert", "claude-session://fallback",
+            text="a session that names no owner, tag or project. " * 20, request_id=request_id,
+        )
+
+        _drain(registry, qdrant)
+
+        assert registry.intake_by_id(request_id)["status"] == "completed"
+        points = [p for call in qdrant.upsert.call_args_list for p in call.kwargs["points"]]
+        assert points[0].payload["owner"] == "florian"
+        assert points[0].payload["tag"] == ""
+        assert points[0].payload["project_id"] == "global"
+
+    def test_opencode_text_upsert_is_stored_as_an_opencode_session_without_a_hash(self, registry, qdrant):
+        # The connector of the source (opencode) reaches ingest_content: the opencode type, no hash.
+        request_id = "req-oc-1"
+        registry.insert_intake(
+            "opencode-k11", "upsert", "opencode://ses_abc",
+            text="an opencode session rendered by the sender. " * 20,
+            metadata={"session_id": "ses_abc", "session_title": "Planning"},
+            owner="florian", request_id=request_id,
+        )
+
+        _drain(registry, qdrant)
+
+        row = registry.intake_by_id(request_id)
+        assert row["status"] == "completed"
+        assert row["content_hash"] is None
+        points = [p for call in qdrant.upsert.call_args_list for p in call.kwargs["points"]]
+        assert points[0].payload["source_type"] == "opencode_session"
+        assert points[0].payload["file_type"] == "opencode"
+        assert points[0].payload["file_name"] == "Planning"
+        assert points[0].payload["content_hash"] is None
+
+    def test_change_metadata_project_id_is_set_on_the_items_points(self, registry, qdrant):
+        registry.upsert_project("proj-1", "/Users/fotel/MBP/proj", "My Project", "florian", "MBP")
+        request_id = "req-proj-1"
+        registry.insert_intake(
+            "MBP", "change_metadata", "/Users/fotel/MBP/a.md",
+            metadata={"project_id": "proj-1"}, request_id=request_id,
+        )
+
+        _drain(registry, qdrant)
+
+        assert registry.intake_by_id(request_id)["status"] == "completed"
+        assert qdrant.set_payload.call_args.kwargs["payload"] == {"project_id": "proj-1"}
+        assert _set_payload_filter_values(qdrant) == {"source_id": "MBP", FIELD_SOURCE_PATH: "/Users/fotel/MBP/a.md"}
+
+
+# ---------------------------------------------------------------------------
+# The worker pool (session B2, A.4b)
+# ---------------------------------------------------------------------------
+
+def _fake_result() -> IngestResult:
+    """An ingest_content result for a request the fake applied."""
+    return IngestResult("completed", None, 1, None, "p1")
+
+
+class TestWorkerPool:
+    def test_requests_for_the_same_key_never_overlap_and_keep_their_order(self, registry, qdrant, monkeypatch):
+        # Three upserts of one item, with the work held open for a moment so that a second worker would
+        # overlap the first if it were allowed to. The recorded events must be strictly start/end pairs.
+        events: list[tuple[str, str]] = []
+
+        async def slow_ingest(**kwargs):
+            events.append(("start", kwargs["text"]))
+            await asyncio.sleep(0.02)
+            events.append(("end", kwargs["text"]))
+            return _fake_result()
+
+        monkeypatch.setattr(intake_worker, "ingest_content", slow_ingest)
+        for text in ("first", "second", "third"):
+            registry.insert_intake(
+                "claude-MBP", "upsert", "claude-session://same-item", text=text,
+            )
+
+        # The timeout keeps a regression from hanging the suite.
+        asyncio.run(asyncio.wait_for(intake_worker.drain_intake(registry, RAG_CFG, qdrant, workers=3), timeout=20))
+
+        assert events == [
+            ("start", "first"), ("end", "first"),
+            ("start", "second"), ("end", "second"),
+            ("start", "third"), ("end", "third"),
+        ]
+
+    def test_requests_for_different_keys_run_in_parallel(self, registry, qdrant, monkeypatch):
+        # Two different items: each ingest waits at a barrier that only opens when both are in flight.
+        # Run one after the other, the first would wait out its timeout and fail the request.
+        async def run() -> None:
+            barrier = asyncio.Barrier(2)
+
+            async def meet_at_barrier(**_kwargs):
+                await asyncio.wait_for(barrier.wait(), timeout=5)
+                return _fake_result()
+
+            monkeypatch.setattr(intake_worker, "ingest_content", meet_at_barrier)
+            first = registry.insert_intake("claude-MBP", "upsert", "claude-session://item-a", text="a " * 30)
+            second = registry.insert_intake("claude-MBP", "upsert", "claude-session://item-b", text="b " * 30)
+            processed = await asyncio.wait_for(
+                intake_worker.drain_intake(registry, RAG_CFG, qdrant, workers=2), timeout=20,
+            )
+            assert processed == 2
+            assert registry.intake_by_id(first)["status"] == "completed"
+            assert registry.intake_by_id(second)["status"] == "completed"
+
+        asyncio.run(run())
+
+    def test_every_request_is_applied_exactly_once_across_the_pool(self, registry, qdrant, monkeypatch):
+        # Twenty requests, one per item, through four workers: each item is ingested once, and none is skipped.
+        # This is the pool property the daemon's pool test checked for files.
+        applied: list[str] = []
+
+        async def record(**kwargs):
+            applied.append(kwargs["key"])
+            await asyncio.sleep(0.001)
+            return _fake_result()
+
+        monkeypatch.setattr(intake_worker, "ingest_content", record)
+        keys = [f"claude-session://item-{index:02d}" for index in range(20)]
+        for key in keys:
+            registry.insert_intake("claude-MBP", "upsert", key, text="a " * 30)
+
+        processed = asyncio.run(
+            asyncio.wait_for(intake_worker.drain_intake(registry, RAG_CFG, qdrant, workers=4), timeout=20),
+        )
+
+        assert processed == 20
+        assert sorted(applied) == sorted(keys)
+        assert len(applied) == len(set(applied))
+
+    def test_a_change_key_to_b_is_applied_before_a_later_upsert_of_b(self, registry, qdrant, tmp_path):
+        # The change_key moves A to B. The later upsert of B is held back until the move is done, so the
+        # move's set_payload is recorded before the upsert's points are written.
+        registry.insert_intake(
+            "MBP", "change_key", "/Users/fotel/MBP/a.md", new_key="/Users/fotel/MBP/b.md", request_id="req-cb-move",
+        )
+        spool = _spool(tmp_path, "req-cb-upsert", b"# B\n\nThe note that lands on key B after the move.\n")
+        registry.insert_intake(
+            "MBP", "upsert", "/Users/fotel/MBP/b.md", file_type="md",
+            spool_path=spool, request_id="req-cb-upsert",
+        )
+
+        assert _drain(registry, qdrant) == 2
+
+        assert registry.intake_by_id("req-cb-move")["status"] == "completed"
+        assert registry.intake_by_id("req-cb-upsert")["status"] == "completed"
+        names = [name for name, _args, _kwargs in qdrant.mock_calls]
+        assert names.index("set_payload") < names.index("upsert")
+
+    def test_a_worker_pool_must_have_at_least_one_worker(self, registry, qdrant):
+        with pytest.raises(ValueError, match="at least one worker"):
+            asyncio.run(intake_worker.drain_intake(registry, RAG_CFG, qdrant, workers=0))
+
+    def test_workers_flag_defaults_to_three_and_can_be_set(self):
+        assert intake_worker._parse_args([]).workers == 3
+        assert intake_worker._parse_args(["--workers", "5"]).workers == 5
+
+
+# ---------------------------------------------------------------------------
+# The claim rule on its own: next_intake() holds back a request behind an earlier one (session B2, A.4b)
+# ---------------------------------------------------------------------------
+
+class TestClaimHoldsBackLaterRequests:
+    def test_a_later_request_for_the_same_key_is_not_claimable_while_an_earlier_one_is_processing(self, registry):
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-h1")
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-h2")
+
+        assert registry.next_intake()["id"] == "req-h1"
+        # req-h2 has the same key and an earlier request is still processing: nothing is claimable.
+        assert registry.next_intake() is None
+        assert registry.intake_by_id("req-h2")["status"] == "received"
+
+        registry.update_intake("req-h1", status="completed")
+        assert registry.next_intake()["id"] == "req-h2"
+
+    def test_the_earlier_of_two_same_key_requests_is_claimed_first_even_when_both_are_received(self, registry):
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-e1")
+        registry.insert_intake("MBP", "upsert", "/a.md", request_id="req-e2", text="later")
+
+        assert registry.next_intake()["id"] == "req-e1"
+
+    def test_a_change_key_holds_back_a_later_request_for_its_new_key(self, registry):
+        # r1 moves A to B and is processing. r2 upserts B: held. r3 deletes A: also held (A is r1's key).
+        registry.insert_intake("MBP", "change_key", "/a.md", new_key="/b.md", request_id="req-n1")
+        registry.insert_intake("MBP", "delete", "/b.md", request_id="req-n2")
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-n3")
+
+        assert registry.next_intake()["id"] == "req-n1"
+        assert registry.next_intake() is None
+
+        registry.update_intake("req-n1", status="completed")
+        # Once the move is done, r2 (key B) is claimable. r3 (key A) is free too, since r1 no longer holds A.
+        assert registry.next_intake()["id"] == "req-n2"
+        assert registry.next_intake()["id"] == "req-n3"
+
+    def test_a_request_for_a_key_held_by_a_change_key_source_is_held_by_its_new_key_too(self, registry):
+        # The other direction: an earlier upsert of B holds back a later change_key from A to B.
+        registry.insert_intake("MBP", "delete", "/b.md", request_id="req-x1")
+        registry.insert_intake("MBP", "change_key", "/a.md", new_key="/b.md", request_id="req-x2")
+
+        assert registry.next_intake()["id"] == "req-x1"
+        assert registry.next_intake() is None
+
+    def test_keys_are_compared_case_sensitively(self, registry):
+        registry.insert_intake("MBP", "delete", "/a/B.md", request_id="req-c1")
+        registry.insert_intake("MBP", "delete", "/a/b.md", request_id="req-c2")
+
+        assert registry.next_intake()["id"] == "req-c1"
+        assert registry.next_intake()["id"] == "req-c2"
+
+    def test_source_ids_are_compared_case_insensitively(self, registry):
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-s1")
+        registry.insert_intake("mbp", "delete", "/a.md", request_id="req-s2")
+
+        assert registry.next_intake()["id"] == "req-s1"
+        assert registry.next_intake() is None
+
+    def test_other_sources_do_not_hold_back_a_request(self, registry):
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-o1")
+        registry.insert_intake("nas", "delete", "/a.md", request_id="req-o2")
+
+        assert registry.next_intake()["id"] == "req-o1"
+        assert registry.next_intake()["id"] == "req-o2"
+
+    def test_a_later_request_for_a_key_with_no_earlier_request_is_claimed(self, registry):
+        # The rule holds requests back only behind an earlier request of the same item.
+        registry.insert_intake("MBP", "delete", "/a.md", request_id="req-f1")
+        registry.insert_intake("MBP", "delete", "/b.md", request_id="req-f2")
+
+        assert registry.next_intake()["id"] == "req-f1"
+        assert registry.next_intake()["id"] == "req-f2"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,11 +25,23 @@ import ragnart.cli as cli
 import ragnart.ingest_api as ingest_api
 from ragnart.cli import registry_db_path
 from ragnart.registry import RegistryDB
+from ragnart.schema import SOURCE_ID_NAS, SOURCE_ID_OPENCODE_K11
 
 # Secrets used by the seeded sources. The registry stores only their hashes.
 MBP_SECRET = "mbp-secret-for-tests"
 CLAUDE_SECRET = "claude-secret-for-tests"
 HUB_SECRET = "hub-secret-for-tests"
+NAS_SECRET = "nas-secret-for-tests"
+OPENCODE_SECRET = "opencode-secret-for-tests"
+# A secret the hub does not know. It must be refused with 401.
+WRONG = "not-a-secret-the-hub-knows"
+
+# The owners configured in the tmp ragnart.yaml: one per-user owner and the shared owner.
+CONFIGURED_OWNER = "florian"
+SHARED_OWNER = "la-familia"
+
+# A project that exists in the seeded registry.
+PROJECT_ID = "proj-1"
 
 # A text-like size cap small enough to exceed in a test.
 TEXT_CAP_BYTES = 1000
@@ -56,6 +69,10 @@ def config(tmp_path, monkeypatch) -> dict:
             },
             "scanner": {"include_extensions": [".md", ".pdf"]},
         },
+        "users": {
+            "florian.otel@gmail.com": {"owner": CONFIGURED_OWNER, "nfs_roots": ["/mnt/nfs/Florian"]},
+        },
+        "shared": {"owner": SHARED_OWNER, "nfs_roots": ["/mnt/nfs/La-Familia"]},
     }
     path = tmp_path / "ragnart.yaml"
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -66,15 +83,22 @@ def config(tmp_path, monkeypatch) -> dict:
 @pytest.fixture
 def seeded(config):
     """
-    A hub registry with two endpoint sources and one hub source.
+    A hub registry with the sources and the project the tests submit against.
 
-    MBP is a filesystem source, claude-MBP a claude_code source. 'hubby' is a hub source that
-    has a secret hash: it must still never authenticate, because it is not an endpoint source.
+    MBP is a filesystem source with a fixed owner, claude-MBP a claude_code source with a fixed owner.
+    'hubby' is a hub-kind source that holds a secret hash: the kind no longer decides who may submit,
+    so it authenticates like any other source that holds a secret.
+    nas (filesystem, no fixed owner) and opencode-k11 (opencode, no fixed owner) are the seeded hub
+    sources, given a secret hash the way a rotation would give it one.
+    proj-1 is a project in the registry, so an upsert may attach to it.
     """
     registry = RegistryDB(registry_db_path(config))
     registry.register_source("MBP", "filesystem", "endpoint", "florian", _sha256(MBP_SECRET))
     registry.register_source("claude-MBP", "claude_code", "endpoint", "florian", _sha256(CLAUDE_SECRET))
     registry.register_source("hubby", "filesystem", "hub", None, _sha256(HUB_SECRET))
+    registry.set_secret_hash(SOURCE_ID_NAS, _sha256(NAS_SECRET))
+    registry.set_secret_hash(SOURCE_ID_OPENCODE_K11, _sha256(OPENCODE_SECRET))
+    registry.upsert_project(PROJECT_ID, "/mnt/nfs/Florian/proj", "My Project", "florian", SOURCE_ID_NAS)
     registry.close()
     return config
 
@@ -107,6 +131,15 @@ def _spool_dir(config) -> Path:
 def _spool_files(config) -> list:
     spool = _spool_dir(config)
     return sorted(spool.iterdir()) if spool.exists() else []
+
+
+def _change_metadata_rows(config, source_id: str) -> list[dict]:
+    """The change_metadata intake rows of one source. A refused request leaves none."""
+    registry = _registry(config)
+    try:
+        return [row for row in registry.intake_for_source(source_id) if row["kind"] == "change_metadata"]
+    finally:
+        registry.close()
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +227,11 @@ def test_delete_change_key_and_change_metadata_return_202(api, config):
         headers=_auth(MBP_SECRET),
         json={"key": "/Users/fotel/MBP/a.md", "new_key": "/Users/fotel/MBP/b.md"},
     )
+    # nas has no fixed owner, so it is the source that may name an owner in a change_metadata.
     owner = api.post(
         "/v1/change-metadata",
-        headers=_auth(MBP_SECRET),
-        json={"key": "/Users/fotel/MBP/b.md", "metadata": {"owner": "eva"}},
+        headers=_auth(NAS_SECRET),
+        json={"key": "/mnt/nfs/Florian/b.md", "metadata": {"owner": CONFIGURED_OWNER}},
     )
 
     assert [delete.status_code, rename.status_code, owner.status_code] == [202, 202, 202]
@@ -229,9 +263,16 @@ def test_401_names_the_bearer_scheme(api):
     assert response.headers["www-authenticate"] == "Bearer"
 
 
-def test_hub_source_cannot_authenticate(api):
-    """A hub source has a secret hash in the registry, and still cannot authenticate: it is not an endpoint."""
-    assert api.get("/v1/info", headers=_auth(HUB_SECRET)).status_code == 401
+def test_a_source_with_a_secret_authenticates_whatever_its_kind(api):
+    """A hub-kind source that holds a secret hash authenticates: the kind no longer gates the auth gate."""
+    assert api.get("/v1/info", headers=_auth(HUB_SECRET)).status_code == 200
+
+
+def test_the_seeded_hub_sources_authenticate_once_they_hold_a_secret(api):
+    """nas and opencode-k11 were given a secret hash, so their secrets authenticate; the wrong one does not."""
+    assert api.get("/v1/info", headers=_auth(NAS_SECRET)).status_code == 200
+    assert api.get("/v1/info", headers=_auth(OPENCODE_SECRET)).status_code == 200
+    assert api.get("/v1/info", headers=_auth(MBP_SECRET + "x")).status_code == 401
 
 
 def test_body_cannot_name_a_source(api, config):
@@ -434,12 +475,14 @@ def test_bytes_upsert_with_relative_key_is_422(api, config):
 
 
 def test_change_metadata_with_non_owner_field_is_422(api):
-    """Only owner may change in B1. Any other field, alone or beside owner, is refused."""
+    """Only owner and project_id may change. Any other field, alone or beside owner, is refused."""
     url = "/v1/change-metadata"
+    key = "/mnt/nfs/Florian/a.md"
+    assert api.post(url, headers=_auth(NAS_SECRET),
+                    json={"key": key, "metadata": {"owner": CONFIGURED_OWNER}}).status_code == 202
+    assert api.post(url, headers=_auth(NAS_SECRET),
+                    json={"key": key, "metadata": {"owner": CONFIGURED_OWNER, "tag": "x"}}).status_code == 422
     key = "/Users/fotel/MBP/a.md"
-    assert api.post(url, headers=_auth(MBP_SECRET), json={"key": key, "metadata": {"owner": "eva"}}).status_code == 202
-    assert api.post(url, headers=_auth(MBP_SECRET),
-                    json={"key": key, "metadata": {"owner": "eva", "tag": "x"}}).status_code == 422
     assert api.post(url, headers=_auth(MBP_SECRET),
                     json={"key": key, "metadata": {"tag": "x"}}).status_code == 422
 
@@ -477,28 +520,38 @@ def test_status_of_own_request_is_200_and_another_sources_is_404(api):
 # Items: derived live from Qdrant
 # ---------------------------------------------------------------------------
 
-def _point(source_path: str, content_hash: str, pipeline_version: str = "p1") -> SimpleNamespace:
-    """A Qdrant point as scroll() returns it, with only the payload this endpoint reads."""
-    return SimpleNamespace(payload={
+def _point(source_path: str, content_hash: str, pipeline_version: str = "p1", **fields) -> SimpleNamespace:
+    """
+    A Qdrant point as scroll() returns it, with only the payload this endpoint reads.
+
+    The item fields (owner, project_id, source_type, file_type) are optional keyword arguments, so a point
+    can be given them or left without them, as an older point is.
+    """
+    payload = {
         "source_path": source_path,
         "content_hash": content_hash,
         "pipeline_version": pipeline_version,
-    })
+    }
+    payload.update(fields)
+    return SimpleNamespace(payload=payload)
 
 
 def test_items_groups_only_this_sources_points(api, qdrant):
     """Points are grouped by source_path, and the scroll filter carries the authenticated source id."""
+    fields = {"owner": "florian", "project_id": "global", "source_type": "file", "file_type": "md"}
     qdrant.scroll.side_effect = [
-        ([_point("/Users/fotel/MBP/a.md", "h1"), _point("/Users/fotel/MBP/a.md", "h1")], "page-2"),
-        ([_point("/Users/fotel/MBP/b.md", "h2")], None),
+        ([_point("/Users/fotel/MBP/a.md", "h1", **fields), _point("/Users/fotel/MBP/a.md", "h1", **fields)], "page-2"),
+        ([_point("/Users/fotel/MBP/b.md", "h2", **fields)], None),
     ]
 
     response = api.get("/v1/items", headers=_auth(MBP_SECRET))
 
     assert response.status_code == 200
     assert response.json() == {"items": [
-        {"key": "/Users/fotel/MBP/a.md", "chunk_count": 2, "content_hash": "h1", "pipeline_version": "p1"},
-        {"key": "/Users/fotel/MBP/b.md", "chunk_count": 1, "content_hash": "h2", "pipeline_version": "p1"},
+        {"key": "/Users/fotel/MBP/a.md", "chunk_count": 2, "content_hash": "h1", "pipeline_version": "p1",
+         "owner": "florian", "project_id": "global", "source_type": "file", "file_type": "md", "inconsistent": []},
+        {"key": "/Users/fotel/MBP/b.md", "chunk_count": 1, "content_hash": "h2", "pipeline_version": "p1",
+         "owner": "florian", "project_id": "global", "source_type": "file", "file_type": "md", "inconsistent": []},
     ]}
 
     # Every page is filtered on this source's id, and no vectors are read.
@@ -510,6 +563,34 @@ def test_items_groups_only_this_sources_points(api, qdrant):
         assert condition.key == "source_id"
         assert condition.match.value == "MBP"
         assert call.kwargs["with_vectors"] is False
+
+
+def test_items_read_the_item_fields_and_no_others(api, qdrant):
+    """The scroll selects the item fields (owner, project, types) beside the three it always read, and no vectors."""
+    qdrant.scroll.return_value = ([], None)
+
+    api.get("/v1/items", headers=_auth(MBP_SECRET))
+
+    selected = qdrant.scroll.call_args.kwargs["with_payload"]
+    assert set(selected) == {
+        "source_path", "content_hash", "pipeline_version", "owner", "project_id", "source_type", "file_type",
+    }
+
+
+def test_items_points_that_disagree_keep_the_first_value_and_name_the_field(api, qdrant):
+    """When a later point of an item carries another owner, the first point's owner stays and 'owner' is flagged."""
+    qdrant.scroll.return_value = ([
+        _point("/Users/fotel/MBP/a.md", "h1", owner="florian", project_id="global"),
+        _point("/Users/fotel/MBP/a.md", "h1", owner="eva", project_id="global"),
+    ], None)
+
+    items = api.get("/v1/items", headers=_auth(MBP_SECRET)).json()["items"]
+
+    assert items == [{
+        "key": "/Users/fotel/MBP/a.md", "chunk_count": 2, "content_hash": "h1", "pipeline_version": "p1",
+        "owner": "florian", "project_id": "global", "source_type": None, "file_type": None,
+        "inconsistent": ["owner"],
+    }]
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +633,240 @@ def test_project_publish_is_refused_and_logged(api, caplog):
 
 
 # ---------------------------------------------------------------------------
+# Projects (session B2): publish and remove write the registry synchronously
+# ---------------------------------------------------------------------------
+
+def _seed_project(config, project_id: str, home: str | None, owner: str | None = CONFIGURED_OWNER) -> None:
+    """Write one project row into the tmp registry, homed on `home`, with one tag."""
+    registry = RegistryDB(registry_db_path(config))
+    try:
+        registry.upsert_project(project_id, f"/mnt/nfs/Florian/{project_id}", project_id, owner, home)
+        registry.replace_project_tags(project_id, {"kind": "seed"})
+    finally:
+        registry.close()
+
+
+def _publish_body(**overrides) -> dict:
+    """A nas project publish, as the NAS side sends it: the marker's fields, its owner and its tags."""
+    body = {
+        "id": "marker-proj",
+        "name": "Marker Project",
+        "path": "/mnt/nfs/Florian/marker-proj",
+        "owner": CONFIGURED_OWNER,
+        "tags": {"kind": "repo", "area": "home"},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_nas_publish_writes_the_project_row_and_its_tags(api, config):
+    """A publish from nas writes the row (home nas, the checked owner, path, name) and replaces the tags."""
+    response = api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body())
+
+    assert response.status_code == 200
+    assert response.json() == {"published": True, "id": "marker-proj"}
+    registry = _registry(config)
+    try:
+        project = next(p for p in registry.list_projects() if p["id"] == "marker-proj")
+        assert project == {
+            "id": "marker-proj",
+            "path": "/mnt/nfs/Florian/marker-proj",
+            "name": "Marker Project",
+            "owner": CONFIGURED_OWNER,
+            "home_source_id": SOURCE_ID_NAS,
+        }
+        assert registry.project_tags("marker-proj") == {"kind": "repo", "area": "home"}
+    finally:
+        registry.close()
+
+
+def test_nas_republish_updates_the_row_and_replaces_the_tags(api, config):
+    """Publishing the same project again updates it: a tag that is no longer sent is removed."""
+    api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body())
+
+    response = api.post(
+        "/v1/projects", headers=_auth(NAS_SECRET),
+        json=_publish_body(name="Renamed", tags={"kind": "docs"}),
+    )
+
+    assert response.status_code == 200
+    registry = _registry(config)
+    try:
+        project = next(p for p in registry.list_projects() if p["id"] == "marker-proj")
+        assert project["name"] == "Renamed"
+        assert registry.project_tags("marker-proj") == {"kind": "docs"}
+    finally:
+        registry.close()
+
+
+def test_nas_publish_without_an_owner_is_refused_with_422(api, config):
+    """nas has no fixed owner, so a publish must name one. Without it, 422 and nothing is written."""
+    response = api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body(owner=None))
+
+    assert response.status_code == 422
+    registry = _registry(config)
+    try:
+        assert all(p["id"] != "marker-proj" for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_nas_publish_with_an_unconfigured_owner_is_refused_with_422(api, config):
+    """The project owner must be a name ragnart.yaml configures, as for an item."""
+    response = api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body(owner="mallory"))
+
+    assert response.status_code == 422
+    assert "not configured" in response.json()["detail"]
+
+
+def test_publish_of_the_reserved_global_id_is_refused_with_422(api, config):
+    """'global' is the reserved project; no source may publish it."""
+    response = api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body(id="global"))
+
+    assert response.status_code == 422
+    registry = _registry(config)
+    try:
+        assert registry.project_tags("global") == {}
+    finally:
+        registry.close()
+
+
+def test_publish_with_a_non_string_tag_is_refused_with_422(api):
+    """Tags are a map of string to string; a number is refused by the request check."""
+    response = api.post(
+        "/v1/projects", headers=_auth(NAS_SECRET),
+        json=_publish_body(tags={"priority": 3}),
+    )
+
+    assert response.status_code == 422
+
+
+def test_publish_of_a_project_homed_on_another_source_is_refused_with_409(api, config):
+    """D21: a project id homed on MBP cannot be taken over by nas. The row and its tags are unchanged."""
+    _seed_project(config, "mbp-proj", home="MBP", owner=CONFIGURED_OWNER)
+
+    response = api.post(
+        "/v1/projects", headers=_auth(NAS_SECRET),
+        json=_publish_body(id="mbp-proj", name="Hijack", tags={"kind": "stolen"}),
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["refused"] is True
+    assert "already homed on 'MBP'" in body["reason"]
+    registry = _registry(config)
+    try:
+        project = next(p for p in registry.list_projects() if p["id"] == "mbp-proj")
+        assert project["name"] == "mbp-proj"
+        assert project["home_source_id"] == "MBP"
+        assert registry.project_tags("mbp-proj") == {"kind": "seed"}
+    finally:
+        registry.close()
+
+
+def test_home_comparison_is_case_insensitive(api, config):
+    """A project homed as 'NAS' is the nas source's own: the D21 compare ignores case, so the republish is accepted."""
+    _seed_project(config, "upper-proj", home="NAS", owner=CONFIGURED_OWNER)
+
+    response = api.post(
+        "/v1/projects", headers=_auth(NAS_SECRET),
+        json=_publish_body(id="upper-proj", name="Same Source"),
+    )
+
+    assert response.status_code == 200
+
+
+def test_a_non_capable_source_writes_nothing_to_the_registry(api, config):
+    """MBP lacks the capability: its publish is refused with 409 and the registry gets no row."""
+    api.post("/v1/projects", headers=_auth(MBP_SECRET), json=_publish_body(id="from-mbp", owner=None))
+
+    registry = _registry(config)
+    try:
+        assert all(p["id"] != "from-mbp" for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_fixed_owner_capable_source_refuses_an_owner_in_the_publish(api, config):
+    """A capable source with a fixed owner may not name one: the same rule as an upsert (_checked_owner)."""
+    # nas is made to have a fixed owner for this test only: the owner rule reads the registry row.
+    raw = sqlite3.connect(registry_db_path(config))
+    raw.execute("UPDATE sources SET owner = ? WHERE id = ?", (CONFIGURED_OWNER, SOURCE_ID_NAS))
+    raw.commit()
+    raw.close()
+
+    response = api.post("/v1/projects", headers=_auth(NAS_SECRET), json=_publish_body())
+
+    assert response.status_code == 422
+    assert "fixed owner" in response.json()["detail"]
+
+
+def test_nas_removes_a_project_it_homes(api, config):
+    """remove deletes the project row and its tags, for a project homed on the calling source."""
+    response = api.post("/v1/projects/remove", headers=_auth(NAS_SECRET), json={"id": PROJECT_ID})
+
+    assert response.status_code == 200
+    assert response.json() == {"removed": True, "id": PROJECT_ID}
+    registry = _registry(config)
+    try:
+        assert all(p["id"] != PROJECT_ID for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_remove_of_an_unknown_project_is_404(api):
+    """A project the registry does not hold answers 404."""
+    response = api.post("/v1/projects/remove", headers=_auth(NAS_SECRET), json={"id": "no-such-project"})
+
+    assert response.status_code == 404
+
+
+def test_remove_of_a_project_homed_elsewhere_is_409_and_keeps_it(api, config):
+    """Only the homing source may remove a project. Another source's request is refused and nothing is deleted."""
+    _seed_project(config, "mbp-proj", home="MBP")
+
+    response = api.post("/v1/projects/remove", headers=_auth(NAS_SECRET), json={"id": "mbp-proj"})
+
+    assert response.status_code == 409
+    assert response.json()["refused"] is True
+    registry = _registry(config)
+    try:
+        assert any(p["id"] == "mbp-proj" for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_remove_from_a_non_capable_source_is_409(api, config):
+    """MBP lacks the capability, so its remove is refused whatever the project."""
+    response = api.post("/v1/projects/remove", headers=_auth(MBP_SECRET), json={"id": PROJECT_ID})
+
+    assert response.status_code == 409
+    registry = _registry(config)
+    try:
+        assert any(p["id"] == PROJECT_ID for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_remove_of_the_global_project_is_409(api, config):
+    """'global' has no home source, so no source can remove it."""
+    response = api.post("/v1/projects/remove", headers=_auth(NAS_SECRET), json={"id": "global"})
+
+    assert response.status_code == 409
+    registry = _registry(config)
+    try:
+        assert any(p["id"] == "global" for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_project_routes_refuse_a_wrong_secret(api):
+    """The project routes sit behind the same auth gate as every other write."""
+    assert api.post("/v1/projects", headers=_auth(WRONG), json=_publish_body()).status_code == 401
+    assert api.post("/v1/projects/remove", headers=_auth(WRONG), json={"id": PROJECT_ID}).status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Text-like notion parity with the ingest pipeline
 # ---------------------------------------------------------------------------
 
@@ -568,3 +883,311 @@ def test_text_like_rule_agrees_with_ingest():
     assert ingest_api._NON_TEXT_FILE_TYPES == {"ipynb", "jsonl"}
     for file_type in ["pdf", "docx", "pptx", "ipynb", "jsonl", "md", "txt", "yaml", "py", "sh", "html"]:
         assert ingest_api.is_text_like_file_type(file_type) == ingest.is_text_like_path(f"x.{file_type}"), file_type
+
+
+# ---------------------------------------------------------------------------
+# Connectors: opencode sessions, the route each connector may use
+# ---------------------------------------------------------------------------
+
+def test_opencode_text_upsert_is_accepted_under_the_opencode_namespace(api, config):
+    """An opencode source sends its sessions as text, keyed 'opencode://...'. The row is recorded under it."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(OPENCODE_SECRET),
+        json={"key": "opencode://ses_abc", "text": "the opencode session", "owner": CONFIGURED_OWNER},
+    )
+
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    assert row["source_id"] == SOURCE_ID_OPENCODE_K11
+    assert row["kind"] == "upsert"
+    assert row["key"] == "opencode://ses_abc"
+    assert row["text"] == "the opencode session"
+    assert row["owner"] == CONFIGURED_OWNER
+
+
+def test_opencode_key_outside_its_namespace_is_422(api):
+    """An opencode source's key must start with 'opencode://'; a claude-session key is refused."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(OPENCODE_SECRET),
+        json={"key": "claude-session://abc", "text": "x", "owner": CONFIGURED_OWNER},
+    )
+    assert response.status_code == 422
+
+
+def test_opencode_source_cannot_send_bytes(api, config):
+    """An opencode source sends text only: a bytes upsert from it is refused and nothing is spooled."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(OPENCODE_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "opencode://ses_abc", "file_type": "md"},
+    )
+    assert response.status_code == 422
+    assert _spool_files(config) == []
+
+
+def test_filesystem_source_cannot_send_text(api):
+    """A filesystem source sends bytes only: a text upsert from NAS is refused."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(NAS_SECRET),
+        json={"key": "/mnt/nfs/Florian/a.md", "text": "x", "owner": CONFIGURED_OWNER},
+    )
+    assert response.status_code == 422
+
+
+def test_opencode_session_cannot_change_key(api, config):
+    """An opencode session is keyed by its id and never moves: a change_key from it is refused, nothing recorded."""
+    response = api.post(
+        "/v1/change-key",
+        headers=_auth(OPENCODE_SECRET),
+        json={"key": "opencode://ses_a", "new_key": "opencode://ses_b"},
+    )
+
+    assert response.status_code == 422
+    assert "never move" in response.json()["detail"]
+    registry = _registry(config)
+    try:
+        count = registry._conn.execute("SELECT COUNT(*) FROM intake").fetchone()[0]
+    finally:
+        registry.close()
+    assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Owner: fixed for a source that has one, named per item for one that has none
+# ---------------------------------------------------------------------------
+
+def test_no_fixed_owner_source_stores_the_configured_owner_it_names(api, config):
+    """nas has no fixed owner: an upsert names the item's owner, and the name is stored on the row."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(NAS_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/mnt/nfs/Florian/a.md", "file_type": "md", "owner": CONFIGURED_OWNER},
+    )
+
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    assert row["owner"] == CONFIGURED_OWNER
+    assert row["source_id"] == SOURCE_ID_NAS
+
+
+def test_no_fixed_owner_source_may_name_the_shared_owner(api):
+    """The shared owner in ragnart.yaml is a configured name, so nas may name it too."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(NAS_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/mnt/nfs/La-Familia/a.md", "file_type": "md", "owner": SHARED_OWNER},
+    )
+    assert response.status_code == 202
+
+
+def test_no_fixed_owner_source_without_an_owner_is_422_and_not_spooled(api, config):
+    """A source with no fixed owner must name the owner: without one the points would have none."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(NAS_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/mnt/nfs/Florian/a.md", "file_type": "md"},
+    )
+    assert response.status_code == 422
+    assert _spool_files(config) == []
+
+
+def test_owner_outside_the_configured_names_is_422_and_not_spooled(api, config):
+    """An owner that ragnart.yaml does not configure is refused with 422, and nothing is spooled."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(NAS_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/mnt/nfs/Florian/a.md", "file_type": "md", "owner": "mallory"},
+    )
+    assert response.status_code == 422
+    assert _spool_files(config) == []
+
+
+def test_owner_on_a_text_upsert_is_checked_the_same_way(api):
+    """The text route applies the same owner rule: an unconfigured name is 422 for opencode-k11."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(OPENCODE_SECRET),
+        json={"key": "opencode://ses_abc", "text": "x", "owner": "mallory"},
+    )
+    assert response.status_code == 422
+
+
+def test_fixed_owner_source_refuses_an_owner_in_the_request(api, config):
+    """MBP has the fixed owner florian: naming any owner in an upsert is 422, nothing recorded."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(MBP_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/Users/fotel/MBP/a.md", "file_type": "md", "owner": CONFIGURED_OWNER},
+    )
+    assert response.status_code == 422
+    assert _spool_files(config) == []
+
+
+def test_fixed_owner_source_text_upsert_refuses_an_owner(api):
+    """claude-MBP has a fixed owner too: a text upsert that names one is 422."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(CLAUDE_SECRET),
+        json={"key": "claude-session://abc", "text": "x", "owner": CONFIGURED_OWNER},
+    )
+    assert response.status_code == 422
+
+
+def test_fixed_owner_source_stores_no_owner_on_the_row(api, config):
+    """With no owner in the request, a fixed-owner source's row has a NULL owner: the worker uses the source's."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(MBP_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/Users/fotel/MBP/a.md", "file_type": "md"},
+    )
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    assert row["owner"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tag and project_id on an upsert
+# ---------------------------------------------------------------------------
+
+def test_bytes_upsert_stores_tag_and_project_id(api, config):
+    """tag and project_id are dedicated upsert fields: they reach the row, not the metadata."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(MBP_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/Users/fotel/MBP/a.md", "file_type": "md", "tag": "cisco", "project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    assert (row["tag"], row["project_id"]) == ("cisco", PROJECT_ID)
+    assert row["metadata"] is None
+
+
+def test_text_upsert_stores_tag_and_project_id(api, config):
+    """The text route stores the same two fields."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(CLAUDE_SECRET),
+        json={"key": "claude-session://abc", "text": "x", "tag": "demo", "project_id": "global"},
+    )
+
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    assert (row["tag"], row["project_id"]) == ("demo", "global")
+
+
+def test_upsert_with_unknown_project_is_422_and_not_spooled(api, config):
+    """A project_id that is not in the registry is refused with 422 before anything is spooled."""
+    response = api.post(
+        "/v1/upsert/bytes",
+        headers=_auth(MBP_SECRET),
+        files={"file": ("a.md", b"x", "text/markdown")},
+        data={"key": "/Users/fotel/MBP/a.md", "file_type": "md", "project_id": "no-such-project"},
+    )
+    assert response.status_code == 422
+    assert _spool_files(config) == []
+
+
+def test_text_upsert_with_unknown_project_is_422(api):
+    """The text route refuses an unknown project_id the same way."""
+    response = api.post(
+        "/v1/upsert/text",
+        headers=_auth(CLAUDE_SECRET),
+        json={"key": "claude-session://abc", "text": "x", "project_id": "no-such-project"},
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# change-metadata: project_id
+# ---------------------------------------------------------------------------
+
+def test_change_metadata_project_id_must_name_a_registry_project(api):
+    """project_id is changeable; an existing project and 'global' are accepted, an unknown one is 422."""
+    url = "/v1/change-metadata"
+    key = "/Users/fotel/MBP/a.md"
+    assert api.post(url, headers=_auth(MBP_SECRET),
+                    json={"key": key, "metadata": {"project_id": PROJECT_ID}}).status_code == 202
+    assert api.post(url, headers=_auth(MBP_SECRET),
+                    json={"key": key, "metadata": {"project_id": "global"}}).status_code == 202
+    assert api.post(url, headers=_auth(MBP_SECRET),
+                    json={"key": key, "metadata": {"project_id": "no-such-project"}}).status_code == 422
+
+
+def test_change_metadata_project_id_must_be_a_string(api):
+    """A non-string project_id, null included, is refused with 422."""
+    url = "/v1/change-metadata"
+    key = "/Users/fotel/MBP/a.md"
+    for value in (None, 7, ["proj-1"]):
+        response = api.post(url, headers=_auth(MBP_SECRET), json={"key": key, "metadata": {"project_id": value}})
+        assert response.status_code == 422, value
+
+
+def test_change_metadata_project_id_and_owner_together_are_both_accepted(api, config):
+    """The two changeable fields may be sent in one request, on a source with no fixed owner."""
+    response = api.post(
+        "/v1/change-metadata",
+        headers=_auth(NAS_SECRET),
+        json={"key": "/mnt/nfs/Florian/a.md", "metadata": {"project_id": PROJECT_ID, "owner": CONFIGURED_OWNER}},
+    )
+    assert response.status_code == 202
+    registry = _registry(config)
+    try:
+        row = registry.intake_by_id(response.json()["request_id"])
+    finally:
+        registry.close()
+    # The stored metadata carries the checked owner and the project id, both as sent.
+    assert row["metadata"] == {"project_id": PROJECT_ID, "owner": CONFIGURED_OWNER}
+
+
+def test_change_metadata_owner_on_a_fixed_owner_source_is_422_and_records_nothing(api, config):
+    """MBP has the fixed owner florian: a change_metadata that names an owner is refused, as an upsert is."""
+    response = api.post(
+        "/v1/change-metadata",
+        headers=_auth(MBP_SECRET),
+        json={"key": "/Users/fotel/MBP/a.md", "metadata": {"owner": CONFIGURED_OWNER}},
+    )
+    assert response.status_code == 422
+    assert _change_metadata_rows(config, "MBP") == []
+
+
+def test_change_metadata_unconfigured_owner_on_a_no_fixed_owner_source_is_422(api, config):
+    """nas has no fixed owner: a change_metadata naming an owner ragnart.yaml does not configure is refused."""
+    response = api.post(
+        "/v1/change-metadata",
+        headers=_auth(NAS_SECRET),
+        json={"key": "/mnt/nfs/Florian/a.md", "metadata": {"owner": "mallory"}},
+    )
+    assert response.status_code == 422
+    assert _change_metadata_rows(config, SOURCE_ID_NAS) == []

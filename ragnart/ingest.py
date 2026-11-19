@@ -1,9 +1,10 @@
 """
 Document parsing, chunking, and Qdrant upsert for the RAG pipeline.
 
-Implements the 7-step atomic worker loop from RAG-strategy.md §5.4.
-Called by the ingestion daemon (utils/rag_ingest_daemon.py) and the
-FastAPI ingest endpoints in main.py.
+Entry point: ingest_content(), which the intake worker (ragnart/intake_worker.py) calls once for
+each request the ingestion API accepted. For one item it deletes the item's old points, runs the
+admission rules, parses, chunks, embeds and upserts the new points. Nothing here reads a queue or
+a state database: the caller owns the item's state.
 
 Chunking strategy (RAG-strategy.md §3.1):
   - Parent-child (PDF, DOCX, IPYNB, long MD): child ~250 tok embedded;
@@ -32,7 +33,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,12 +62,7 @@ from qdrant_client.models import (
 from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_sparse
 from .embeddings import embed_batch, embed_sparse
 from .hashing import hash_file, hash_text
-from .chat_render import _parse_claude_chat, _parse_opencode_session
-from .projects import project_id_for_path
-from .registry import RegistryDB
-# Not used by this module any more (the .claude lookup moved to chat_render.py). The name is
-# kept here because tests/test_ingest_admission.py monkeypatches ingest.claude_dot_claude_dir.
-from .scanner import claude_dot_claude_dir  # noqa: F401
+from .chat_render import _parse_claude_chat
 from .schema import (
     FIELD_CHUNK_INDEX,
     FIELD_CONTENT_HASH,
@@ -89,9 +84,7 @@ from .schema import (
     GLOBAL_PROJECT_ID,
     PIPELINE_VERSION_P1,
     SPARSE_VECTOR_NAME,
-    source_id_for_key,
 )
-from .state import StateDB
 from .textquality import GATE_THRESHOLD, printable_ratio, sniff_binary_text
 
 logger = logging.getLogger(__name__)
@@ -339,11 +332,11 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
                 path.name, file_type, exc,
             )
             # No raw-read fallback for binary PPTX: if _parse_pptx raises, let it
-            # propagate so ingest_file() marks the file failed rather than embedding garbage.
+            # propagate, so the caller records the item as failed rather than embedding garbage.
             return _parse_pptx(path)
         # No raw-read fallback for PDF or DOCX. A raw UTF-8 read of a binary file
-        # produces garbage text that then gets embedded. Raise instead, so ingest_file()
-        # marks the item failed; the retry path then ends it as ignored.
+        # produces garbage text that then gets embedded. Raise instead: the caller records the
+        # item as failed, and the retry path then ends it as ignored.
         raise RuntimeError(f"docling failed: {exc}") from exc
 
 
@@ -448,7 +441,7 @@ def _select_chunks(text: str, file_type: str) -> tuple[list[tuple[str, str]], st
 
 
 # ---------------------------------------------------------------------------
-# Admission rules, shared by ingest_file (NAS and hub items) and ingest_content (endpoint items).
+# Admission rules, used by ingest_content for every item it receives.
 #
 # Each helper returns the reason an item is ignored, or None when the item passes. The reason
 # text is what the queue (mark_ignored) or the intake row (admission_reason) records, so both
@@ -459,7 +452,7 @@ def _admission_limits(rag_cfg: dict) -> tuple[int, float, int]:
     """
     Return (max_text_bytes, fffd_threshold, max_chunks) from rag_cfg["admission"].
 
-    Code defaults apply when a key is absent, as ingest_file has always done.
+    Code defaults apply when a key is absent.
     """
     admission_cfg = rag_cfg.get("admission", {})
     max_text_bytes = admission_cfg.get("max_text_file_size_bytes", 5_000_000)
@@ -519,386 +512,13 @@ def item_filter(source_id: str, key: str) -> Filter:
 
 
 # ---------------------------------------------------------------------------
-# Worker loop
-# ---------------------------------------------------------------------------
-
-async def ingest_file(
-    file_path: str,
-    owner: str,
-    rag_cfg: dict,
-    state_db: StateDB,
-    registry_db: RegistryDB,
-    qdrant_client: QdrantClient,
-    tag: str = "",
-    embed_concurrency: int = 5,
-    origin_path: str | None = None,
-    last_modified: float | None = None,
-) -> None:
-    """
-    Atomically parse, chunk, embed, and upsert one document into Qdrant.
-
-    Implements the 7-step atomic worker loop from RAG-strategy.md §5.4:
-      0. Delete stale Qdrant points for this source_id and source_path (idempotency).
-      1. Mark file as 'processing' in StateDB.
-      2. Parse document → full text.
-      3. Chunk text → (child, parent) pairs.
-      4. Embed child texts via Ollama.
-      5. Build PointStruct list with full payload.
-      6. Single atomic upsert to Qdrant.
-      7. Mark file as 'completed' in StateDB.
-
-    On any failure: marks the file as failed (with auto-retry logic in
-    StateDB) and re-raises so the daemon loop can move to the next file.
-
-    Args:
-        file_path:        Absolute NFS path to the file.
-        owner:            Owner string (e.g. "florian") — from StateDB row.
-        rag_cfg:          config["rag"] dict — embedding_model, ollama_url.
-        state_db:         StateDB instance for ingestion status tracking.
-        registry_db:      RegistryDB holding the ragnart projects. Attachment reads it.
-        qdrant_client:    Qdrant client in local persistent mode (NAS).
-        tag:              Optional tag derived by the NFS scanner (e.g. "certifications").
-        embed_concurrency: Max parallel Ollama embedding requests per file.
-                          Controlled by --batch in rag_ingest_daemon.py (default 5).
-        origin_path:      Where the bytes are read, from the queue row. Required for
-                          claude-session:// keys (their key is not a path). NAS files
-                          read file_path directly, so origin_path is not needed for them.
-        last_modified:    Source modification time (UNIX seconds) from the queue row.
-                          Written to the payload as modified_at.
-    """
-    model      = rag_cfg.get("embedding_model", "bge-m3")
-    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
-
-    # Admission caps (ragnart.yaml rag.admission). Code defaults apply when a key is absent.
-    max_text_bytes, fffd_threshold, max_chunks = _admission_limits(rag_cfg)
-
-    file_name     = Path(file_path).name
-    raw_file_type = Path(file_path).suffix.lstrip(".").lower()
-
-    # The source (store) this item belongs to, from its key prefix. schema.py is the one
-    # place that rule lives, so ingest does not repeat it.
-    source_id = source_id_for_key(file_path)
-
-    # Only text-like files get the size cap, the NUL sniff and the replacement-character check.
-    is_text_like = is_text_like_path(file_path)
-
-    try:
-        # ------------------------------------------------------------------
-        # Step 0: delete stale Qdrant points (delete-before-insert)
-        #
-        # Ensures re-ingestion of a modified file never leaves duplicate points.
-        # Even if the collection is brand-new, deleting 0 matching points is valid.
-        # Both conditions are required: a source_path alone is not enough to name the
-        # points of one item, because another source could hold the same path string.
-        # ------------------------------------------------------------------
-        ensure_collection(qdrant_client)
-        qdrant_client.delete(
-            collection_name=DOCUMENTS_COLLECTION,
-            points_selector=FilterSelector(
-                filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key=FIELD_SOURCE_ID,
-                            match=MatchValue(value=source_id),
-                        ),
-                        FieldCondition(
-                            key=FIELD_SOURCE_PATH,
-                            match=MatchValue(value=file_path),
-                        ),
-                    ]
-                )
-            ),
-        )
-
-        # ------------------------------------------------------------------
-        # Step 1: mark processing
-        # ------------------------------------------------------------------
-        state_db.mark_processing(file_path)
-
-        # ------------------------------------------------------------------
-        # Step 2: parse document
-        #
-        # Claude Code session files (.jsonl) are parsed directly to extract
-        # user/assistant turns and cross-reference metadata (session_id, project).
-        # All other formats go through _parse_to_text (docling / ipynb / utf-8).
-        # asyncio.to_thread keeps the event loop responsive for other tasks.
-        # ------------------------------------------------------------------
-        state_db.set_progress(file_path, "parsing")
-        if file_path.startswith("opencode://"):
-            oc_api_url = rag_cfg.get("opencode_api_url", "http://localhost:4096")
-            oc_password_env_file = rag_cfg.get("opencode_password_env_file")
-            text, chat_meta, launch_dir = await asyncio.to_thread(
-                _parse_opencode_session, file_path, oc_api_url, oc_password_env_file
-            )
-            file_type = "opencode"
-        elif file_path.startswith("claude-session://"):
-            # The key is a session identity, not a path. The real .jsonl is origin_path.
-            # A missing origin_path means the row was never scanned with the new code.
-            # Fail the item rather than guess a path.
-            if not origin_path:
-                raise RuntimeError(f"claude-session key with no origin_path recorded: {file_path}")
-            text, chat_meta, launch_dir = await asyncio.to_thread(
-                _parse_claude_chat, Path(origin_path)
-            )
-            file_type = "claude_chat"
-        else:
-            if is_text_like:
-                # Size cap is checked from the filesystem before the file is read at all.
-                size_bytes = Path(file_path).stat().st_size
-                size_reason = _size_cap_reason(size_bytes, max_text_bytes)
-                if size_reason is not None:
-                    logger.warning("Skipping %s — %s", file_path, size_reason)
-                    state_db.mark_ignored(file_path, size_reason)
-                    return
-                # NUL sniff on the raw bytes, before any parsing. Binary files almost
-                # always have a NUL near the start; text files never do.
-                nul_reason = sniff_binary_text(Path(file_path))
-                if nul_reason is not None:
-                    logger.warning("Skipping %s — %s", file_path, nul_reason)
-                    state_db.mark_ignored(file_path, nul_reason)
-                    return
-            text = await asyncio.to_thread(_parse_to_text, file_path, raw_file_type)
-            file_type = raw_file_type
-            chat_meta = {}
-            launch_dir = None  # files have no launch directory
-
-        # Replacement-character check for text-like files. It runs on the text already
-        # decoded above, so the file is not read a second time. U+FFFD is what the
-        # UTF-8 decoder emits for undecodable bytes, so a high ratio means the file is binary.
-        if is_text_like:
-            replacement_reason = _replacement_reason(text, fffd_threshold)
-            if replacement_reason is not None:
-                logger.warning("Skipping %s — %s", file_path, replacement_reason)
-                state_db.mark_ignored(file_path, replacement_reason)
-                return
-
-        # For chat sessions, the raw file_name is a meaningless identifier
-        # (UUID-named .jsonl for Claude Code, ses_<id> for opencode). Replace it
-        # with the human-readable session_title so any renderer using file_name
-        # gets a sensible label without per-type special-casing.
-        if chat_meta.get(FIELD_SESSION_TITLE):
-            file_name = chat_meta[FIELD_SESSION_TITLE]
-
-        # ------------------------------------------------------------------
-        # Project attachment, computed once per item and written to every point and
-        # to SQLite. The match is by path, against the registered projects.
-        #   - NAS files: matched by their own item key (file_path).
-        #   - claude-session:// and opencode:// items: matched by the directory the
-        #     session was launched from (launch_dir, as extracted at parse time).
-        # A missing launch_dir means the item attaches to the global project.
-        # Matching is verbatim, so a symlinked launch path does not attach.
-        # ------------------------------------------------------------------
-        if file_path.startswith(("claude-session://", "opencode://")):
-            match_path = launch_dir
-        else:
-            match_path = file_path
-        if match_path:
-            # Rows without a path (the reserved 'global' row) cannot attach anything.
-            registered_paths = [
-                (project["id"], project["path"])
-                for project in registry_db.list_projects()
-                if project["path"]
-            ]
-            project_id = project_id_for_path(match_path, registered_paths, GLOBAL_PROJECT_ID)
-        else:
-            project_id = GLOBAL_PROJECT_ID
-
-        if not text.strip():
-            logger.warning("Empty document, skipping: %s", file_path)
-            # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
-            state_db.mark_completed(
-                file_path, chunk_count=0, pipeline_version=PIPELINE_VERSION_P1, project_id=project_id,
-            )
-            return
-
-        # Skip documents whose parsed text is mostly binary/garbage characters.
-        # Corrupt scanned PDFs and binary-encoded files produce noise vectors
-        # that crowd out legitimate search results.
-        # The ratio rule (and its threshold) lives in ragnart/textquality.py so that
-        # ingest and the purge tool cannot drift apart.
-        printable_reason = _printable_reason(text)
-        if printable_reason is not None:
-            logger.warning("Skipping %s — %s (binary/corrupt content)", file_path, printable_reason)
-            state_db.mark_ignored(file_path, printable_reason)
-            return
-
-        # ------------------------------------------------------------------
-        # Step 3: chunk
-        # ------------------------------------------------------------------
-        pairs, strategy = _select_chunks(text, file_type)
-        n = len(pairs)
-
-        # Chunk cap applies to every file type. It is checked here, before embedding,
-        # so an item that would produce thousands of vectors costs no embedding time.
-        chunk_reason = _chunk_cap_reason(n, max_chunks)
-        if chunk_reason is not None:
-            logger.warning("Skipping %s — %s", file_name, chunk_reason)
-            state_db.mark_ignored(file_path, chunk_reason)
-            return
-
-        state_db.set_progress(file_path, f"chunking ({n} chunks)")
-        logger.info(
-            "Chunked %s → %d chunks  strategy=%s  file_type=%s",
-            file_name, n, strategy, file_type,
-        )
-
-        if not pairs:
-            logger.warning("No chunks produced, skipping: %s", file_path)
-            # The row is fully processed by the current pipeline, so the metadata backfill must not pick it up.
-            state_db.mark_completed(
-                file_path, chunk_count=0, pipeline_version=PIPELINE_VERSION_P1, project_id=project_id,
-            )
-            return
-
-        # ------------------------------------------------------------------
-        # Step 4: embed child texts via Ollama (embed_concurrency-concurrent semaphore)
-        # ------------------------------------------------------------------
-        child_texts = [child for child, _ in pairs]
-
-        def _log_embed_progress(done: int, total: int) -> None:
-            logger.info("Embedding progress: %d/%d  %s", done, total, file_name)
-
-        state_db.set_progress(file_path, f"embedding 0/{n}")
-        vectors = await embed_batch(
-            child_texts, model=model, ollama_url=ollama_url,
-            progress_cb=_log_embed_progress,
-            concurrency=embed_concurrency,
-        )
-        state_db.set_progress(file_path, f"embedding {n}/{n}")
-
-        # ------------------------------------------------------------------
-        # Hash and timestamps, computed before Step 5 because every point's payload
-        # carries them. The same now_iso goes to the payload's ingested_at and to the
-        # SQLite completed_at, so the two agree exactly.
-        #
-        # OpenCode content lives only in OpenCode's own DB, so it has no file to hash.
-        # Its hash fields stay NULL.
-        # ------------------------------------------------------------------
-        now_iso = datetime.now(timezone.utc).isoformat()
-        is_opencode = file_path.startswith("opencode://")
-        if is_opencode:
-            source_type = "opencode_session"
-            hash_size = hash_md5 = hashed_at = None
-        else:
-            # origin_path is the real file for claude-session keys. For NAS files it
-            # equals file_path (or is absent on rows that predate origin_path).
-            source_type = (
-                "claude_session" if file_path.startswith("claude-session://") else "file"
-            )
-            hash_size, hash_md5 = await asyncio.to_thread(hash_file, origin_path or file_path)
-            hashed_at = now_iso
-        # modified_at is the queue row's last_modified, as an ISO 8601 UTC string.
-        modified_at = (
-            datetime.fromtimestamp(last_modified, tz=timezone.utc).isoformat()
-            if last_modified is not None
-            else None
-        )
-
-        # ------------------------------------------------------------------
-        # Step 5: build PointStructs
-        #
-        # Random UUIDs — step 0 handles cleanup before re-insert, so there
-        # are no orphan-ID concerns when chunking produces a different count.
-        #
-        # Sparse vectors (BM25) are conditionally included if the collection
-        # has sparse_text configured. Before migration via rag_sparse_migrate.py,
-        # ingest only dense vectors (backward compatible).
-        # ------------------------------------------------------------------
-        sparse_ready = _is_sparse_ready(qdrant_client)
-        points = []
-        for chunk_idx, ((child_text, parent_text), vector) in enumerate(zip(pairs, vectors)):
-            if sparse_ready:
-                sparse_indices, sparse_values = embed_sparse(child_text)
-                point_vector = {
-                    "": vector,  # "" is the Qdrant key for the unnamed dense vector
-                    SPARSE_VECTOR_NAME: SparseVector(indices=sparse_indices, values=sparse_values),
-                }
-            else:
-                point_vector = vector  # dense-only until migration is complete
-
-            points.append(
-                PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=point_vector,
-                    payload={
-                        FIELD_TEXT:        child_text,
-                        FIELD_PARENT_TEXT: parent_text,
-                        FIELD_OWNER:       owner,
-                        FIELD_SOURCE_PATH: file_path,
-                        FIELD_FILE_NAME:   file_name,
-                        FIELD_FILE_TYPE:   file_type,
-                        FIELD_PAGE:        0,   # page-level tracking: future enhancement
-                        FIELD_CHUNK_INDEX: chunk_idx,
-                        FIELD_TAG:         tag,
-                        # Identity and freshness fields, on every point.
-                        FIELD_SOURCE_ID:    source_id,
-                        FIELD_PIPELINE_VERSION: PIPELINE_VERSION_P1,
-                        FIELD_PROJECT_ID:   project_id,
-                        FIELD_SOURCE_TYPE:  source_type,
-                        FIELD_MODIFIED_AT:  modified_at,
-                        FIELD_INGESTED_AT:  now_iso,
-                        FIELD_CONTENT_HASH: hash_md5,
-                        **chat_meta,
-                    },
-                )
-            )
-
-        # ------------------------------------------------------------------
-        # Step 6: batched upsert
-        #
-        # A single upsert with all points can exceed Qdrant's HTTP body limit
-        # for large files (Qdrant returns HTTP 400 "Payload error: JSON payload
-        # (N bytes)"). Splitting into _UPSERT_BATCH_SIZE-point batches keeps
-        # each request well under the limit.
-        #
-        # Atomicity note: step 0 deleted all stale points for this file before
-        # processing began, so the collection is already clean. Individual batch
-        # failures leave a partial set of points for this file — the daemon's
-        # mark_failed() + retry logic will re-run from step 0 on the next
-        # attempt, deleting the partial set before re-inserting cleanly.
-        # ------------------------------------------------------------------
-        state_db.set_progress(file_path, "upserting")
-        for batch_start in range(0, len(points), _UPSERT_BATCH_SIZE):
-            qdrant_client.upsert(
-                collection_name=DOCUMENTS_COLLECTION,
-                points=points[batch_start : batch_start + _UPSERT_BATCH_SIZE],
-            )
-
-        # ------------------------------------------------------------------
-        # Step 7: mark completed, with the same metadata written to the points
-        # ------------------------------------------------------------------
-        state_db.mark_completed(
-            file_path,
-            chunk_count=len(points),
-            source_type=source_type,
-            file_type=file_type,
-            pipeline_version=PIPELINE_VERSION_P1,
-            size_bytes=hash_size,
-            content_hash=hash_md5,
-            hashed_at=hashed_at,
-            completed_at=now_iso,
-            launch_dir=launch_dir,
-            project_id=project_id,
-        )
-        logger.info(
-            "Ingested %s: %d points  owner=%s  tag=%s",
-            file_name, len(points), owner, tag or "—",
-        )
-
-    except Exception as exc:
-        logger.error("Ingestion failed for %s: %s", file_path, exc, exc_info=True)
-        state_db.mark_failed(file_path, str(exc))
-        raise
-
-
-# ---------------------------------------------------------------------------
 # Content-based ingestion for endpoint items (v0.3 session B1)
 #
 # An endpoint item is identified by the source it was submitted to and by its key. The key is an
 # opaque string here: it is never opened as a file, and its prefix never decides the source. The
 # caller passes the source id, taken from the authenticated request. Admission, parsing, chunking,
-# embedding and the point payload follow ingest_file. There is no StateDB: the intake worker
-# records the result on the intake row.
+# embedding and the point payload are described on ingest_content. There is no StateDB: the intake
+# worker records the result on the intake row.
 # ---------------------------------------------------------------------------
 
 # A declared file type becomes the suffix of a temporary link during parsing, so it must be a
@@ -966,7 +586,7 @@ async def _admit_and_parse_spool(
     fffd_threshold: float,
 ) -> tuple[str | None, str | None]:
     """
-    Run the bytes admission checks in ingest_file's order, and parse the spool file.
+    Run the bytes admission checks, and parse the spool file.
 
     Order: size cap, NUL sniff (text-like files only, before any parse), parse, then the
     replacement-character check (text-like files only). Returns (text, None) when the item
@@ -990,6 +610,13 @@ async def _admit_and_parse_spool(
     return text, None
 
 
+# The connector names, as ragnart/ingest_api.py CONNECTOR_* and the sources table spell them.
+# ingest_content takes the connector from the source, and it decides what kind of item this is.
+_CONNECTOR_FILESYSTEM = "filesystem"
+_CONNECTOR_CLAUDE_CODE = "claude_code"
+_CONNECTOR_OPENCODE = "opencode"
+
+
 async def ingest_content(
     *,
     source_id: str,
@@ -997,30 +624,39 @@ async def ingest_content(
     owner: str,
     rag_cfg: dict,
     qdrant_client: QdrantClient,
+    connector: str = _CONNECTOR_FILESYSTEM,
     spool_path: str | None = None,
     file_type: str | None = None,
     text: str | None = None,
     chat_meta: dict | None = None,
     embed_concurrency: int = 5,
     modified_at: str | None = None,
+    tag: str = "",
+    project_id: str = GLOBAL_PROJECT_ID,
 ) -> IngestResult:
     """
     Parse, chunk, embed and upsert one endpoint item, replacing its earlier points.
 
-    Give exactly one content form:
-      spool_path + file_type: uploaded bytes. The file type is the one the request declared. The
-                              item is stored with source_type 'file' and file_type as declared.
-      text:                   text rendered by the endpoint (a Claude Code session in B1). It is
-                              not parsed. It is stored with source_type 'claude_session' and
-                              file_type 'claude_chat'.
+    The connector of the source says what the item is, and which content form it takes:
+      filesystem  spool_path + file_type: uploaded bytes. The file type is the one the request
+                  declared. The item is stored with source_type 'file' and that file_type. Its
+                  content hash is the MD5 of the bytes, the same hash the NAS side computes for a file.
+      claude_code text: a Claude Code session rendered by the sender. Not parsed. Stored with
+                  source_type 'claude_session' and file_type 'claude_chat'. Its content hash is the
+                  MD5 of the text as UTF-8 (B1 behaviour, unchanged).
+      opencode    text: an OpenCode session rendered by the sender. Not parsed. Stored with
+                  source_type 'opencode_session' and file_type 'opencode'. No content hash, as
+                  No hash is stored for OpenCode content (it lives only in OpenCode's DB).
 
     Args:
         source_id:   The source the item belongs to, in its stored case. Taken from the
                      authenticated request by the intake worker, never from the key.
         key:         The item's key within the source. Matched as a string; never opened.
-        owner:       The owner written to every point (the source's registered owner).
+        owner:       The owner written to every point: the item's own owner, or the source's.
         rag_cfg:     config["rag"]: embedding model, Ollama URL and rag.admission caps.
         qdrant_client: Qdrant client for the documents collection.
+        connector:   The source's connector: 'filesystem', 'claude_code' or 'opencode' (see above).
+                     Default 'filesystem', so a caller that sends bytes need not name it.
         spool_path:  Path of the uploaded bytes (see above). Read, not removed: the caller removes it.
         file_type:   The declared type of the uploaded bytes, e.g. 'pdf', 'md'.
         text:        The rendered text (see above).
@@ -1029,40 +665,60 @@ async def ingest_content(
                      they always win.
         embed_concurrency: Max parallel embedding requests for this item.
         modified_at: The item's modification time as an ISO-8601 UTC string, written unchanged to
-                     every point. The API produces it in the same form ingest_file writes
-                     (datetime.isoformat() of a UTC datetime). None when the caller does not know it.
+                     every point. The API produces it as datetime.isoformat() of a UTC datetime.
+                     None when the caller does not know it.
+        tag:         The item's tag, written to every point. '' when the item has none.
+        project_id:  The ragnart project the item attaches to, written to every point. 'global' when
+                     the item attaches to none. The caller resolves it (the API checks it exists).
 
     Returns:
         An IngestResult. Admission refusals come back as status 'ignored' with the reason, the
-        same wording ingest_file records. Exceptions (a parse failure, an embedding failure, a
+        same wording the NAS side records. Exceptions (a parse failure, an embedding failure, a
         Qdrant error) propagate to the caller.
 
     Raises:
-        ValueError: when neither or both content forms are given, when a spool is given with no
-                    file_type, or when file_type is not a plain word.
+        ValueError: when the connector is unknown; when the content form does not match the connector
+                    (bytes for a session connector, text for filesystem); when neither or both content
+                    forms are given; when a spool is given with no file_type, or when file_type is not
+                    a plain word.
     """
     if (spool_path is None) == (text is None):
         raise ValueError("ingest_content needs exactly one of spool_path (bytes) or text")
     if spool_path is not None and file_type is None:
         raise ValueError("ingest_content needs file_type with spool_path")
 
+    # The connector decides the content form and the item's type. A mismatch is refused, not guessed.
+    if connector == _CONNECTOR_FILESYSTEM:
+        if spool_path is None:
+            raise ValueError("a filesystem item is uploaded as bytes (spool_path), not as text")
+    elif connector in (_CONNECTOR_CLAUDE_CODE, _CONNECTOR_OPENCODE):
+        if text is None:
+            raise ValueError(f"a {connector} item is sent as text, not as bytes (spool_path)")
+    else:
+        raise ValueError(f"unknown connector {connector!r}: use 'filesystem', 'claude_code' or 'opencode'")
+
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
     max_text_bytes, fffd_threshold, max_chunks = _admission_limits(rag_cfg)
     chat_fields = dict(chat_meta or {})
 
-    # The type stored on the points. Bytes keep their declared type. Text is a rendered chat session.
-    if spool_path is not None:
+    # The type stored on the points. Bytes keep their declared type. The session connectors store
+    # their kind: claude_session/claude_chat, or opencode_session/opencode.
+    if connector == _CONNECTOR_FILESYSTEM:
         raw_file_type = _declared_file_type(file_type)
         stored_file_type = raw_file_type
         source_type = "file"
+    elif connector == _CONNECTOR_OPENCODE:
+        raw_file_type = None
+        stored_file_type = "opencode"
+        source_type = "opencode_session"
     else:
         raw_file_type = None
         stored_file_type = "claude_chat"
         source_type = "claude_session"
 
     # ------------------------------------------------------------------
-    # Step 0: delete stale points of this item (delete-before-insert), as ingest_file does. It runs
+    # Step 0: delete stale points of this item (delete-before-insert). It runs
     # before admission, so an item that is now ignored loses its old points too.
     # ------------------------------------------------------------------
     ensure_collection(qdrant_client)
@@ -1079,8 +735,7 @@ async def ingest_content(
             spool_path, raw_file_type, max_text_bytes, fffd_threshold,
         )
     else:
-        # Rendered text is not parsed and has no size cap, NUL sniff or replacement check, as
-        # ingest_file does for session text.
+        # Rendered text is not parsed and has no size cap, NUL sniff or replacement check.
         item_text, reason = text, None
     if reason is not None:
         logger.warning("Skipping %s — %s", key, reason)
@@ -1116,16 +771,20 @@ async def ingest_content(
         return IngestResult("completed", None, 0, None, PIPELINE_VERSION_P1)
 
     # ------------------------------------------------------------------
-    # Hash: MD5 of the uploaded bytes, or of the text as UTF-8. Taken before embedding, as
-    # ingest_file takes its hash before building the points.
+    # Hash, taken before embedding and before the points are built:
+    #   filesystem: MD5 of the uploaded bytes (the NAS side computes the same hash for a file).
+    #   claude_code: MD5 of the rendered text as UTF-8 (B1 behaviour; see the docstring).
+    #   opencode:   no hash. None is stored for OpenCode content, so none is stored here.
     # ------------------------------------------------------------------
-    if spool_path is not None:
+    if connector == _CONNECTOR_FILESYSTEM:
         _size_bytes, content_hash = await asyncio.to_thread(hash_file, spool_path)
-    else:
+    elif connector == _CONNECTOR_CLAUDE_CODE:
         content_hash = hash_text(item_text)
+    else:
+        content_hash = None
 
     # ------------------------------------------------------------------
-    # Embed the child texts (as ingest_file does)
+    # Embed the child texts
     # ------------------------------------------------------------------
     child_texts = [child for child, _ in pairs]
     vectors = await embed_batch(
@@ -1133,7 +792,7 @@ async def ingest_content(
     )
 
     # ------------------------------------------------------------------
-    # Build the points. The payload follows ingest_file, with the endpoint's identity fields.
+    # Build the points. The payload carries the item's identity fields.
     # ------------------------------------------------------------------
     now_iso = datetime.now(timezone.utc).isoformat()
     sparse_ready = _is_sparse_ready(qdrant_client)
@@ -1164,11 +823,10 @@ async def ingest_content(
                     FIELD_FILE_TYPE:   stored_file_type,
                     FIELD_PAGE:        0,   # page-level tracking: future enhancement
                     FIELD_CHUNK_INDEX: chunk_idx,
-                    FIELD_TAG:         "",
+                    FIELD_TAG:         tag,
                     FIELD_SOURCE_ID:   source_id,
                     FIELD_PIPELINE_VERSION: PIPELINE_VERSION_P1,
-                    # Endpoint items attach to the global project in B1 (no project publishing yet).
-                    FIELD_PROJECT_ID:  GLOBAL_PROJECT_ID,
+                    FIELD_PROJECT_ID:  project_id,
                     FIELD_SOURCE_TYPE: source_type,
                     FIELD_MODIFIED_AT: modified_at,
                     FIELD_INGESTED_AT: now_iso,
@@ -1178,7 +836,7 @@ async def ingest_content(
         )
 
     # ------------------------------------------------------------------
-    # Upsert in batches, as ingest_file does (see _UPSERT_BATCH_SIZE for why)
+    # Upsert in batches (see _UPSERT_BATCH_SIZE for why)
     # ------------------------------------------------------------------
     for batch_start in range(0, len(points), _UPSERT_BATCH_SIZE):
         qdrant_client.upsert(

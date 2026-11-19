@@ -92,10 +92,37 @@ SOURCES_HOLDING_PROJECTS = frozenset({SOURCE_ID_NAS})
 # The pipeline version every point and queue row carries from v0.3 on.
 PIPELINE_VERSION_P1 = "p1"
 
+# The most items one run sends again because their pipeline version is older (rule (c) of the NAS
+# reconcile, ragnart/sync_reconcile.py, and the same rule of the Mac runner, ragnart/endpoint.py). A version
+# change is therefore spread over runs, and never spools or re-embeds the whole corpus at once.
+DEFAULT_RESUBMIT_BATCH_SIZE = 200
+
+# A pipeline version is 'p' followed by its number, so 'p2' is newer than 'p1'.
+_PIPELINE_VERSION_PATTERN = re.compile(r"p(\d+)")
+
+
+def pipeline_version_is_older(version: str | None, current: str) -> bool:
+    """
+    True when a point written with `version` predates the current pipeline version `current`.
+
+    A point with no version at all (None) predates the field, so it counts as older. A version that
+    cannot be ordered (not of the form 'p<number>') is never called older: it is left alone rather than
+    re-embedded on a guess. Both the NAS reconcile (ragnart/sync_reconcile.py) and the Mac runner
+    (ragnart/endpoint.py) use this one rule.
+    """
+    if version is None:
+        return True
+    hub_match = _PIPELINE_VERSION_PATTERN.fullmatch(version)
+    current_match = _PIPELINE_VERSION_PATTERN.fullmatch(current)
+    if hub_match is None or current_match is None:
+        return False
+    return int(hub_match.group(1)) < int(current_match.group(1))
+
 # Key prefixes that name a non-filesystem source. A key with neither prefix is a
-# filesystem path, and belongs to the NAS source.
+# filesystem path, and belongs to the NAS source. OPENCODE_KEY_PREFIX is public because the
+# ingestion API checks the keys that an opencode source submits (ragnart/ingest_api.py).
 _CLAUDE_KEY_PREFIX = "claude-session://"
-_OPENCODE_KEY_PREFIX = "opencode://"
+OPENCODE_KEY_PREFIX = "opencode://"
 
 
 def source_id_for_key(key: str) -> str:
@@ -121,7 +148,7 @@ def source_id_for_key(key: str) -> str:
     """
     if key.startswith(_CLAUDE_KEY_PREFIX):
         return SOURCE_ID_CLAUDE_LINUX_SHARED_NFS
-    if key.startswith(_OPENCODE_KEY_PREFIX):
+    if key.startswith(OPENCODE_KEY_PREFIX):
         return SOURCE_ID_OPENCODE_K11
     return SOURCE_ID_NAS
 

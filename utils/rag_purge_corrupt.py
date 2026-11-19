@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-Scan Qdrant for corrupt content (low printable-char ratio) and optionally purge.
+Report corrupt content in Qdrant (low printable-char ratio). Read-only: nothing is deleted.
 
 Files with parent_text containing mostly non-printable characters (formatting noise,
-binary artifacts, encoding issues) are identified and can be deleted from Qdrant.
+binary artifacts, encoding issues) are identified and listed, with the minimum printable
+ratio seen for each path.
 
 Corrupt points are cross-referenced with SQLite to show whether the file is still
 queued for re-ingestion (IN_DB) or already completed (NOT_IN_DB).
 
-Hub sources only (v0.3): the scan always covers the hub's own sources (the registry's kind='hub'
-sources), whatever other filter is given. An endpoint source's points are never reported, and
---confirm never deletes them.
+Scope: every source by default. --source limits the scan to one source id, exactly as the
+source is stored (for example nas). --user limits it to one owner. Both can be combined.
+
+The tool never writes. It opens rag_state.db read-only and Qdrant for reading only. Deleting corrupt
+points is not a function of this tool any more: the ingestion side owns the index and removes points
+through the ingestion API (ragnart/sync_submit.py for NAS items).
 
 Usage (run from project root):
     python utils/rag_purge_corrupt.py
-    python utils/rag_purge_corrupt.py --dry-run
     python utils/rag_purge_corrupt.py --threshold 0.8
     python utils/rag_purge_corrupt.py --user florian
-    python utils/rag_purge_corrupt.py --confirm
-    python utils/rag_purge_corrupt.py --confirm --force
+    python utils/rag_purge_corrupt.py --source nas
     python utils/rag_purge_corrupt.py --save /tmp/corrupt_paths.txt
 """
 
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -34,22 +36,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchAny, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E402
 
-from ragnart.cli import open_registry_read_only
-from ragnart.collection import DOCUMENTS_COLLECTION, get_client
-# Single-writer lock: --confirm deletes Qdrant points, so it takes the same lock as the other writers.
-from ragnart.lock import acquire_or_exit, lock_path_from_config
-from ragnart.schema import (
+from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
+from ragnart.schema import (  # noqa: E402
+    FIELD_OWNER,
+    FIELD_PARENT_TEXT,
     FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
-    FIELD_PARENT_TEXT,
-    FIELD_OWNER,
-    source_id_for_key,
 )
 # Shared gate rule and threshold: the same definition the ingest pipeline uses.
-from ragnart.textquality import GATE_THRESHOLD, printable_ratio
-import sqlite3
+from ragnart.textquality import GATE_THRESHOLD, printable_ratio  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -58,16 +55,15 @@ logger = logging.getLogger(__name__)
 def scan_qdrant_for_corrupt(
     client,
     threshold: float,
-    hub_source_ids: set[str],
     user_filter: str | None = None,
+    source_filter: str | None = None,
     batch_size: int = 500,
 ) -> dict:
     """
-    Scroll the hub's Qdrant points, identify corrupt ones, and return metadata.
+    Scroll Qdrant points, identify corrupt ones, and return metadata. Reads only.
 
-    Only points whose source_id is one of hub_source_ids are scrolled. That condition is always
-    part of the scroll filter, and the optional --user condition is ANDed with it. Endpoint
-    points are therefore never reported, and --confirm never deletes them.
+    The scroll filter holds the conditions that were given: the source (when source_filter is set) and the
+    owner (when user_filter is set), ANDed together. With neither, every point is scrolled.
 
     Returns:
         {
@@ -77,30 +73,18 @@ def scan_qdrant_for_corrupt(
             "total_corrupt_points": int,
         }
     """
-    if not hub_source_ids:
-        # An empty set would match no points; refuse rather than report a clean scan.
-        raise ValueError("hub_source_ids is empty: refusing to scan without a hub scope")
-
     corrupt_paths = {}  # path -> min_printable_ratio
     corrupt_points = {}  # path -> point count
     total_points = 0
     total_corrupt_points = 0
 
-    # The hub condition is always present. The --user condition, when given, is ANDed with it.
-    must = [
-        FieldCondition(
-            key=FIELD_SOURCE_ID,
-            match=MatchAny(any=sorted(hub_source_ids)),
-        )
-    ]
+    must = []
+    if source_filter:
+        must.append(FieldCondition(key=FIELD_SOURCE_ID, match=MatchValue(value=source_filter)))
     if user_filter:
-        must.append(
-            FieldCondition(
-                key=FIELD_OWNER,
-                match=MatchValue(value=user_filter),
-            )
-        )
-    scroll_filter = Filter(must=must)
+        must.append(FieldCondition(key=FIELD_OWNER, match=MatchValue(value=user_filter)))
+    # No condition means no filter: every source and every owner is scrolled.
+    scroll_filter = Filter(must=must) if must else None
 
     # Scroll all points
     offset = 0
@@ -171,33 +155,9 @@ def scan_qdrant_for_corrupt(
     }
 
 
-def file_exists(path: str) -> bool:
-    """Check if the file still exists on disk."""
-    try:
-        return os.path.exists(path)
-    except Exception:
-        return False
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Find and optionally purge corrupt Qdrant points"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=True,
-        help="Scan and report (default behavior)",
-    )
-    parser.add_argument(
-        "--confirm",
-        action="store_true",
-        help="Scan and DELETE corrupt points from Qdrant",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Delete even if file still exists on disk (use with --confirm)",
+        description="Report corrupt Qdrant points (read-only; nothing is deleted)"
     )
     parser.add_argument(
         "--threshold",
@@ -209,6 +169,11 @@ def main() -> None:
         "--user",
         metavar="OWNER",
         help="Filter to a specific owner (e.g. florian)",
+    )
+    parser.add_argument(
+        "--source",
+        metavar="SOURCE_ID",
+        help="Filter to one source id, as stored (e.g. nas). Default: every source",
     )
     parser.add_argument(
         "--save",
@@ -233,16 +198,9 @@ def main() -> None:
     state_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     state_conn.row_factory = sqlite3.Row
 
-    # The hub's own sources come from the registry, opened read-only. Nothing is written here.
-    registry = open_registry_read_only(config)
-    try:
-        hub_source_ids = registry.hub_source_ids()
-    finally:
-        registry.close()
-
     print()
     print(f"Scanning Qdrant for corrupt content (threshold: {args.threshold:.2f})")
-    print(f"  Scope: hub sources {', '.join(sorted(hub_source_ids))}")
+    print(f"  Scope: {'source ' + args.source if args.source else 'every source'}")
     if args.user:
         print(f"  Filter: owner={args.user}")
     print()
@@ -251,8 +209,8 @@ def main() -> None:
     result = scan_qdrant_for_corrupt(
         qdrant_client,
         threshold=args.threshold,
-        hub_source_ids=hub_source_ids,
         user_filter=args.user,
+        source_filter=args.source,
         batch_size=500,
     )
 
@@ -305,60 +263,11 @@ def main() -> None:
         print(f"Saved corrupt path list to {args.save}")
         print()
 
-    # --confirm: delete from Qdrant
-    if args.confirm:
-        # The single-writer lock is taken here, before the first delete. The report above
-        # has already printed, so a dry-run (no --confirm) never reaches this block and
-        # never touches the lock file or needs rag.ingest_lock.
-        #
-        # On contention, acquire_or_exit() prints the current holder to stderr and exits
-        # with EXIT_LOCK_HELD (75). It does not wait. No point is deleted in that case.
-        # The lock is held until this process exits, which covers the whole deletion loop.
-        acquire_or_exit(lock_path_from_config(config))
-
-        print("Deleting corrupt points from Qdrant...")
-        deleted_count = 0
-        failed_count = 0
-
-        for path, point_count, in_db, pct, ratio in report:
-            # Skip if file still exists (safety check) unless --force
-            if not args.force and file_exists(path):
-                logger.info("SKIP: file still exists on disk: %s", path)
-                continue
-
-            try:
-                qdrant_client.delete(
-                    collection_name=DOCUMENTS_COLLECTION,
-                    # Item filter: source_id AND source_path, so the delete cannot reach another source's points.
-                    points_selector=FilterSelector(
-                        filter=Filter(
-                            must=[
-                                FieldCondition(
-                                    key=FIELD_SOURCE_ID,
-                                    match=MatchValue(value=source_id_for_key(path)),
-                                ),
-                                FieldCondition(
-                                    key=FIELD_SOURCE_PATH,
-                                    match=MatchValue(value=path),
-                                ),
-                            ]
-                        )
-                    ),
-                    wait=True,
-                )
-                logger.info("DEL OK: %s (%d points)", path, point_count)
-                deleted_count += point_count
-            except Exception as e:
-                logger.error("FAIL: %s: %s", path, e)
-                failed_count += point_count
-
-        print(f"Deleted {deleted_count} points ({failed_count} failed)")
-        print()
-    else:
-        print("(dry-run mode: pass --confirm to delete)")
-        print()
+    print("Read-only report: nothing was deleted.")
+    print()
 
     state_conn.close()
+
 
 if __name__ == "__main__":
     main()

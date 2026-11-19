@@ -45,8 +45,8 @@ retries it. The script exits non-zero if any row failed.
 Collisions: one session uuid can exist as two transcript files (copies in two project
 directories). Its old-key row can then find a row already under the same claude-session://
 key. That is resolved, not failed (see _resolve_collision()): the newer file wins, every
-Qdrant point under the key is deleted, and the key's row is re-queued as pending so the
-daemon re-ingests the winner.
+Qdrant point under the key is deleted, and the key's row is re-queued as pending, so the
+next ingestion run submits the winner.
 """
 
 from __future__ import annotations

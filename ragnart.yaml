@@ -32,6 +32,25 @@ rag:
   # lock manager (cross-machine). See docs/RAG-strategy.md §5.6.
   ingest_lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock"
 
+  # -- NAS ingestion side (utils/rag_sync_nfs.py, docs/RAGNART-design.md §10.3) --
+  # The NAS sources (nas, claude-linux-shared-nfs, opencode-k11) run on the hub's host and submit to the
+  # ingestion API like the Mac does. This block holds only paths: the secrets themselves live in the files
+  # named below (directory 0700, files 0600), and are never written into this file.
+  nas_ingest:
+    # The ingestion API on the hub host. Loopback: the NAS side runs on the same host as the hub.
+    hub_url: "http://127.0.0.1:8101"
+    # Lock of the NAS ingestion run. Separate from rag.ingest_lock, which the intake worker and the
+    # hub maintenance tools take. Both locks are taken by the snapshot (ragnart/lock.py).
+    lock: "/mnt/nfs/__Backups/RAGNART--databases/rag-nas-ingest.lock"
+    # The most rule-(c) resubmissions (older pipeline version) per run, so a version change does not spool
+    # the whole corpus at once. Must be at least 1.
+    resubmit_batch_size: 200
+    # One secret file per source id (the source's Bearer secret, read once when the run starts).
+    secrets:
+      nas: "/home/florian/.ragnart/secrets/nas"
+      claude-linux-shared-nfs: "/home/florian/.ragnart/secrets/claude-linux-shared-nfs"
+      opencode-k11: "/home/florian/.ragnart/secrets/opencode-k11"
+
   # -- Cross-encoder reranking (RAG-strategy.md §6.3) ------------------------
   rerank:
     enabled: true                             # on by default; override via ?rerank=false or --no-rerank

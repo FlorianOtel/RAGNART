@@ -17,8 +17,8 @@ import pytest
 
 from ragnart.state import StateDB
 
-# The schema version that the newest migration produces.
-LATEST_VERSION = 4
+# The schema version that the newest migration produces (5: the request_id column, session B2).
+LATEST_VERSION = 5
 
 # Columns added by migration version 2 (ragnart/state.py _MIGRATIONS).
 NEW_COLUMNS = {
@@ -111,7 +111,7 @@ def test_migration_4_is_empty_so_legacy_tables_survive_a_fresh_db(db, db_path):
         }
     finally:
         conn.close()
-    assert _user_version(db_path) == 4
+    assert _user_version(db_path) == LATEST_VERSION
     assert NEW_TABLES <= table_names
 
 
@@ -255,15 +255,17 @@ def test_mark_completed_without_extra_args_only_sets_status_and_timestamp(db, db
     assert row["content_hash"] is None
 
 
-def test_claim_next_pending_returns_origin_path_and_last_modified(db):
+def test_pending_rows_returns_origin_path_and_last_modified(db):
+    """pending_rows() returns the origin_path and last_modified that the submit step reads."""
     db.discover_or_update("/e.md", "tester", 42.5, origin_path="/e.md")
 
-    claimed = db.claim_next_pending()
+    pending = db.pending_rows()
 
-    assert claimed["file_path"] == "/e.md"
-    assert claimed["owner"] == "tester"
-    assert claimed["origin_path"] == "/e.md"
-    assert claimed["last_modified"] == 42.5
+    assert len(pending) == 1
+    assert pending[0]["file_path"] == "/e.md"
+    assert pending[0]["owner"] == "tester"
+    assert pending[0]["origin_path"] == "/e.md"
+    assert pending[0]["last_modified"] == 42.5
 
 
 def test_live_shaped_db_migrates_in_place(db_path):

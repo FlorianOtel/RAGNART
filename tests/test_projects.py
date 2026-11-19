@@ -138,3 +138,20 @@ def test_project_id_for_path_falls_back_to_global():
     assert project_id_for_path("/home/florian/x.md", projects, "global") == "global"
     # An empty project list is also a fallback to global.
     assert project_id_for_path("/nas/clients/acme/a.md", [], "global") == "global"
+
+
+def test_project_id_for_path_matches_verbatim_and_does_not_resolve_symlinks(tmp_path):
+    """
+    Matching is by string, as written. A path reached through a symlink to a project does not attach to it.
+
+    The NAS side matches a session by its launch directory exactly as the transcript recorded it, so a launch
+    through a symlink stays global. This is the rule the sync relies on (ragnart/sync_submit.py attachment).
+    """
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+    projects = [("acme", str(real_dir))]
+
+    assert project_id_for_path(str(real_dir / "sub"), projects, "global") == "acme"
+    assert project_id_for_path(str(link_dir / "sub"), projects, "global") == "global"

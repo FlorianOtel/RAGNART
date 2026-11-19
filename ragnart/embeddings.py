@@ -63,7 +63,7 @@ async def embed_batch(
                      without locks.
         concurrency: Max parallel Ollama requests. Lower values reduce Ollama
                      queue depth and prevent httpx.ReadTimeout under heavy load.
-                     Controlled by --batch in rag_ingest_daemon.py (default 5).
+                     The caller sets it: ingest_content passes its embed_concurrency (default 5).
     """
     sem = asyncio.Semaphore(concurrency)
     total = len(texts)

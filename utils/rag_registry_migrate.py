@@ -32,10 +32,12 @@ Steps. Each one is re-runnable.
                                    legacy tables are already gone, it verifies the registry has
                                    its projects and reports 'already dropped'.
 
-Why user_version 4. The queue's own migrations go up to 4 (ragnart/state.py). Migration 4 is
-empty: StateDB sets user_version 4 on open without touching the legacy tables, so a database at
-version 4 can still hold them. This tool decides "already dropped" by table presence, never by
-user_version. Setting 4 here records that the legacy-table drop has run. The drop refuses to run
+Why user_version 4. The queue's own migrations go up to 5 (ragnart/state.py). Migration 4 is
+empty and is the reserved slot for this drop. Opening StateDB applies migration 4 and migration 5
+without touching the legacy tables, so a database at version 5 can still hold them. This tool
+decides "already dropped" by table presence, never by user_version. The drop sets user_version 4,
+which marks that the legacy-table drop has run. Migration 5 then runs again on the next open. That
+is harmless: its ADD COLUMN is ignored when the column already exists. The drop refuses to run
 unless the source_id column exists, because a version written onto a database still at version 2
 would make StateDB skip migration 3 for good.
 

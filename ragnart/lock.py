@@ -1,11 +1,14 @@
 """
 Single-writer ingestion lock for every process that writes the RAG index.
 
-Every writer of `rag_state.db` rows or Qdrant points (sync, ingest daemon,
-purge-rescan --apply, purge-corrupt --confirm, reset without --dry-run, the
-snapshot script, and the whole ingestion run) takes the same exclusive lock on
-the file named by `rag.ingest_lock` in ragnart.yaml. This is what makes the
-single-writer rule of docs/RAGNART-design.md §10.3 true.
+Two locks, each one exclusive, each named in ragnart.yaml:
+
+- `rag.ingest_lock` (the index lock, `--which index`, the default). Every writer of the index takes
+  it: the intake worker and hub maintenance. The snapshot script takes it too.
+- `rag.nas_ingest.lock` (the NAS-ingestion lock, `--which nas`). The NAS ingestion run takes it. It
+  writes only its own state DB and submits to the hub, so it does not exclude the intake worker.
+
+The snapshot takes both (index first, then NAS), so the restore triple is taken while neither writer runs.
 
 Design points, in short:
 
@@ -18,13 +21,12 @@ Design points, in short:
 - The lock file doubles as the holder record. The holder writes one line,
   `pid N on HOST, CMD, since ISO_TIME`, into the file after it has the lock.
   A contender reads that line but never truncates or rewrites the file.
-- `run -- CMD` takes the lock in a wrapper process and runs CMD as a child
-  with ENV_HOLDER set to the wrapper's pid. The ingestion run script uses this
-  to hold the lock for the whole run. Its child steps (sync, daemon, snapshot)
-  then see that they are running under a live ancestor that holds the lock,
-  and they skip re-acquiring it. A child cannot take the lock again because
-  POSIX record locks never conflict with the same process's own locks, and
-  because the child is a different pid.
+- `run [--which index|nas] -- CMD` takes the named lock in a wrapper process and runs CMD as a child.
+  The wrapper records its pid for that lock in ENV_HOLDERS, a JSON map from lock path to pid, so more
+  than one lock can be held at once. The NAS run script holds the NAS lock, and the snapshot inside it
+  takes the index lock and finds the NAS lock held by its ancestor. A child's `held` check and its
+  acquire both look up that map. A child cannot take a lock again because POSIX record locks never
+  conflict with the same process's own locks, and because the child is a different pid.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import json
 import os
 import re
 import signal
@@ -49,9 +52,10 @@ import yaml
 # permanent safety refusal.
 EXIT_LOCK_HELD = 75
 
-# Environment variable that `run` sets for its child. Its value is the pid of
-# the wrapper process that holds the lock.
-ENV_HOLDER = "RAGNART_LOCK_HOLDER"
+# Environment variable that `run` sets for its children. Its value is a JSON object that maps each lock
+# file path the wrapper chain holds to the pid of the wrapper process that holds it. One variable covers
+# every lock, so a child of a NAS run and a process nested under it both see the locks above them.
+ENV_HOLDERS = "RAGNART_LOCK_HOLDERS"
 
 # Repository root: ragnart/lock.py -> parent is ragnart/, its parent is the root.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,24 +78,66 @@ _HOLDER_PID_RE = re.compile(r"^pid (\d+) on ")
 _held_fd: int | None = None
 
 
-def lock_path_from_config(config: dict) -> str:
+def _required_lock_path(config: dict, keys: tuple[str, ...]) -> str:
     """
-    Return the lock file path from a loaded ragnart.yaml dict.
+    Return the string at the nested config path `keys` (for example ('rag', 'ingest_lock')).
 
-    The key `rag.ingest_lock` is required. There is no fallback to a host-local
-    path such as /tmp. A per-host fallback would give each host its own lock,
-    and that would silently defeat the whole purpose of the lock.
+    The key is required. There is no fallback to a host-local path such as /tmp. A per-host
+    fallback would give each host its own lock, and that would silently defeat the whole
+    purpose of the lock.
 
     Raises ValueError if the key is missing or empty.
     """
+    dotted = ".".join(keys)
+    value = config
     try:
-        path = config["rag"]["ingest_lock"]
+        for key in keys:
+            value = value[key]
     except (KeyError, TypeError):
-        # TypeError covers a config where `rag` is null or not a mapping.
-        raise ValueError("ragnart.yaml is missing the 'rag.ingest_lock' key.") from None
-    if not path or not isinstance(path, str):
-        raise ValueError("ragnart.yaml rag.ingest_lock must be a non-empty path string.")
-    return path
+        # TypeError covers a config where a level (for example `rag`) is null or not a mapping.
+        raise ValueError(f"ragnart.yaml is missing the '{dotted}' key.") from None
+    if not value or not isinstance(value, str):
+        raise ValueError(f"ragnart.yaml {dotted} must be a non-empty path string.")
+    return value
+
+
+def lock_path_from_config(config: dict) -> str:
+    """
+    Return the index-writer lock file path (`rag.ingest_lock`) from a loaded ragnart.yaml dict.
+
+    This is the lock every writer of the index takes: the intake worker, hub maintenance and the
+    snapshot. The NAS ingestion run takes its own lock instead (nas_ingest_lock_path_from_config).
+
+    Raises ValueError if the key is missing or empty.
+    """
+    return _required_lock_path(config, ("rag", "ingest_lock"))
+
+
+def nas_ingest_lock_path_from_config(config: dict) -> str:
+    """
+    Return the NAS ingestion run's lock file path (`rag.nas_ingest.lock`) from a loaded ragnart.yaml dict.
+
+    The NAS ingestion run (utils/rag_sync_nfs.py) takes this lock, not rag.ingest_lock. It writes only its
+    own state DB and submits to the hub, so it does not need to exclude the intake worker. The snapshot takes
+    both locks, so the restore triple stays consistent.
+
+    Raises ValueError if the key is missing or empty.
+    """
+    return _required_lock_path(config, ("rag", "nas_ingest", "lock"))
+
+
+def lock_path_for(config: dict, which: str) -> str:
+    """
+    Return the lock file path of the named lock: "index" (rag.ingest_lock) or "nas" (rag.nas_ingest.lock).
+
+    The command-line entry points take this name (`--which`), so a script can hold either lock.
+    Raises ValueError for any other name.
+    """
+    if which == "index":
+        return lock_path_from_config(config)
+    if which == "nas":
+        return nas_ingest_lock_path_from_config(config)
+    raise ValueError(f"unknown lock {which!r}: use 'index' or 'nas'.")
 
 
 def _holder_line() -> str:
@@ -213,12 +259,32 @@ def _parent_pid(pid: int) -> int | None:
         return None
 
 
+def _holders_from_env(environ) -> dict[str, int]:
+    """
+    Return the {lock path: holder pid} map that `run` passed down in ENV_HOLDERS.
+
+    A missing, malformed or differently shaped value gives an empty map, so the caller takes the lock
+    normally. The map is not trusted on its own: held_by_ancestor also checks the lock file and the
+    process tree.
+    """
+    raw = environ.get(ENV_HOLDERS)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {path: pid for path, pid in parsed.items() if isinstance(path, str) and isinstance(pid, int)}
+
+
 def held_by_ancestor(lock_path: str) -> bool:
     """
     Return True if this process is a descendant of the process that holds the lock.
 
     The check is deliberately strict. All of these must hold:
-      1. The ENV_HOLDER environment variable is set and is an integer pid.
+      1. The ENV_HOLDERS environment variable maps this lock path to an integer pid.
       2. The lock file's holder line records that same pid. An env var alone
          can be forged or inherited by accident, so the lock file is checked too.
       3. That pid is still alive.
@@ -227,12 +293,8 @@ def held_by_ancestor(lock_path: str) -> bool:
     If any check fails, the env var is ignored and the caller must acquire the lock normally.
     This is Linux-only, which is fine because every host here runs Linux.
     """
-    env_value = os.environ.get(ENV_HOLDER)
-    if not env_value:
-        return False
-    try:
-        holder_pid = int(env_value)
-    except ValueError:
+    holder_pid = _holders_from_env(os.environ).get(lock_path)
+    if holder_pid is None:
         return False
 
     if _read_holder_pid(lock_path) != holder_pid:
@@ -252,22 +314,27 @@ def held_by_ancestor(lock_path: str) -> bool:
     return False
 
 
-def _cmd_run(config_path: Path, command: list[str]) -> int:
+def _cmd_run(config_path: Path, which: str, command: list[str]) -> int:
     """
     Take the lock in this wrapper, run `command` as a child, and return its exit code.
 
-    The child is started with ENV_HOLDER set to this wrapper's pid. The wrapper
+    The child is started with this wrapper's pid recorded for this lock in ENV_HOLDERS. The wrapper
     stays alive for the whole run, so it keeps holding the lock. This is why the
     child is not exec'd.
 
     SIGTERM and SIGINT are forwarded to the child, so `systemctl stop` and Ctrl-C
     reach the real work. The wrapper then waits for the child and returns its exit code.
     """
-    lock_path = _lock_path_from_file(config_path)
-    acquire_or_exit(lock_path)
+    lock_path = _lock_path_from_file(config_path, which)
+    # None means an ancestor of this wrapper already holds this lock. Nothing new is taken, and the
+    # ancestor's pid stays in ENV_HOLDERS for the child.
+    took_lock = acquire_or_exit(lock_path) is not None
 
+    holders = _holders_from_env(os.environ)
+    if took_lock:
+        holders[lock_path] = os.getpid()
     env = dict(os.environ)
-    env[ENV_HOLDER] = str(os.getpid())
+    env[ENV_HOLDERS] = json.dumps(holders)
 
     # The child is kept in a list so that the signal handler can reach it
     # before Popen returns.
@@ -292,11 +359,11 @@ def _cmd_run(config_path: Path, command: list[str]) -> int:
     return returncode
 
 
-def _lock_path_from_file(config_path: Path) -> str:
-    """Load ragnart.yaml and return its lock path. Used by the command-line entry points only."""
+def _lock_path_from_file(config_path: Path, which: str) -> str:
+    """Load ragnart.yaml and return the path of the named lock. Used by the command-line entry points only."""
     with open(config_path, encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
-    return lock_path_from_config(config)
+    return lock_path_for(config, which)
 
 
 def _build_parser():
@@ -318,14 +385,26 @@ def _build_parser():
         help="Hold the lock while running a command. Usage: run -- CMD [ARGS...]",
     )
     run_parser.add_argument(
+        "--which",
+        choices=("index", "nas"),
+        default="index",
+        help="Which lock to hold: index (rag.ingest_lock, the default) or nas (rag.nas_ingest.lock).",
+    )
+    run_parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="The command to run. Put `--` before it.",
     )
 
-    sub.add_parser(
+    held_parser = sub.add_parser(
         "held",
         help="Exit 0 if this process runs under a lock holder that is its ancestor, 1 otherwise.",
+    )
+    held_parser.add_argument(
+        "--which",
+        choices=("index", "nas"),
+        default="index",
+        help="Which lock to check: index (rag.ingest_lock, the default) or nas (rag.nas_ingest.lock).",
     )
     return parser
 
@@ -336,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.subcommand == "held":
-        lock_path = _lock_path_from_file(args.config)
+        lock_path = _lock_path_from_file(args.config, args.which)
         return 0 if held_by_ancestor(lock_path) else 1
 
     # `run`: argparse.REMAINDER keeps a leading `--`, so strip it here.
@@ -345,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         command = command[1:]
     if not command:
         parser.error("run needs a command after `--`.")
-    return _cmd_run(args.config, command)
+    return _cmd_run(args.config, args.which, command)
 
 
 if __name__ == "__main__":

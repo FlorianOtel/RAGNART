@@ -11,8 +11,10 @@ ExecStart=/mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/ragnart-ingest-run.sh
 StandardOutput=journal
 StandardError=journal
 # 2-hour hard cap — kills a stuck ingestion so the next timer slot fires cleanly.
-# crash_recovery() in StateDB resets any stuck 'processing' rows on next daemon start.
 TimeoutStartSec=7200
+# Exits 75 (EXIT_LOCK_HELD) when another run holds the NAS-ingestion lock (rag.nas_ingest.lock). That is a
+# skipped slot, not a failure, so systemd treats it as success and the timer's next slot runs normally.
+SuccessExitStatus=75
 
 [Install]
 WantedBy=multi-user.target

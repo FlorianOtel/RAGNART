@@ -1,8 +1,12 @@
 """
-Tests for the ingestion admission gate and the docling CPU accelerator (plan steps 7-8).
+Tests for the admission gate, its order, and the docling CPU accelerator, on ingest_content() (session B2, A.13).
 
-No live services are used. StateDB and the Qdrant client are mocks, the Ollama embedding
-call is replaced by an AsyncMock, and docling conversion is replaced where it would run.
+The order is what these tests pin: a refusal by size or NUL sniff happens before any parse, the
+replacement-character check runs on the parsed text, and the printable gate and the chunk cap run before any
+embedding. The reasons' wording is covered in tests/test_ingest_content_core.py.
+
+No live services are used. The Qdrant client is a MagicMock, the embedder is an AsyncMock, and docling conversion
+is replaced where it would run.
 """
 
 import asyncio
@@ -17,7 +21,7 @@ from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
 
 from ragnart import ingest
-from ragnart.registry import RegistryDB
+from ragnart.ingest import IngestResult, ingest_content
 from ragnart.schema import (
     FIELD_CONTENT_HASH,
     FIELD_INGESTED_AT,
@@ -31,57 +35,70 @@ from ragnart.schema import (
     SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
     SOURCE_ID_NAS,
 )
-from ragnart.state import StateDB
+
+RAG_CFG = {"embedding_model": "bge-m3", "admission": {}}
+MODIFIED_AT = "2023-11-14T22:13:20+00:00"  # 1_700_000_000 seconds, as the API stores it.
 
 
 # ---------------------------------------------------------------------------
 # Helpers and fixtures
 # ---------------------------------------------------------------------------
 
-def _empty_registry() -> MagicMock:
-    """Return a RegistryDB stand-in with no ragnart projects, so attachment resolves to global."""
-    registry_db = MagicMock(spec=RegistryDB)
-    registry_db.list_projects.return_value = []
-    return registry_db
-
-
 @pytest.fixture(autouse=True)
 def _no_live_services(monkeypatch):
     """
     Replace every call that would reach Qdrant or Ollama.
 
-    Returns the embedding mock so a test can assert that embedding was never reached.
+    The embedder returns one dummy vector per child text, so points are built when a test gets that far.
+    The returned mock lets a test assert that embedding was never reached.
     """
     monkeypatch.setattr(ingest, "ensure_collection", MagicMock())
-    embed = AsyncMock(return_value=[])
+    monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
+    embed = AsyncMock(side_effect=lambda texts, **_kwargs: [[0.0, 0.0] for _ in texts])
     monkeypatch.setattr(ingest, "embed_batch", embed)
     return embed
 
 
-def _run_ingest(file_path: Path, rag_cfg: dict | None = None) -> MagicMock:
-    """
-    Run ingest_file() on one path with a mocked StateDB and return that mock.
+def _spool(tmp_path: Path, data: bytes, name: str = "req-1") -> str:
+    """Write uploaded bytes to a spool file with no suffix, as the ingestion API does."""
+    spool_dir = tmp_path / "spool"
+    spool_dir.mkdir(exist_ok=True)
+    path = spool_dir / name
+    path.write_bytes(data)
+    return str(path)
 
-    The Qdrant client is a plain MagicMock, so its delete/upsert calls are recorded
-    but never sent anywhere.
-    """
-    state_db = MagicMock(spec=StateDB)
-    qdrant_client = MagicMock()
-    asyncio.run(
-        ingest.ingest_file(
-            str(file_path),
-            owner="tester",
-            rag_cfg=rag_cfg or {},
-            state_db=state_db,
-            registry_db=_empty_registry(),
-            qdrant_client=qdrant_client,
+
+def _ingest(rag_cfg: dict | None = None, **kwargs) -> tuple[IngestResult, MagicMock]:
+    """Run ingest_content() with a mock Qdrant client. Returns (result, client)."""
+    client = MagicMock()
+    result = asyncio.run(
+        ingest_content(
+            qdrant_client=client,
+            rag_cfg=rag_cfg if rag_cfg is not None else RAG_CFG,
+            **kwargs,
         )
     )
-    return state_db
+    return result, client
+
+
+def _upload(rag_cfg: dict | None, spool: str, key: str, file_type: str) -> tuple[IngestResult, MagicMock]:
+    """Run ingest_content() for one uploaded file, as the NAS or Mac side sends it."""
+    return _ingest(rag_cfg=rag_cfg, source_id=SOURCE_ID_NAS, key=key, owner="tester",
+                   spool_path=spool, file_type=file_type)
+
+
+def _points(client: MagicMock) -> list:
+    """Every point the client was asked to upsert, across all batches."""
+    return [point for call in client.upsert.call_args_list for point in call.kwargs["points"]]
+
+
+def _cfg(**admission) -> dict:
+    """A rag config whose admission block holds the given overrides on top of the code defaults."""
+    return {"embedding_model": "bge-m3", "admission": dict(admission)}
 
 
 # ---------------------------------------------------------------------------
-# Step 7a: no raw-read fallback for docling types
+# Docling failures: a parse failure is an error, not an ignored item, and no raw read is attempted
 # ---------------------------------------------------------------------------
 
 class TestDoclingFailureHandling:
@@ -101,44 +118,19 @@ class TestDoclingFailureHandling:
         assert excinfo.value.__cause__ is original
 
     @pytest.mark.parametrize("suffix", ["pdf", "docx"])
-    def test_ingest_marks_failed_not_ignored(self, monkeypatch, tmp_path, suffix):
-        # Arrange: a real file on disk, docling conversion fails.
-        file_path = tmp_path / f"doc.{suffix}"
-        file_path.write_bytes(b"\x00\x01binary-looking payload")
+    def test_docling_failure_propagates_and_writes_no_points(self, monkeypatch, tmp_path, suffix):
+        # The exception reaches the caller. The intake worker records the request as failed (see
+        # tests/test_intake_worker.py TestFailures), so the item is not ignored and nothing is upserted.
         converter = MagicMock()
         converter.convert.side_effect = ValueError("corrupt container")
         monkeypatch.setattr(ingest, "_get_converter", lambda: converter)
+        spool = _spool(tmp_path, b"\x00\x01binary-looking payload")
 
-        # Act: ingest_file re-raises after recording the failure.
         with pytest.raises(RuntimeError, match="docling failed:"):
-            _run_ingest(file_path)
-
-    def test_ingest_failure_recorded_via_mark_failed(self, monkeypatch, tmp_path):
-        # Arrange
-        file_path = tmp_path / "doc.pdf"
-        file_path.write_bytes(b"%PDF-1.4 not really")
-        converter = MagicMock()
-        converter.convert.side_effect = ValueError("corrupt container")
-        monkeypatch.setattr(ingest, "_get_converter", lambda: converter)
-
-        # Act
-        state_db = MagicMock(spec=StateDB)
-        with pytest.raises(RuntimeError):
-            asyncio.run(
-                ingest.ingest_file(
-                    str(file_path), owner="tester", rag_cfg={},
-                    state_db=state_db, registry_db=_empty_registry(), qdrant_client=MagicMock(),
-                )
-            )
-
-        # Assert: the failure goes through mark_failed, not mark_ignored.
-        state_db.mark_failed.assert_called_once()
-        assert "docling failed:" in state_db.mark_failed.call_args.args[1]
-        state_db.mark_ignored.assert_not_called()
+            _upload(None, spool, f"/mnt/nfs/doc.{suffix}", suffix)
 
     def test_pptx_docling_failure_still_uses_python_pptx(self, monkeypatch, tmp_path):
-        # PPTX keeps its python-pptx fallback. This guards against the change above
-        # removing that path by mistake.
+        # PPTX keeps its python-pptx fallback. This guards against a change above removing that path by mistake.
         converter = MagicMock()
         converter.convert.side_effect = ValueError("format not detected")
         monkeypatch.setattr(ingest, "_get_converter", lambda: converter)
@@ -150,114 +142,109 @@ class TestDoclingFailureHandling:
 
 
 # ---------------------------------------------------------------------------
-# Step 7b: admission for text-like files and the chunk cap
+# Admission order: each refusal happens at the first point its rule can decide
 # ---------------------------------------------------------------------------
 
-class TestAdmission:
+class TestAdmissionOrder:
 
-    def test_size_cap_rejects_before_reading(self, monkeypatch, tmp_path):
-        # Arrange: a 100-byte file against a 10-byte cap.
-        file_path = tmp_path / "big.txt"
-        file_path.write_bytes(b"a" * 100)
+    def test_size_cap_refuses_before_the_parse(self, monkeypatch, tmp_path, _no_live_services):
+        # A 100-byte file against a 10-byte cap: refused by its size, so it is never parsed or embedded.
         parse = MagicMock(return_value="unused")
         monkeypatch.setattr(ingest, "_parse_to_text", parse)
+        spool = _spool(tmp_path, b"a" * 100)
 
-        # Act
-        state_db = _run_ingest(file_path, {"admission": {"max_text_file_size_bytes": 10}})
+        result, client = _upload(_cfg(max_text_file_size_bytes=10), spool, "/mnt/nfs/big.txt", "txt")
 
-        # Assert: rejected with the byte numbers, and the file is never parsed (read).
-        state_db.mark_ignored.assert_called_once_with(
-            str(file_path), "too large: 100 bytes > 10 byte cap",
-        )
+        assert result == IngestResult("ignored", "too large: 100 bytes > 10 byte cap", 0, None, "p1")
         parse.assert_not_called()
+        _no_live_services.assert_not_awaited()
+        client.upsert.assert_not_called()
 
-    def test_nul_byte_in_first_window_is_rejected_before_parse(self, monkeypatch, tmp_path):
-        # Arrange: a text-like file with a NUL byte near the start.
-        file_path = tmp_path / "blob.txt"
-        file_path.write_bytes(b"hello\x00world" + b"x" * 100)
+    def test_nul_byte_in_first_window_refuses_before_the_parse(self, monkeypatch, tmp_path, _no_live_services):
+        # A text-like upload with a NUL byte near the start: refused by the NUL sniff, before any parse.
         parse = MagicMock(return_value="unused")
         monkeypatch.setattr(ingest, "_parse_to_text", parse)
+        spool = _spool(tmp_path, b"hello\x00world" + b"x" * 100)
 
-        # Act
-        state_db = _run_ingest(file_path)
+        result, _client = _upload(None, spool, "/mnt/nfs/blob.txt", "txt")
 
-        # Assert: marked ignored with a NUL reason, and parsing never ran.
-        state_db.mark_ignored.assert_called_once()
-        reason = state_db.mark_ignored.call_args.args[1]
-        assert "NUL" in reason
+        assert result.status == "ignored"
+        assert "NUL" in result.reason
         parse.assert_not_called()
-
-    def test_replacement_char_ratio_over_threshold_is_rejected(self, monkeypatch, tmp_path):
-        # Arrange: 10 U+FFFD in 1010 characters is about 0.99%, above the 0.5% default.
-        # The printable gate would still pass this (FFFD is 1% of the text), so the
-        # ratio check is what must reject it.
-        file_path = tmp_path / "mojibake.txt"
-        file_path.write_text("�" * 10 + "a" * 1000, encoding="utf-8")
-        select = MagicMock(return_value=([], "flat"))
-        monkeypatch.setattr(ingest, "_select_chunks", select)
-
-        # Act
-        state_db = _run_ingest(file_path)
-
-        # Assert
-        state_db.mark_ignored.assert_called_once()
-        assert "replacement chars" in state_db.mark_ignored.call_args.args[1]
-        select.assert_not_called()
-
-    def test_replacement_char_ratio_under_threshold_proceeds_to_chunking(self, monkeypatch, tmp_path):
-        # Arrange: 1 U+FFFD in 1000 characters is 0.1%, below the 0.5% default.
-        file_path = tmp_path / "almost-clean.txt"
-        file_path.write_text("�" + "a" * 999, encoding="utf-8")
-        # Empty chunk list ends the run right after chunking, before any embedding.
-        select = MagicMock(return_value=([], "flat"))
-        monkeypatch.setattr(ingest, "_select_chunks", select)
-
-        # Act
-        state_db = _run_ingest(file_path)
-
-        # Assert: the file reached chunking and was not rejected by the ratio check.
-        select.assert_called_once()
-        state_db.mark_ignored.assert_not_called()
-        state_db.mark_completed.assert_called_once_with(
-            str(file_path), chunk_count=0, pipeline_version="p1", project_id=GLOBAL_PROJECT_ID,
-        )
-
-    def test_chunk_cap_rejects_before_embedding(self, monkeypatch, tmp_path, _no_live_services):
-        # Arrange: three chunks against a cap of one.
-        file_path = tmp_path / "many.txt"
-        file_path.write_text("some text", encoding="utf-8")
-        three_chunks = [("a", "a"), ("b", "b"), ("c", "c")]
-        monkeypatch.setattr(ingest, "_select_chunks", MagicMock(return_value=(three_chunks, "flat")))
-
-        # Act
-        state_db = _run_ingest(file_path, {"admission": {"max_chunks_per_item": 1}})
-
-        # Assert: rejected with the actual numbers, and no embedding call was made.
-        state_db.mark_ignored.assert_called_once_with(
-            str(file_path), "too large: 3 chunks > 1 chunk cap",
-        )
         _no_live_services.assert_not_awaited()
 
+    def test_replacement_ratio_is_checked_on_the_parsed_text(self, monkeypatch, tmp_path, _no_live_services):
+        # 10 U+FFFD in 1010 characters is about 0.99%, above the 0.5% default. The file is parsed first (the
+        # check needs the decoded text), then refused before chunking.
+        parse = MagicMock(wraps=ingest._parse_to_text)
+        monkeypatch.setattr(ingest, "_parse_to_text", parse)
+        select = MagicMock(return_value=([], "flat"))
+        monkeypatch.setattr(ingest, "_select_chunks", select)
+        spool = _spool(tmp_path, ("�" * 10 + "a" * 1000).encode("utf-8"))
+
+        result, client = _upload(None, spool, "/mnt/nfs/mojibake.txt", "txt")
+
+        assert result.status == "ignored"
+        assert "replacement chars" in result.reason
+        parse.assert_called_once()
+        select.assert_not_called()
+        _no_live_services.assert_not_awaited()
+        client.upsert.assert_not_called()
+
+    def test_replacement_ratio_under_threshold_proceeds_to_chunking(self, monkeypatch, tmp_path):
+        # 1 U+FFFD in 1000 characters is 0.1%, below the 0.5% default. An empty chunk list ends the run
+        # right after chunking, before any embedding, so the item completes with no points.
+        select = MagicMock(return_value=([], "flat"))
+        monkeypatch.setattr(ingest, "_select_chunks", select)
+        spool = _spool(tmp_path, ("�" + "a" * 999).encode("utf-8"))
+
+        result, _client = _upload(None, spool, "/mnt/nfs/almost-clean.txt", "txt")
+
+        select.assert_called_once()
+        assert result == IngestResult("completed", None, 0, None, "p1")
+
+    def test_printable_gate_refuses_before_chunking(self, monkeypatch):
+        # Rendered session text is not parsed, but it passes through the printable gate before it is chunked.
+        select = MagicMock(return_value=([], "flat"))
+        monkeypatch.setattr(ingest, "_select_chunks", select)
+
+        result, client = _ingest(connector="claude_code", source_id=SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
+                                 key="claude-session://junk", owner="tester", text="\x01\x02\x03" * 50)
+
+        assert result.status == "ignored"
+        assert result.reason == "binary content: 0% printable chars"
+        select.assert_not_called()
+        client.upsert.assert_not_called()
+
+    def test_chunk_cap_refuses_before_embedding(self, monkeypatch, tmp_path, _no_live_services):
+        # Three chunks against a cap of one: refused with the actual numbers, and no embedding call is made.
+        three_chunks = [("a", "a"), ("b", "b"), ("c", "c")]
+        monkeypatch.setattr(ingest, "_select_chunks", MagicMock(return_value=(three_chunks, "flat")))
+        spool = _spool(tmp_path, b"some text")
+
+        result, client = _upload(_cfg(max_chunks_per_item=1), spool, "/mnt/nfs/many.txt", "txt")
+
+        assert result == IngestResult("ignored", "too large: 3 chunks > 1 chunk cap", 0, None, "p1")
+        _no_live_services.assert_not_awaited()
+        client.upsert.assert_not_called()
+
     def test_chunk_cap_applies_to_docling_types(self, monkeypatch, tmp_path, _no_live_services):
-        # The chunk cap covers all file types, not only text-like ones.
-        file_path = tmp_path / "report.docx"
-        file_path.write_bytes(b"placeholder")
+        # The chunk cap covers every file type, not only text-like ones: a parsed DOCX is refused the same way.
         converter = MagicMock()
         converter.convert.return_value.document.export_to_markdown.return_value = "markdown body"
         monkeypatch.setattr(ingest, "_get_converter", lambda: converter)
         three_chunks = [("a", "a"), ("b", "b"), ("c", "c")]
         monkeypatch.setattr(ingest, "_select_chunks", MagicMock(return_value=(three_chunks, "flat")))
+        spool = _spool(tmp_path, b"placeholder")
 
-        state_db = _run_ingest(file_path, {"admission": {"max_chunks_per_item": 2}})
+        result, _client = _upload(_cfg(max_chunks_per_item=2), spool, "/mnt/nfs/report.docx", "docx")
 
-        state_db.mark_ignored.assert_called_once_with(
-            str(file_path), "too large: 3 chunks > 2 chunk cap",
-        )
+        assert result == IngestResult("ignored", "too large: 3 chunks > 2 chunk cap", 0, None, "p1")
         _no_live_services.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
-# Step 8: explicit CPU accelerator for docling
+# Explicit CPU accelerator for docling
 # ---------------------------------------------------------------------------
 
 class TestDoclingCpuAccelerator:
@@ -278,15 +265,74 @@ class TestDoclingCpuAccelerator:
 
 
 # ---------------------------------------------------------------------------
-# Step 10: claude-session dispatch, origin_path reads, launch_dir and new payload fields
+# Session text: an empty session completes with no points, and its points carry the Claude source id
+# ---------------------------------------------------------------------------
+
+class TestSessionText:
+
+    def test_empty_session_text_completes_with_no_chunks_and_p1(self, _no_live_services):
+        # A transcript with no user or assistant turn renders to empty text. The item completes with no points,
+        # and its row must carry pipeline_version p1, so the metadata backfill never reclassifies it.
+        result, client = _ingest(connector="claude_code", source_id=SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
+                                 key="claude-session://abc", owner="tester", text="")
+
+        assert result == IngestResult("completed", None, 0, None, "p1")
+        _no_live_services.assert_not_awaited()
+        client.upsert.assert_not_called()
+
+    def test_claude_session_points_carry_the_claude_source_id_p1_and_text_hash(self):
+        text = "How do I rotate the backup key?\n\nRun the rotate command."
+        result, client = _ingest(connector="claude_code", source_id=SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
+                                 key="claude-session://abc", owner="tester", text=text)
+
+        points = _points(client)
+        assert points
+        for point in points:
+            assert point.payload[FIELD_SOURCE_ID] == SOURCE_ID_CLAUDE_LINUX_SHARED_NFS
+            assert point.payload[FIELD_PIPELINE_VERSION] == "p1"
+            assert point.payload[FIELD_SOURCE_TYPE] == "claude_session"
+            assert point.payload[FIELD_CONTENT_HASH] == hashlib.md5(text.encode("utf-8")).hexdigest()
+        assert result.content_hash == hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Upload points: identity, hash and freshness fields
+# ---------------------------------------------------------------------------
+
+class TestUploadPoints:
+
+    def test_upload_points_carry_identity_hash_and_modified_at(self, tmp_path):
+        body = b"# Notes\n\nAbout the backup rotation schedule.\n"
+        spool = _spool(tmp_path, body)
+
+        result, client = _ingest(rag_cfg=RAG_CFG, source_id=SOURCE_ID_NAS, key="/mnt/nfs/notes.md", owner="tester",
+                                 spool_path=spool, file_type="md", modified_at=MODIFIED_AT)
+
+        points = _points(client)
+        assert points
+        for point in points:
+            assert point.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID
+            assert point.payload[FIELD_SOURCE_TYPE] == "file"
+            assert point.payload[FIELD_SOURCE_ID] == SOURCE_ID_NAS
+            assert point.payload[FIELD_SOURCE_PATH] == "/mnt/nfs/notes.md"
+            assert point.payload[FIELD_PIPELINE_VERSION] == "p1"
+            assert point.payload[FIELD_CONTENT_HASH] == hashlib.md5(body).hexdigest()
+            assert point.payload[FIELD_MODIFIED_AT] == MODIFIED_AT
+            # ingested_at is written at upsert time: present, and a non-empty ISO-8601 string.
+            assert point.payload[FIELD_INGESTED_AT]
+        assert result.content_hash == hashlib.md5(body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# A .jsonl upload outside the Claude Code layout is parsed as a plain transcript, never through the .claude lookup
 # ---------------------------------------------------------------------------
 
 def _write_claude_transcript(path: Path, cwd: str) -> Path:
     """
     Write a minimal Claude Code session JSONL with one user and one assistant text turn.
 
-    The file sits under a `projects/` directory, as real transcripts do. The parser
-    finds the .claude directory from that component, so a bare tmp_path would fail.
+    The file sits under a `projects/` directory, as real transcripts do. The parser finds the .claude
+    directory from that component, so a bare tmp_path would fail.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     entries = [
@@ -306,160 +352,7 @@ def _write_claude_transcript(path: Path, cwd: str) -> Path:
     return path
 
 
-def _one_vector_per_text(child_texts, **_kwargs):
-    """Stand-in for embed_batch: one dummy vector per child text, so points are built."""
-    return [[0.0, 0.0] for _ in child_texts]
-
-
-class TestClaudeSessionDispatch:
-    """claude-session:// keys are read from origin_path, and every new point carries the v0.2 fields."""
-
-    def test_is_text_like_path_excludes_claude_session_prefix(self):
-        assert ingest.is_text_like_path("claude-session://abc") is False
-
-    def test_claude_session_without_origin_path_raises(self):
-        state_db = MagicMock(spec=StateDB)
-
-        with pytest.raises(RuntimeError, match="no origin_path"):
-            asyncio.run(
-                ingest.ingest_file(
-                    file_path="claude-session://abc",
-                    owner="tester",
-                    rag_cfg={},
-                    state_db=state_db,
-                    registry_db=_empty_registry(),
-                    qdrant_client=MagicMock(),
-                )
-            )
-
-        state_db.mark_failed.assert_called_once()
-
-    def test_claude_session_reads_from_origin_path(self, tmp_path):
-        # The key has no file behind it. The transcript at origin_path must be parsed.
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="/x",
-        )
-        state_db = MagicMock(spec=StateDB)
-
-        asyncio.run(
-            ingest.ingest_file(
-                file_path="claude-session://abc",
-                origin_path=str(transcript),
-                owner="tester",
-                rag_cfg={},
-                state_db=state_db,
-                registry_db=_empty_registry(),
-                qdrant_client=MagicMock(),
-            )
-        )
-
-        state_db.mark_failed.assert_not_called()
-        state_db.mark_completed.assert_called_once()
-        assert state_db.mark_completed.call_args.args[0] == "claude-session://abc"
-
-    def test_zero_turn_claude_session_marks_p1_with_zero_chunks(self, tmp_path):
-        # A transcript with no user or assistant turn parses to empty text, so it takes the
-        # "Empty document" early exit. That row must carry pipeline_version="p1" so the
-        # metadata backfill never reclassifies it as a nas row.
-        transcript = tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl"
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-        transcript.write_text(
-            json.dumps({"type": "summary", "summary": "nothing said", "leafUuid": "abc"}) + "\n",
-            encoding="utf-8",
-        )
-        state_db = MagicMock(spec=StateDB)
-
-        asyncio.run(
-            ingest.ingest_file(
-                file_path="claude-session://abc",
-                origin_path=str(transcript),
-                owner="tester",
-                rag_cfg={},
-                state_db=state_db,
-                registry_db=_empty_registry(),
-                qdrant_client=MagicMock(),
-            )
-        )
-
-        state_db.mark_failed.assert_not_called()
-        state_db.mark_completed.assert_called_once()
-        kwargs = state_db.mark_completed.call_args.kwargs
-        assert kwargs["pipeline_version"] == "p1"
-        assert kwargs["chunk_count"] == 0
-
-    def test_launch_dir_reaches_mark_completed_verbatim(self, tmp_path, monkeypatch, _no_live_services):
-        # The trailing slash is kept on purpose: launch_dir is stored verbatim, never normalised.
-        cwd = "/mnt/nfs/Florian/Gin-AI/projects/RAGNART/"
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=cwd,
-        )
-        _no_live_services.side_effect = _one_vector_per_text
-        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
-        state_db = MagicMock(spec=StateDB)
-        qdrant_client = MagicMock()
-
-        asyncio.run(
-            ingest.ingest_file(
-                file_path="claude-session://abc",
-                origin_path=str(transcript),
-                owner="tester",
-                rag_cfg={},
-                state_db=state_db,
-                registry_db=_empty_registry(),
-                qdrant_client=qdrant_client,
-            )
-        )
-
-        # The SQLite side gets launch_dir and the hash of the transcript file.
-        kwargs = state_db.mark_completed.call_args.kwargs
-        assert kwargs["launch_dir"] == cwd
-        assert kwargs["source_type"] == "claude_session"
-        assert kwargs["content_hash"] == hashlib.md5(transcript.read_bytes()).hexdigest()
-
-        # The Qdrant payload must not carry the launch directory.
-        points = [p for call in qdrant_client.upsert.call_args_list for p in call.kwargs["points"]]
-        assert points
-        assert "launch_dir" not in points[0].payload
-        assert cwd not in points[0].payload.values()
-
-    def test_points_carry_identity_and_hash_fields(self, tmp_path, monkeypatch, _no_live_services):
-        file_path = tmp_path / "notes.md"
-        file_path.write_text("Notes about the backup rotation schedule.", encoding="utf-8")
-        _no_live_services.side_effect = _one_vector_per_text
-        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
-        state_db = MagicMock(spec=StateDB)
-        qdrant_client = MagicMock()
-
-        # 1_700_000_000 is 2023-11-14T22:13:20 UTC.
-        asyncio.run(
-            ingest.ingest_file(
-                file_path=str(file_path),
-                owner="tester",
-                rag_cfg={},
-                state_db=state_db,
-                registry_db=_empty_registry(),
-                qdrant_client=qdrant_client,
-                last_modified=1_700_000_000.0,
-            )
-        )
-
-        points = [p for call in qdrant_client.upsert.call_args_list for p in call.kwargs["points"]]
-        assert points
-        for point in points:
-            assert point.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID
-            assert point.payload[FIELD_SOURCE_TYPE] == "file"
-            assert point.payload[FIELD_CONTENT_HASH] == hashlib.md5(file_path.read_bytes()).hexdigest()
-            assert point.payload[FIELD_MODIFIED_AT] == "2023-11-14T22:13:20+00:00"
-            # ingested_at is the same string SQLite stores as completed_at.
-            assert point.payload[FIELD_INGESTED_AT] == state_db.mark_completed.call_args.kwargs["completed_at"]
-
-
-# ---------------------------------------------------------------------------
-# Plain .jsonl files outside the Claude Code layout (NAS notes)
-# ---------------------------------------------------------------------------
-
 class TestPlainJsonlOutsideClaudeLayout:
-    """A .jsonl with no `projects` component must parse, not raise on the .claude lookup."""
 
     def test_bare_tmp_path_jsonl_parses_without_raising(self, tmp_path):
         # A bare tmp_path has no `projects` component, so the .claude lookup must be skipped.
@@ -472,220 +365,36 @@ class TestPlainJsonlOutsideClaudeLayout:
         assert metadata["session_title"] == "How do I rotate the backup key?"
         assert launch_dir == "/x"
 
-    def test_nas_jsonl_through_generic_branch_does_not_hit_claude_lookup(self, tmp_path, monkeypatch):
-        # A NAS .jsonl takes the generic branch (file_type "jsonl" -> _parse_to_text).
-        # The .claude lookup must not run for it, so claude_dot_claude_dir must never be called.
+    def test_nas_jsonl_upload_does_not_hit_the_claude_lookup(self, tmp_path, monkeypatch, _no_live_services):
+        # A NAS .jsonl upload takes the generic branch (file_type "jsonl" -> _parse_to_text). The .claude lookup
+        # in chat_render must not run for it.
         def _fail_if_called(path):
             raise AssertionError(f"claude_dot_claude_dir called for non-Claude path: {path}")
 
-        monkeypatch.setattr(ingest, "claude_dot_claude_dir", _fail_if_called)
+        monkeypatch.setattr("ragnart.chat_render.claude_dot_claude_dir", _fail_if_called)
         notes = _write_claude_transcript(tmp_path / "nas" / "Dropbox" / "notes.jsonl", cwd="/x")
-        state_db = MagicMock(spec=StateDB)
+        spool = _spool(tmp_path, notes.read_bytes())
 
-        asyncio.run(
-            ingest.ingest_file(
-                file_path=str(notes),
-                owner="tester",
-                rag_cfg={},
-                state_db=state_db,
-                registry_db=_empty_registry(),
-                qdrant_client=MagicMock(),
-            )
-        )
+        result, _client = _upload(None, spool, "/mnt/nfs/Dropbox/notes.jsonl", "jsonl")
 
-        state_db.mark_failed.assert_not_called()
-        state_db.mark_completed.assert_called_once()
+        assert result.status == "completed"
+        assert result.chunk_count > 0
 
 
 # ---------------------------------------------------------------------------
-# Project attachment: project_id on every point and in mark_completed
-# ---------------------------------------------------------------------------
-
-def _real_dbs(tmp_path, projects: dict[str, str]) -> tuple[StateDB, RegistryDB]:
-    """
-    Return a real queue and a real registry in tmp_path, with the given {project_id: path} registered.
-
-    The 'global' row is seeded by the registry migrations, so it is present as well,
-    which exercises the path-less row being skipped during matching.
-    """
-    state_db = StateDB(str(tmp_path / "rag_state.db"))
-    registry_db = RegistryDB(str(tmp_path / "hub_registry.db"))
-    for project_id, project_path in projects.items():
-        registry_db.upsert_project(project_id, project_path, project_id, "tester", SOURCE_ID_NAS)
-    # Spy on mark_completed while keeping the real behaviour.
-    state_db.mark_completed = MagicMock(wraps=state_db.mark_completed)
-    return state_db, registry_db
-
-
-def _ingest_with_points(file_path, state_db, registry_db, origin_path=None):
-    """Run ingest_file with a fake embedding and return the Qdrant mock that received the points."""
-    qdrant_client = MagicMock()
-    asyncio.run(
-        ingest.ingest_file(
-            file_path=str(file_path),
-            origin_path=str(origin_path) if origin_path else None,
-            owner="tester",
-            rag_cfg={},
-            state_db=state_db,
-            registry_db=registry_db,
-            qdrant_client=qdrant_client,
-        )
-    )
-    return qdrant_client
-
-
-def _all_points(qdrant_client) -> list:
-    return [p for call in qdrant_client.upsert.call_args_list for p in call.kwargs["points"]]
-
-
-class TestProjectAttachment:
-    """Each item gets the id of the registered project its path (or launch_dir) sits under."""
-
-    @pytest.fixture(autouse=True)
-    def _fake_embeddings(self, _no_live_services, monkeypatch):
-        # Real embeddings are replaced by one dummy vector per chunk; no sparse vectors.
-        _no_live_services.side_effect = _one_vector_per_text
-        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
-
-    def test_nas_file_under_registered_project_gets_its_id(self, tmp_path):
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        file_path = project_dir / "notes" / "plan.md"
-        file_path.parent.mkdir()
-        file_path.write_text("Quarterly plan for the backup rotation.", encoding="utf-8")
-        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
-
-        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_PROJECT_ID] == "alpha" for p in points)
-        assert state_db.mark_completed.call_args.kwargs["project_id"] == "alpha"
-
-    def test_nas_file_outside_every_project_gets_global(self, tmp_path):
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        file_path = tmp_path / "elsewhere" / "plan.md"
-        file_path.parent.mkdir()
-        file_path.write_text("Unrelated notes.", encoding="utf-8")
-        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
-
-        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
-        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
-
-    def test_claude_session_launched_under_project_gets_its_id(self, tmp_path):
-        project_dir = tmp_path / "proj"
-        launch_dir = project_dir / "sub"
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(launch_dir),
-        )
-        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(project_dir)})
-
-        qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, registry_db, origin_path=transcript,
-        )
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_PROJECT_ID] == "alpha" for p in points)
-        kwargs = state_db.mark_completed.call_args.kwargs
-        assert kwargs["project_id"] == "alpha"
-        # launch_dir still goes to SQLite verbatim, and never into the payload.
-        assert kwargs["launch_dir"] == str(launch_dir)
-
-    def test_claude_session_with_no_launch_dir_gets_global(self, tmp_path):
-        # An empty cwd gives launch_dir None, which must attach to global, not match anything.
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="",
-        )
-        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(tmp_path)})
-
-        qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, registry_db, origin_path=transcript,
-        )
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
-        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
-
-    def test_symlinked_launch_path_does_not_attach(self, tmp_path):
-        # The project is registered at the real directory. The session was launched
-        # through a symlink to it. Matching is verbatim, so the session stays global.
-        real_dir = tmp_path / "real"
-        real_dir.mkdir()
-        link_dir = tmp_path / "link"
-        link_dir.symlink_to(real_dir, target_is_directory=True)
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd=str(link_dir / "sub"),
-        )
-        state_db, registry_db = _real_dbs(tmp_path, {"alpha": str(real_dir)})
-
-        qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, registry_db, origin_path=transcript,
-        )
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID for p in points)
-        assert state_db.mark_completed.call_args.kwargs["project_id"] == GLOBAL_PROJECT_ID
-
-
-# ---------------------------------------------------------------------------
-# v0.3 source fields: source_id on the delete filter and on every point, pipeline_version p1
+# Source fields on the delete path and on the points: source_id and pipeline_version p1
 # ---------------------------------------------------------------------------
 
 class TestSourceFields:
-    """Every item carries its source_id and pipeline_version, and the replace delete names both source_id and source_path."""
 
-    @pytest.fixture(autouse=True)
-    def _fake_embeddings(self, _no_live_services, monkeypatch):
-        # Real embeddings are replaced by one dummy vector per chunk; no sparse vectors.
-        _no_live_services.side_effect = _one_vector_per_text
-        monkeypatch.setattr(ingest, "_is_sparse_ready", lambda _client: False)
+    def test_upload_points_carry_the_source_id_passed_in_not_one_from_the_key(self, tmp_path):
+        # The source comes from the caller. A key that looks like another source's key does not change it.
+        spool = _spool(tmp_path, b"Some notes about the backup rotation.")
 
-    def test_replace_delete_filter_requires_source_id_and_source_path(self, tmp_path):
-        # The delete runs before any parsing, so one NAS file is enough to inspect its filter.
-        file_path = tmp_path / "notes.md"
-        file_path.write_text("Some notes about the backup rotation.", encoding="utf-8")
-        state_db, registry_db = _real_dbs(tmp_path, {})
+        _result, client = _ingest(rag_cfg=RAG_CFG, source_id=SOURCE_ID_NAS, key="claude-session://looks-like-a-session",
+                                  owner="tester", spool_path=spool, file_type="md")
 
-        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
-
-        delete_call = qdrant_client.delete.call_args
-        conditions = delete_call.kwargs["points_selector"].filter.must
-        by_key = {condition.key: condition.match.value for condition in conditions}
-        # Exactly two conditions: the source and the path. A path alone is not enough.
-        assert by_key == {FIELD_SOURCE_ID: SOURCE_ID_NAS, FIELD_SOURCE_PATH: str(file_path)}
-
-    def test_nas_points_carry_source_id_nas_and_pipeline_version_p1(self, tmp_path):
-        file_path = tmp_path / "notes.md"
-        file_path.write_text("Some notes about the backup rotation.", encoding="utf-8")
-        state_db, registry_db = _real_dbs(tmp_path, {})
-
-        qdrant_client = _ingest_with_points(file_path, state_db, registry_db)
-
-        points = _all_points(qdrant_client)
+        points = _points(client)
         assert points
-        assert all(p.payload[FIELD_SOURCE_ID] == SOURCE_ID_NAS for p in points)
-        assert all(p.payload[FIELD_PIPELINE_VERSION] == "p1" for p in points)
-        assert state_db.mark_completed.call_args.kwargs["pipeline_version"] == "p1"
-
-    def test_claude_session_points_carry_the_claude_source_id(self, tmp_path):
-        transcript = _write_claude_transcript(
-            tmp_path / ".claude" / "projects" / "-x" / "abc.jsonl", cwd="/x",
-        )
-        state_db, registry_db = _real_dbs(tmp_path, {})
-
-        qdrant_client = _ingest_with_points(
-            "claude-session://abc", state_db, registry_db, origin_path=transcript,
-        )
-
-        points = _all_points(qdrant_client)
-        assert points
-        assert all(p.payload[FIELD_SOURCE_ID] == SOURCE_ID_CLAUDE_LINUX_SHARED_NFS for p in points)
-        assert all(p.payload[FIELD_PIPELINE_VERSION] == "p1" for p in points)
+        assert all(point.payload[FIELD_SOURCE_ID] == SOURCE_ID_NAS for point in points)
+        assert all(point.payload[FIELD_PIPELINE_VERSION] == "p1" for point in points)

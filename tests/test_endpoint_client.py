@@ -32,6 +32,7 @@ from ragnart.registry import RegistryDB
 # The secrets of the seeded endpoint sources. The registry stores only their SHA-256 hashes.
 MBP_SECRET = "mbp-secret-for-client-tests"
 CLAUDE_SECRET = "claude-secret-for-client-tests"
+NAS_SECRET = "nas-secret-for-client-tests"
 WRONG_SECRET = "not-a-secret-the-hub-knows"
 
 BASE_URL = "http://hub.test:8101"
@@ -55,6 +56,8 @@ def config(tmp_path, monkeypatch) -> dict:
             },
             "scanner": {"include_extensions": [".md", ".pdf"]},
         },
+        # The owner names an upsert or change_metadata may carry for a source with no fixed owner (nas).
+        "users": {"florian.otel@gmail.com": {"owner": "florian", "nfs_roots": ["/mnt/nfs/Florian"]}},
     }
     path = tmp_path / "ragnart.yaml"
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -64,10 +67,14 @@ def config(tmp_path, monkeypatch) -> dict:
 
 @pytest.fixture
 def seeded(config):
-    """A hub registry with the two endpoint sources the tests submit as: MBP and claude-MBP."""
+    """
+    A hub registry with the sources the tests submit as: MBP and claude-MBP (fixed owners), and nas, which
+    has no fixed owner (its migration row has a NULL owner), so it may name the owner of each item.
+    """
     registry = RegistryDB(registry_db_path(config))
     registry.register_source("MBP", "filesystem", "endpoint", "florian", _sha256(MBP_SECRET))
     registry.register_source("claude-MBP", "claude_code", "endpoint", "florian", _sha256(CLAUDE_SECRET))
+    registry.set_secret_hash("nas", _sha256(NAS_SECRET))
     registry.close()
     return config
 
@@ -214,14 +221,24 @@ def test_change_key_posts_both_keys(mbp, sent, config):
     assert (row["kind"], row["new_key"]) == ("change_key", "/Users/fotel/MBP/sub/a.md")
 
 
-def test_change_metadata_posts_the_owner_inside_metadata(mbp, sent, config):
-    """change_metadata posts {key, metadata: {owner}} to /v1/change-metadata."""
-    answer = mbp.change_metadata("/Users/fotel/MBP/a.md", "eva")
+def test_change_metadata_posts_the_owner_inside_metadata(hub, sent, config, tmp_path):
+    """change_metadata posts {key, metadata: {owner}} to /v1/change-metadata; nas has no fixed owner, so it may name one."""
+    nas = HubClient(BASE_URL, _secret_file(tmp_path, "nas.secret", NAS_SECRET), http_client=hub)
+
+    answer = nas.change_metadata("/mnt/nfs/Florian/a.md", "florian")
 
     request = sent[-1]
     assert (request.method, request.url.path) == ("POST", "/v1/change-metadata")
-    assert _body(request) == {"key": "/Users/fotel/MBP/a.md", "metadata": {"owner": "eva"}}
-    assert _row(config, answer["request_id"])["metadata"] == {"owner": "eva"}
+    assert _body(request) == {"key": "/mnt/nfs/Florian/a.md", "metadata": {"owner": "florian"}}
+    assert _row(config, answer["request_id"])["metadata"] == {"owner": "florian"}
+
+
+def test_change_metadata_owner_on_a_fixed_owner_source_is_refused(mbp):
+    """MBP has the fixed owner florian: the hub answers 422 to a change_metadata that names an owner."""
+    with pytest.raises(HubError) as exc_info:
+        mbp.change_metadata("/Users/fotel/MBP/a.md", "florian")
+
+    assert exc_info.value.status_code == 422
 
 
 def test_status_gets_the_request_and_refuses_another_sources_request(mbp, claude, sent):
@@ -251,7 +268,10 @@ def test_items_gets_the_list_and_returns_only_the_items(mbp, sent, qdrant):
     items = mbp.items()
 
     assert (sent[-1].method, sent[-1].url.path) == ("GET", "/v1/items")
-    assert items == [{"key": "/Users/fotel/MBP/a.md", "chunk_count": 1, "content_hash": "h1", "pipeline_version": "p1"}]
+    assert items == [{
+        "key": "/Users/fotel/MBP/a.md", "chunk_count": 1, "content_hash": "h1", "pipeline_version": "p1",
+        "owner": None, "project_id": None, "source_type": None, "file_type": None, "inconsistent": [],
+    }]
 
 
 def test_info_gets_the_pipeline_and_limits(mbp, sent):
@@ -272,6 +292,134 @@ def test_publish_project_returns_the_409_refusal_body(mbp, sent):
     assert _body(sent[-1]) == {"id": "proj-1", "name": "My Project", "path": "/Users/fotel/MBP/proj"}
     assert refusal["refused"] is True
     assert refusal["reason"].startswith("MBP cannot hold ragnart projects")
+
+
+# ---------------------------------------------------------------------------
+# Session B2: the per-item fields, the project publish with owner and tags, and project remove
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def nas(hub, tmp_path) -> HubClient:
+    """The client of the nas (filesystem, no fixed owner) source: the one that holds projects."""
+    return HubClient(BASE_URL, _secret_file(tmp_path, "nas.secret", NAS_SECRET), http_client=hub)
+
+
+def _seed_project(config: dict, project_id: str, home: str) -> None:
+    """Write one project row into the tmp registry, homed on `home`."""
+    registry = RegistryDB(registry_db_path(config))
+    try:
+        registry.upsert_project(project_id, "/mnt/nfs/Florian/proj", "My Project", "florian", home)
+        registry.replace_project_tags(project_id, {"kind": "repo"})
+    finally:
+        registry.close()
+
+
+def test_upsert_bytes_sends_owner_tag_and_project_id_when_given(nas, sent, config, tmp_path):
+    """The per-item fields travel as form fields and land on the intake row."""
+    _seed_project(config, "proj-1", home="nas")
+    local = tmp_path / "item.md"
+    local.write_bytes(b"# item\n")
+
+    answer = nas.upsert_bytes(
+        str(local), "/mnt/nfs/Florian/item.md", "md",
+        owner="florian", tag="certifications", project_id="proj-1",
+    )
+
+    assert sent[-1].url.path == "/v1/upsert/bytes"
+    row = _row(config, answer["request_id"])
+    assert (row["owner"], row["tag"], row["project_id"]) == ("florian", "certifications", "proj-1")
+
+
+def test_upsert_bytes_without_the_per_item_fields_stores_none(mbp, config, tmp_path):
+    """A call that names no owner, tag or project sends none of them: the row keeps None and the hub applies its defaults.
+
+    MBP is used because it has a fixed owner. nas has none and must name the owner of each item, so an
+    upsert from it without one is refused (see test_upsert_bytes_sends_owner_tag_and_project_id_when_given).
+    """
+    local = tmp_path / "plain.md"
+    local.write_bytes(b"plain")
+
+    answer = mbp.upsert_bytes(str(local), "/Users/fotel/MBP/plain.md", "md")
+
+    row = _row(config, answer["request_id"])
+    assert (row["owner"], row["tag"], row["project_id"]) == (None, None, None)
+
+
+def test_upsert_text_sends_tag_and_project_id_when_given(claude, sent, config):
+    """A text upsert carries the tag and project_id it was given, and they reach the row.
+
+    claude-MBP has a fixed owner, so the owner is not sent here (the API refuses one from a fixed-owner source).
+    """
+    _seed_project(config, "proj-1", home="nas")
+
+    answer = claude.upsert_text(
+        "claude-session://abc", "session text", metadata={"session_id": "abc"},
+        tag="work", project_id="proj-1",
+    )
+
+    body = _body(sent[-1])
+    assert "owner" not in body
+    assert (body["tag"], body["project_id"]) == ("work", "proj-1")
+    row = _row(config, answer["request_id"])
+    assert (row["owner"], row["tag"], row["project_id"]) == (None, "work", "proj-1")
+
+
+def test_publish_project_from_nas_sends_owner_and_tags(nas, sent, config):
+    """A publish from nas sends the owner and the tag set, and the registry row and tags follow."""
+    answer = nas.publish_project(
+        "marker-proj", "Marker Project", path="/mnt/nfs/Florian/marker-proj",
+        owner="florian", tags={"kind": "repo"},
+    )
+
+    assert (sent[-1].method, sent[-1].url.path) == ("POST", "/v1/projects")
+    assert _body(sent[-1]) == {
+        "id": "marker-proj", "name": "Marker Project", "path": "/mnt/nfs/Florian/marker-proj",
+        "owner": "florian", "tags": {"kind": "repo"},
+    }
+    assert answer == {"published": True, "id": "marker-proj"}
+    registry = RegistryDB(registry_db_path(config), read_only=True)
+    try:
+        assert registry.project_tags("marker-proj") == {"kind": "repo"}
+    finally:
+        registry.close()
+
+
+def test_publish_project_from_nas_refused_for_a_project_homed_elsewhere(nas, config):
+    """A 409 from a publish is returned as the refusal body, not raised, as for the Mac."""
+    _seed_project(config, "mbp-proj", home="MBP")
+
+    refusal = nas.publish_project("mbp-proj", "Hijack", path="/x", owner="florian", tags={})
+
+    assert refusal["refused"] is True
+    assert "already homed on 'MBP'" in refusal["reason"]
+
+
+def test_remove_project_posts_the_id_and_removes_the_row(nas, sent, config):
+    """remove_project posts {id} to /v1/projects/remove and the project is gone from the registry."""
+    _seed_project(config, "proj-1", home="nas")
+
+    answer = nas.remove_project("proj-1")
+
+    assert (sent[-1].method, sent[-1].url.path) == ("POST", "/v1/projects/remove")
+    assert _body(sent[-1]) == {"id": "proj-1"}
+    assert answer == {"removed": True, "id": "proj-1"}
+    registry = RegistryDB(registry_db_path(config), read_only=True)
+    try:
+        assert all(p["id"] != "proj-1" for p in registry.list_projects())
+    finally:
+        registry.close()
+
+
+def test_remove_project_raises_hub_error_for_404_and_409(nas, config):
+    """Unlike publish, a remove refusal is raised: the caller decides what an unknown or foreign project means."""
+    with pytest.raises(HubError) as missing:
+        nas.remove_project("no-such-project")
+    assert missing.value.status_code == 404
+
+    _seed_project(config, "mbp-proj", home="MBP")
+    with pytest.raises(HubError) as foreign:
+        nas.remove_project("mbp-proj")
+    assert foreign.value.status_code == 409
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from ragnart.schema import (
     FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
     FIELD_SOURCE_TYPE,
+    FIELD_TAG,
     GLOBAL_PROJECT_ID,
     PIPELINE_VERSION_P1,
 )
@@ -97,7 +98,7 @@ class TestTextUpsert:
         key = "claude-session://abc-123"
         meta = {"session_id": "abc-123", "project": "ragnart", "session_title": "Planning chat"}
 
-        result, client = _ingest(source_id="claude-MBP", key=key, owner="florian", text=text, chat_meta=meta)
+        result, client = _ingest(connector="claude_code", source_id="claude-MBP", key=key, owner="florian", text=text, chat_meta=meta)
 
         assert result.status == "completed"
         assert result.reason is None
@@ -125,7 +126,7 @@ class TestTextUpsert:
             assert payload["session_title"] == "Planning chat"
 
     def test_delete_filter_names_source_and_key(self):
-        _, client = _ingest(source_id="claude-MBP", key="claude-session://abc", owner="florian",
+        _, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://abc", owner="florian",
                             text="some text " * 20)
 
         assert _delete_filter_values(client) == {FIELD_SOURCE_ID: "claude-MBP", FIELD_SOURCE_PATH: "claude-session://abc"}
@@ -138,7 +139,7 @@ class TestTextUpsert:
         # Defence in depth: the API already refuses these names, but the core must not let them win.
         meta = {"source_id": "nas", "source_path": "/elsewhere", "owner": "mallory", "session_title": "T"}
 
-        _, client = _ingest(source_id="claude-MBP", key="claude-session://abc", owner="florian",
+        _, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://abc", owner="florian",
                             text="some text " * 20, chat_meta=meta)
 
         for point in _points(client):
@@ -147,19 +148,19 @@ class TestTextUpsert:
             assert point.payload["owner"] == "florian"
 
     def test_modified_at_is_written_unchanged_to_every_point(self):
-        # The string is written as given. It is the same form ingest_file writes for the same instant.
+        # The string is written as given: isoformat() of a UTC datetime for the same instant.
         stamp = "2023-11-14T22:13:20+00:00"
-        _, client = _ingest(source_id="claude-MBP", key="claude-session://abc", owner="florian",
+        _, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://abc", owner="florian",
                             text="some text " * 20, modified_at=stamp)
 
         for point in _points(client):
             assert point.payload["modified_at"] == stamp
 
-    def test_modified_at_matches_ingest_file_format(self):
-        # ingest_file writes datetime.fromtimestamp(ts, utc).isoformat(); the API's stored form must equal it.
+    def test_modified_at_matches_the_nas_format(self):
+        # The NAS side writes datetime.fromtimestamp(ts, utc).isoformat(); the API's stored form must equal it.
         from datetime import datetime, timezone
         stamp = datetime.fromtimestamp(1_700_000_000.0, tz=timezone.utc).isoformat()
-        _, client = _ingest(source_id="claude-MBP", key="claude-session://abc", owner="florian",
+        _, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://abc", owner="florian",
                             text="some text " * 20, modified_at=stamp)
 
         assert _points(client)[0].payload["modified_at"] == "2023-11-14T22:13:20+00:00"
@@ -244,7 +245,7 @@ class TestParsingByDeclaredType:
 
 
 # ---------------------------------------------------------------------------
-# Admission reasons, in ingest_file's wording
+# Admission reasons
 # ---------------------------------------------------------------------------
 
 class TestAdmission:
@@ -258,7 +259,7 @@ class TestAdmission:
         assert result == IngestResult("ignored", "too large: 100 bytes > 10 byte cap", 0, None, PIPELINE_VERSION_P1)
         _no_live_services.assert_not_called()
         client.upsert.assert_not_called()
-        # The stale points are still deleted first, as in ingest_file.
+        # The stale points are still deleted first.
         client.delete.assert_called_once()
 
     def test_nul_byte_in_text_like_upload_is_ignored(self, tmp_path, _no_live_services):
@@ -284,8 +285,8 @@ class TestAdmission:
         client.upsert.assert_not_called()
 
     def test_text_upload_below_printable_gate_is_ignored(self):
-        # Rendered text is not parsed, but it still passes the printable gate, as session text does in ingest_file.
-        result, client = _ingest(source_id="claude-MBP", key="claude-session://junk", owner="florian",
+        # Rendered text is not parsed, but it still passes the printable gate.
+        result, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://junk", owner="florian",
                                  text="\x01\x02\x03" * 50)
 
         assert result.status == "ignored"
@@ -295,7 +296,7 @@ class TestAdmission:
     def test_chunk_cap_ignores_the_item(self):
         cfg = {"admission": {**RAG_CFG["admission"], "max_chunks_per_item": 1}}
 
-        result, client = _ingest(rag_cfg=cfg, source_id="claude-MBP", key="claude-session://long",
+        result, client = _ingest(connector="claude_code", rag_cfg=cfg, source_id="claude-MBP", key="claude-session://long",
                                  owner="florian", text="word " * 3000)
 
         assert result.status == "ignored"
@@ -321,7 +322,7 @@ class TestAdmission:
 class TestEmptyItems:
     @pytest.mark.parametrize("text", ["", "   \n\t  "])
     def test_blank_text_completes_with_no_chunks_and_deletes_stale_points(self, text):
-        result, client = _ingest(source_id="claude-MBP", key="claude-session://blank", owner="florian", text=text)
+        result, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://blank", owner="florian", text=text)
 
         assert result == IngestResult("completed", None, 0, None, PIPELINE_VERSION_P1)
         client.upsert.assert_not_called()
@@ -363,3 +364,76 @@ class TestArguments:
         spool = _spool(tmp_path, b"body")
         with pytest.raises(ValueError, match="invalid file type"):
             _ingest(source_id="MBP", key="/a.md", owner="florian", spool_path=spool, file_type=bad_type)
+
+
+# ---------------------------------------------------------------------------
+# The connector decides the item's type; tag and project_id are written as given (session B2, A.5)
+# ---------------------------------------------------------------------------
+
+class TestConnectorAndPerItemFields:
+    def test_opencode_text_is_stored_as_an_opencode_session_with_no_hash(self):
+        # source_type opencode_session, file_type opencode, no hash.
+        text = "an opencode session, rendered by the sender. " * 30
+        key = "opencode://ses_abc"
+
+        result, client = _ingest(connector="opencode", source_id="opencode-k11", key=key, owner="florian",
+                                 text=text, chat_meta={"session_id": "ses_abc", "session_title": "Planning"})
+
+        assert result.status == "completed"
+        assert result.content_hash is None
+        points = _points(client)
+        assert result.chunk_count == len(points) > 0
+        for point in points:
+            assert point.payload[FIELD_SOURCE_TYPE] == "opencode_session"
+            assert point.payload[FIELD_FILE_TYPE] == "opencode"
+            assert point.payload[FIELD_CONTENT_HASH] is None
+            assert point.payload[FIELD_SOURCE_ID] == "opencode-k11"
+            assert point.payload[FIELD_FILE_NAME] == "Planning"
+
+    def test_claude_code_text_keeps_the_b1_claude_session_type(self):
+        _, client = _ingest(connector="claude_code", source_id="claude-MBP", key="claude-session://abc",
+                            owner="florian", text="a claude session. " * 30)
+
+        assert {p.payload[FIELD_SOURCE_TYPE] for p in _points(client)} == {"claude_session"}
+        assert {p.payload[FIELD_FILE_TYPE] for p in _points(client)} == {"claude_chat"}
+
+    def test_tag_and_project_id_are_written_to_every_point(self, tmp_path):
+        body = "# Certificates\n\nA note about a certificate course.\n".encode("utf-8")
+        spool = _spool(tmp_path, body)
+
+        result, client = _ingest(source_id="nas", key="/mnt/nfs/Florian/proj/cert.md", owner="florian",
+                                 spool_path=spool, file_type="md", tag="certifications", project_id="proj-1")
+
+        assert result.status == "completed"
+        points = _points(client)
+        assert points
+        for point in points:
+            assert point.payload[FIELD_TAG] == "certifications"
+            assert point.payload[FIELD_PROJECT_ID] == "proj-1"
+
+    def test_tag_and_project_id_default_to_empty_and_global(self, tmp_path):
+        spool = _spool(tmp_path, b"# Plain\n\nA plain note with no tag and no project.\n")
+
+        _, client = _ingest(source_id="MBP", key="/Users/fotel/MBP/plain.md", owner="florian",
+                            spool_path=spool, file_type="md")
+
+        for point in _points(client):
+            assert point.payload[FIELD_TAG] == ""
+            assert point.payload[FIELD_PROJECT_ID] == GLOBAL_PROJECT_ID
+
+    def test_bytes_for_a_session_connector_is_refused(self, tmp_path):
+        spool = _spool(tmp_path, b"not a session, but bytes\n")
+        for connector in ("claude_code", "opencode"):
+            with pytest.raises(ValueError, match="sent as text"):
+                _ingest(connector=connector, source_id="claude-MBP", key="claude-session://x", owner="florian",
+                        spool_path=spool, file_type="md")
+
+    def test_text_for_a_filesystem_connector_is_refused(self):
+        with pytest.raises(ValueError, match="uploaded as bytes"):
+            _ingest(connector="filesystem", source_id="MBP", key="/a.md", owner="florian", text="x " * 30)
+
+    def test_an_unknown_connector_is_refused(self, tmp_path):
+        spool = _spool(tmp_path, b"# Notes\n")
+        with pytest.raises(ValueError, match="unknown connector"):
+            _ingest(connector="ftp", source_id="MBP", key="/a.md", owner="florian",
+                    spool_path=spool, file_type="md")

@@ -60,6 +60,24 @@ def _json_or_raise(response: httpx.Response) -> Any:
     raise HubError(response.status_code, _error_detail(response))
 
 
+def _item_fields(owner: str | None, tag: str | None, project_id: str | None) -> dict:
+    """
+    The per-item fields of an upsert, as they go on the wire: each one only when it was given.
+
+    A field left out is absent from the request, so the hub applies its own default for it (the
+    source's owner, an empty tag, the 'global' project). An endpoint that never sends these fields
+    therefore sends the same request as before session B2.
+    """
+    fields = {}
+    if owner is not None:
+        fields["owner"] = owner
+    if tag is not None:
+        fields["tag"] = tag
+    if project_id is not None:
+        fields["project_id"] = project_id
+    return fields
+
+
 class HubClient:
     """
     One endpoint source's connection to the hub's ingestion API.
@@ -113,17 +131,30 @@ class HubClient:
     # ------------------------------------------------------------------
     # Writes: each one returns the API's 202 answer, {request_id, status}
 
-    def upsert_bytes(self, path: str, key: str, file_type: str, modified_at: str | None = None) -> dict:
+    def upsert_bytes(
+        self,
+        path: str,
+        key: str,
+        file_type: str,
+        modified_at: str | None = None,
+        *,
+        owner: str | None = None,
+        tag: str | None = None,
+        project_id: str | None = None,
+    ) -> dict:
         """
         Submit one local file's bytes as an upsert.
 
         The file is opened here and streamed by httpx while it is sent, so a large file is never read
         into memory whole. file_type is the declared type (the API checks it against its include list).
         modified_at, when given, must be an ISO-8601 string with a UTC offset.
+        owner, tag and project_id are optional and sent only when given: owner only to a source with
+        no fixed owner (the API refuses it otherwise), project_id must name a registry project or 'global'.
         """
         data = {"key": key, "file_type": file_type}
         if modified_at is not None:
             data["modified_at"] = modified_at
+        data.update(_item_fields(owner, tag, project_id))
         with open(path, "rb") as stream:
             response = self._send(
                 "POST", "/v1/upsert/bytes",
@@ -138,9 +169,18 @@ class HubClient:
         text: str,
         metadata: dict | None = None,
         modified_at: str | None = None,
+        *,
+        owner: str | None = None,
+        tag: str | None = None,
+        project_id: str | None = None,
     ) -> dict:
-        """Submit one item's rendered text as an upsert (claude_code sources). metadata holds the chat fields."""
+        """
+        Submit one item's rendered text as an upsert (claude_code and opencode sources).
+
+        metadata holds the chat fields. owner, tag and project_id are optional, as in upsert_bytes.
+        """
         body = {"key": key, "text": text, "metadata": metadata, "modified_at": modified_at}
+        body.update(_item_fields(owner, tag, project_id))
         return _json_or_raise(self._send("POST", "/v1/upsert/text", json=body))
 
     def delete(self, key: str) -> dict:
@@ -151,23 +191,59 @@ class HubClient:
         """Ask the hub to move one item to a new key. Its points are kept, nothing is re-embedded."""
         return _json_or_raise(self._send("POST", "/v1/change-key", json={"key": key, "new_key": new_key}))
 
-    def change_metadata(self, key: str, owner: str) -> dict:
-        """Ask the hub to set the owner of one item of this source. Only owner may change in B1."""
-        body = {"key": key, "metadata": {"owner": owner}}
+    def change_metadata(self, key: str, owner: str | None = None, project_id: str | None = None) -> dict:
+        """
+        Ask the hub to change the owner and/or the project of one item of this source.
+
+        Only the fields given are sent. At least one is required: a call with neither raises ValueError
+        before anything is sent. project_id must name a registry project or 'global' (the hub refuses
+        any other with 422).
+        """
+        metadata = {}
+        if owner is not None:
+            metadata["owner"] = owner
+        if project_id is not None:
+            metadata["project_id"] = project_id
+        if not metadata:
+            raise ValueError("change_metadata needs an owner or a project_id")
+        body = {"key": key, "metadata": metadata}
         return _json_or_raise(self._send("POST", "/v1/change-metadata", json=body))
 
-    def publish_project(self, project_id: str, name: str, path: str | None = None) -> dict:
+    def publish_project(
+        self,
+        project_id: str,
+        name: str,
+        path: str | None = None,
+        *,
+        owner: str | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> dict:
         """
-        Ask the hub to publish a ragnart project from this source.
+        Ask the hub to publish a ragnart project from this source (session B2: the hub writes the registry).
 
-        In B1 the hub always refuses, with 409. The refusal is an answer, not a failure, so its body
-        ({'refused': True, 'reason': ...}) is returned rather than raised.
+        owner and tags are sent only when given: owner for a source with no fixed owner (nas), tags as the
+        project's whole tag set. A source without the ragnart_projects capability is refused with 409. A
+        project homed on another source is refused with 409 too. A refusal is an answer, not a failure,
+        so its body ({'refused': True, 'reason': ...}) is returned rather than raised.
         """
         body = {"id": project_id, "name": name, "path": path}
+        if owner is not None:
+            body["owner"] = owner
+        if tags is not None:
+            body["tags"] = tags
         response = self._send("POST", "/v1/projects", json=body)
         if response.status_code == 409:
             return response.json()
         return _json_or_raise(response)
+
+    def remove_project(self, project_id: str) -> dict:
+        """
+        Ask the hub to remove a ragnart project that this source homes.
+
+        Unlike publish_project, a refusal is raised: 404 (no such project) and 409 (homed on another source,
+        or the source lacks the capability) come back as HubError, so the caller decides what they mean.
+        """
+        return _json_or_raise(self._send("POST", "/v1/projects/remove", json={"id": project_id}))
 
     # ------------------------------------------------------------------
     # Reads

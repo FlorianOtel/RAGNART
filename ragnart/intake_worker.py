@@ -18,7 +18,17 @@ Per request, oldest first, one at a time:
     change_key       rewrite source_path and file_name on the points of
                      (source_id, old key). Nothing is re-embedded. A new key that
                      already has points is refused, nothing changes.              ->  completed | failed
-    change_metadata  set the owner on the points of (source_id, key)              ->  completed
+    change_metadata  set the owner or project_id on the points of (source_id, key) ->  completed
+
+A pool of DEFAULT_WORKERS workers drains the queue (drain_intake). Each worker claims a request with
+RegistryDB.next_intake(), which never hands out a request while an earlier request of the same item
+(same source, same key or new_key) is still received or processing. So requests for one item run
+strictly in order, and requests for different items run in parallel.
+
+The workers are asyncio tasks on ONE event-loop thread, not threads. Every registry call (claim,
+status update, source lookup) therefore runs on that thread, and the single SQLite connection of
+RegistryDB is never shared across threads. Only the parse and hash steps run in worker threads
+(asyncio.to_thread), and they never touch the registry. No lock is needed between the workers.
 
 A request that raises is recorded as failed with its error, and the worker moves on to the next one.
 A request is never run twice by this worker: each one is claimed (status 'processing') before it runs.
@@ -26,6 +36,7 @@ A request is never run twice by this worker: each one is claimed (status 'proces
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
@@ -39,17 +50,26 @@ from ragnart.collection import DOCUMENTS_COLLECTION, ensure_collection, get_clie
 from ragnart.ingest import ingest_content, item_filter
 from ragnart.lock import acquire_or_exit, lock_path_from_config
 from ragnart.registry import RegistryDB
-from ragnart.schema import FIELD_FILE_NAME, FIELD_OWNER, FIELD_SOURCE_PATH
+from ragnart.schema import (
+    FIELD_FILE_NAME,
+    FIELD_OWNER,
+    FIELD_PROJECT_ID,
+    FIELD_SOURCE_PATH,
+    GLOBAL_PROJECT_ID,
+)
 
 logger = logging.getLogger(__name__)
 
 # The longest error text kept on a failed request. The column is for diagnosis, not a log.
 MAX_ERROR_CHARS = 500
 
-# The fields a change_metadata request may set in B1. This must match the check in ragnart/ingest_api.py,
+# How many requests the queue drains at once. main() takes --workers to change it.
+DEFAULT_WORKERS = 3
+
+# The fields a change_metadata request may set. This must match the check in ragnart/ingest_api.py,
 # which is the one that refuses other names at the door. The worker checks again, because it runs
 # the change, and a row written by other code must not change more than the API allows.
-CHANGEABLE_FIELDS = frozenset({FIELD_OWNER})
+CHANGEABLE_FIELDS = frozenset({FIELD_OWNER, FIELD_PROJECT_ID})
 
 
 # ---------------------------------------------------------------------------
@@ -62,32 +82,34 @@ async def _apply_upsert(row: dict, source: dict, rag_cfg: dict, qdrant_client: Q
 
     A bytes request names a spool file, and a text request carries its text in the row. The
     chat metadata, if any, travels in the row's metadata. The item's modification time, if the
-    endpoint sent one, travels in the row's modified_at. The source's registered owner is written
-    to every point.
+    endpoint sent one, travels in the row's modified_at.
+
+    Each per-item field falls back to the source's own setting when the request did not send it:
+      owner       the row's owner (sent by a source with no fixed owner), else the source's owner;
+      tag         the row's tag, else '' (no tag);
+      project_id  the row's project_id, else 'global'.
+    The connector is the source's, so ingest_content knows whether the item is a file or a session.
     """
+    common = dict(
+        source_id=source["id"],
+        key=row["key"],
+        owner=row["owner"] or source["owner"],
+        rag_cfg=rag_cfg,
+        qdrant_client=qdrant_client,
+        connector=source["connector"],
+        tag=row["tag"] or "",
+        project_id=row["project_id"] or GLOBAL_PROJECT_ID,
+        chat_meta=row["metadata"],
+        modified_at=row["modified_at"],
+    )
     if row["spool_path"] is not None:
         result = await ingest_content(
-            source_id=source["id"],
-            key=row["key"],
-            owner=source["owner"],
-            rag_cfg=rag_cfg,
-            qdrant_client=qdrant_client,
+            **common,
             spool_path=row["spool_path"],
             file_type=row["file_type"],
-            chat_meta=row["metadata"],
-            modified_at=row["modified_at"],
         )
     else:
-        result = await ingest_content(
-            source_id=source["id"],
-            key=row["key"],
-            owner=source["owner"],
-            rag_cfg=rag_cfg,
-            qdrant_client=qdrant_client,
-            text=row["text"],
-            chat_meta=row["metadata"],
-            modified_at=row["modified_at"],
-        )
+        result = await ingest_content(**common, text=row["text"])
 
     fields = {
         "status": result.status,
@@ -143,7 +165,7 @@ def _apply_change_key(row: dict, source: dict, qdrant_client: QdrantClient) -> d
 
 
 def _apply_change_metadata(row: dict, source: dict, qdrant_client: QdrantClient) -> dict:
-    """Set the given metadata fields on the points of one item of this source. In B1 only owner is allowed."""
+    """Set the given metadata fields (owner, project_id; see CHANGEABLE_FIELDS) on the points of one item of this source."""
     metadata = row["metadata"] or {}
     if not metadata:
         raise ValueError("change_metadata request has no metadata")
@@ -226,13 +248,14 @@ async def _process_row(row: dict, registry: RegistryDB, rag_cfg: dict, qdrant_cl
     return outcome
 
 
-async def drain_intake(registry: RegistryDB, rag_cfg: dict, qdrant_client: QdrantClient) -> int:
+async def _drain_worker(registry: RegistryDB, rag_cfg: dict, qdrant_client: QdrantClient) -> int:
     """
-    Process every waiting request, oldest first, until none is left. Returns how many were processed.
+    One worker of the pool: claim and apply requests until next_intake() finds none. Returns its count.
 
-    The lock is taken by main(), not here, so this function can be run on a registry and a client
-    that a test supplies. Requests are claimed one at a time by next_intake(), so a request is
-    recorded before it runs.
+    Why a worker may stop at the first None: next_intake() skips only requests held back by an EARLIER
+    request that is still received or processing. The last worker to stop sees no 'processing' row
+    (each worker finishes its own request before it claims again), and the oldest 'received' row is
+    never held back. So if that last claim finds nothing, nothing is waiting. No worker needs to poll.
     """
     processed = 0
     while (row := registry.next_intake()) is not None:
@@ -241,13 +264,53 @@ async def drain_intake(registry: RegistryDB, rag_cfg: dict, qdrant_client: Qdran
     return processed
 
 
-def main() -> int:
+async def drain_intake(
+    registry: RegistryDB,
+    rag_cfg: dict,
+    qdrant_client: QdrantClient,
+    workers: int = DEFAULT_WORKERS,
+) -> int:
+    """
+    Process every waiting request with a pool of `workers` workers. Returns how many were processed.
+
+    The workers are asyncio tasks in one TaskGroup. If one of them raises (a registry error, say), the
+    group cancels the others, and the error propagates. A request a cancelled worker had claimed stays
+    'processing' until the next run resets it (main() does, under the lock).
+
+    The lock is taken by main(), not here, so this function can be run on a registry and a client
+    that a test supplies. Requests are claimed one at a time by next_intake(), so a request is
+    recorded before it runs.
+    """
+    if workers < 1:
+        raise ValueError(f"the worker pool needs at least one worker, not {workers}")
+    async with asyncio.TaskGroup() as group:
+        tasks = [
+            group.create_task(_drain_worker(registry, rag_cfg, qdrant_client))
+            for _ in range(workers)
+        ]
+    return sum(task.result() for task in tasks)
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Read the command line: --workers, the size of the drain pool (default DEFAULT_WORKERS)."""
+    parser = argparse.ArgumentParser(description="Apply the waiting ingestion-API requests to the index.")
+    parser.add_argument(
+        "--workers", type=int, default=DEFAULT_WORKERS,
+        help=f"how many requests are applied at once (default {DEFAULT_WORKERS}); requests for one item stay in order",
+    )
+    # An argument list of None means "no flags". The command-line entry point passes sys.argv[1:]
+    # explicitly, so a caller that imports main() (a test, say) never parses its own process arguments.
+    return parser.parse_args([] if argv is None else argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     """
     Take the ingestion lock, then apply the waiting intake requests. Returns the process exit status.
 
     The lock is taken before the registry or Qdrant is opened, so a refused run touches nothing. On
     contention acquire_or_exit exits the process with EXIT_LOCK_HELD (75) and names the holder.
     """
+    args = _parse_args(argv)
     config = load_config()
 
     # The returned fd is kept in a named variable so the lock stays for the whole process lifetime.
@@ -265,7 +328,7 @@ def main() -> int:
 
         qdrant_client = get_client(rag_cfg["qdrant_url"])
         ensure_collection(qdrant_client)
-        processed = asyncio.run(drain_intake(registry, rag_cfg, qdrant_client))
+        processed = asyncio.run(drain_intake(registry, rag_cfg, qdrant_client, workers=args.workers))
     finally:
         registry.close()
 
@@ -275,4 +338,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -6,7 +6,7 @@ replace_project_tags, project_tags, project_ids_by_tag, list_projects (shape: no
 mode or inherit_access), list_sources (no secret), and remove_project (tags, references
 in both directions, grants; other projects untouched).
 
-Also covers the sources methods (register_source, source_by_id, hub_source_ids) and the
+Also covers the sources methods (register_source, source_by_id, sources_with_secret) and the
 intake methods (insert_intake, intake_by_id, next_intake, update_intake, delete_intake_for_source).
 
 Every test runs on a RegistryDB in tmp_path. No queue database and no Qdrant server are used.
@@ -187,12 +187,6 @@ def test_list_sources_never_returns_the_secret_hash(registry) -> None:
         assert set(source) == {"id", "connector", "owner_binding"}
 
 
-def test_hub_source_ids_leaves_out_endpoint_sources(registry) -> None:
-    _register_mbp(registry)
-
-    assert registry.hub_source_ids() == {SOURCE_ID_NAS, "claude-linux-shared-nfs", "opencode-k11"}
-
-
 @pytest.mark.parametrize("source_id", ["Nas", "NAS", "claude-LINUX-shared-nfs"])
 def test_registering_a_case_only_duplicate_of_a_seeded_source_is_refused(registry, source_id) -> None:
     with pytest.raises(ValueError, match="already registered"):
@@ -320,11 +314,46 @@ def test_insert_intake_uses_the_caller_request_id(registry) -> None:
     assert registry.intake_by_id("abc123")["key"] == "/nas/a.md"
 
 
-def test_endpoint_sources_lists_only_endpoints_with_their_hash(registry) -> None:
-    """endpoint_sources returns the endpoint rows with their hash, and leaves out hub sources."""
+def test_insert_intake_stores_owner_tag_and_project_id(registry) -> None:
+    """The B2 upsert fields are stored on the row as given; when absent they read back as None."""
+    with_fields = registry.insert_intake(
+        "nas", "upsert", "/mnt/nfs/Florian/a.md", owner="florian", tag="cisco", project_id="global",
+    )
+    without = registry.insert_intake("nas", "upsert", "/mnt/nfs/Florian/b.md")
+
+    row = registry.intake_by_id(with_fields)
+    assert (row["owner"], row["tag"], row["project_id"]) == ("florian", "cisco", "global")
+    bare = registry.intake_by_id(without)
+    assert (bare["owner"], bare["tag"], bare["project_id"]) == (None, None, None)
+
+
+def test_sources_with_secret_lists_every_kind_that_holds_a_hash(registry) -> None:
+    """sources_with_secret covers hub and endpoint sources alike, and leaves out rows without a hash."""
     registry.register_source("MBP", "filesystem", "endpoint", "florian", "f" * 64)
-    registry.register_source("hubby", "filesystem", "hub", None, "e" * 64)
+    # The seeded hub sources have no secret, so they are not listed until one is stored.
+    assert [row["id"] for row in registry.sources_with_secret()] == ["MBP"]
 
-    endpoints = registry.endpoint_sources()
+    registry._conn.execute("UPDATE sources SET secret_hash = ? WHERE id = ?", ("h" * 64, SOURCE_ID_NAS))
+    registry._conn.commit()
 
-    assert endpoints == [{"id": "MBP", "connector": "filesystem", "owner": "florian", "secret_hash": "f" * 64}]
+    rows = {row["id"]: row for row in registry.sources_with_secret()}
+    assert set(rows) == {"MBP", SOURCE_ID_NAS}
+    assert rows[SOURCE_ID_NAS]["secret_hash"] == "h" * 64
+    assert set(rows[SOURCE_ID_NAS]) == {"id", "connector", "owner", "secret_hash"}
+
+
+def test_set_secret_hash_replaces_the_hash_of_a_hub_source_in_any_case(registry) -> None:
+    """set_secret_hash stores the new hash on the row whatever its kind, and matches the id case-insensitively."""
+    assert registry.set_secret_hash("nas", "a" * 64) is True
+
+    rows = {row["id"]: row for row in registry.sources_with_secret()}
+    assert rows[SOURCE_ID_NAS]["secret_hash"] == "a" * 64
+
+    # The stored id is 'nas'; a differently cased id still finds the row.
+    assert registry.set_secret_hash("NAS", "b" * 64) is True
+    assert registry.source_by_id("nas")["secret_hash"] == "b" * 64
+
+
+def test_set_secret_hash_for_an_unknown_id_changes_nothing(registry) -> None:
+    assert registry.set_secret_hash("no-such-source", "c" * 64) is False
+    assert registry.sources_with_secret() == []

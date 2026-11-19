@@ -1,29 +1,29 @@
 """
-Tests for ragnart/sync_plan.py: build_sync_plan(), apply_sync_plan(), format_plan().
+Tests for ragnart/sync_plan_core.py: build_sync_plan() and format_plan() (the planning half of the NAS sync).
 
-A real temporary StateDB holds the queue and a real temporary RegistryDB holds the
-projects. The Qdrant client is a MagicMock, so no server is contacted. The scan result
-is built by hand, so no filesystem is walked.
+The Qdrant-write cases are not repeated here. tests/test_sync_submit.py covers each change as a request
+to the ingestion API. The ported assertions are noted in
+the test docstrings ("Ported from ..." or "Dropped: ...").
+
+A real temporary StateDB holds the queue and a real temporary RegistryDB holds the projects. The scan result is built
+by hand, so no filesystem is walked. Nothing here writes to a hub, a Qdrant server or a live database.
 """
 
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock
 
 import pytest
 
 from ragnart.moves import EMPTY_FILE_MD5
 from ragnart.registry import RegistryDB
 from ragnart.schema import (
-    FIELD_SOURCE_ID,
-    FIELD_SOURCE_PATH,
     GLOBAL_PROJECT_ID,
     SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
     SOURCE_ID_NAS,
 )
 from ragnart.state import StateDB
-from ragnart.sync_plan import apply_sync_plan, build_sync_plan, format_plan
+from ragnart.sync_plan_core import build_sync_plan, format_plan
 
 OWNER = "tester"
 NOW = "2026-11-16T12:00:00+00:00"
@@ -45,11 +45,6 @@ def registry_db(tmp_path):
     db = RegistryDB(str(tmp_path / "registry" / "hub_registry.db"))
     yield db
     db.close()
-
-
-@pytest.fixture
-def qdrant() -> MagicMock:
-    return MagicMock(name="qdrant")
 
 
 def _config(max_delete_fraction: float = 0.10) -> dict:
@@ -130,65 +125,30 @@ def _tombstone(state_db: StateDB, path: str, when: str, **kwargs) -> None:
     state_db.mark_missing(path, when)
 
 
-def _row(state_db: StateDB, path: str) -> dict | None:
-    row = state_db._conn.execute("SELECT * FROM ingestion_queue WHERE file_path = ?", (path,)).fetchone()
-    return dict(row) if row else None
-
-
-def _filter_value(flt, key: str) -> str:
-    """The value a Qdrant filter matches for one payload key. The filter must name that key exactly once."""
-    (condition,) = [c for c in flt.must if c.key == key]
-    return condition.match.value
-
-
-def _set_payload_paths(qdrant: MagicMock) -> list[tuple[str, dict]]:
-    """(source_path filter value, payload) for every set_payload call, in call order."""
-    return [
-        (_filter_value(call.kwargs["points"], FIELD_SOURCE_PATH), call.kwargs["payload"])
-        for call in qdrant.set_payload.call_args_list
-    ]
-
-
-def _deleted_paths(qdrant: MagicMock) -> list[str]:
-    return [
-        _filter_value(call.kwargs["points_selector"].filter, FIELD_SOURCE_PATH)
-        for call in qdrant.delete.call_args_list
-    ]
-
-
 # ----------------------------------------------------------------------------
 # Moves
 # ----------------------------------------------------------------------------
 
 
-def test_move_renames_key_in_sqlite_and_qdrant_and_deletes_the_scanned_pending_row(state_db, registry_db, qdrant):
+def test_move_is_planned_when_the_new_path_has_a_matching_hash(state_db, registry_db):
+    """
+    Ported from the plan half of test_move_renames_key_in_sqlite_and_qdrant_and_deletes_the_scanned_pending_row.
+
+    Dropped: its Qdrant set_payload and SQLite rename assertions. The change_key request and the rename after the
+    hub accepts it are covered by tests/test_sync_submit.py (test_move_sends_change_key_and_renames_the_row_only_after_acceptance).
+    """
     old, new = "/nas/old.md", "/nas/new.md"
     _completed(state_db, old, content_hash="h1", chunk_count=7)
     # The scan has already queued the new path as a pending row.
     state_db.discover_or_update(new, OWNER, 2.0, origin_path=new, source_type="file")
-    scan = _scan(existing={new}, new_hashes={new: "h1"})
 
-    plan = build_sync_plan(state_db, registry_db, scan, _config(), NOW)
+    plan = build_sync_plan(state_db, registry_db, _scan(existing={new}, new_hashes={new: "h1"}), _config(), NOW)
+
     assert plan.moves == {old: new}
     assert plan.newly_missing == []
 
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
 
-    # Qdrant: the old key's points now carry the new source_path, and nothing else changed.
-    assert _set_payload_paths(qdrant) == [(old, {"source_path": new})]
-    assert qdrant.set_payload.call_args.kwargs["wait"] is True
-    qdrant.delete.assert_not_called()
-
-    # SQLite: one row, at the new key, keeping chunk_count and content_hash.
-    assert _row(state_db, old) is None
-    moved = _row(state_db, new)
-    assert moved["status"] == "completed"
-    assert moved["chunk_count"] == 7
-    assert moved["content_hash"] == "h1"
-    assert moved["origin_path"] == new
-
-
-def test_move_excludes_empty_file_hash(state_db, registry_db, qdrant):
+def test_move_excludes_empty_file_hash(state_db, registry_db):
     old, new = "/nas/empty-a.md", "/nas/empty-b.md"
     _completed(state_db, old, content_hash=EMPTY_FILE_MD5)
     state_db.discover_or_update(new, OWNER, 2.0, origin_path=new, source_type="file")
@@ -199,7 +159,7 @@ def test_move_excludes_empty_file_hash(state_db, registry_db, qdrant):
     assert plan.newly_missing == [old]
 
 
-def test_ambiguous_hash_match_is_not_a_move(state_db, registry_db, qdrant):
+def test_ambiguous_hash_match_is_not_a_move(state_db, registry_db):
     """Two vanished files share a hash with one new file: none of the three pairs is a move."""
     old_a, old_b, new = "/nas/a.md", "/nas/b.md", "/nas/c.md"
     _completed(state_db, old_a, content_hash="same")
@@ -214,7 +174,7 @@ def test_ambiguous_hash_match_is_not_a_move(state_db, registry_db, qdrant):
     assert sorted(plan.newly_missing) == sorted([old_a, old_b])
 
 
-def test_session_key_is_never_a_move_source(state_db, registry_db, qdrant):
+def test_session_key_is_never_a_move_source(state_db, registry_db):
     """A vanished Claude session must not be re-keyed onto a NAS file with the same content."""
     session = "claude-session://47cfe354-39f7-45a0-993e-1df37c4fb88e"
     new = "/nas/copy.md"
@@ -227,56 +187,46 @@ def test_session_key_is_never_a_move_source(state_db, registry_db, qdrant):
     assert plan.newly_missing == [session]
 
 
-def test_move_without_pending_row_is_refused(state_db, registry_db, qdrant):
-    """The move target must have the pending row the scan created. Without it, stop rather than guess."""
-    old, new = "/nas/old.md", "/nas/new.md"
-    _completed(state_db, old, content_hash="h1")
-    plan = build_sync_plan(state_db, registry_db, _scan(existing={new}, new_hashes={new: "h1"}), _config(), NOW)
-    assert plan.moves == {old: new}
-
-    with pytest.raises(RuntimeError, match="no pending row"):
-        apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-    qdrant.set_payload.assert_not_called()
-
-
 # ----------------------------------------------------------------------------
 # Tombstones, reappearance, purge
 # ----------------------------------------------------------------------------
 
 
-def test_newly_missing_item_keeps_its_qdrant_points(state_db, registry_db, qdrant):
+def test_vanished_item_is_planned_as_newly_missing_and_not_purged(state_db, registry_db):
+    """
+    Ported from the plan half of test_newly_missing_item_keeps_its_qdrant_points.
+
+    Dropped: its delete-not-called and missing_since assertions. Tombstoning is local only and is covered by
+    tests/test_sync_submit.py (test_newly_missing_reappeared_and_stale_rows_are_local_only).
+    """
     gone = "/nas/gone.md"
     _completed(state_db, gone, content_hash="h-gone")
     _completed(state_db, "/nas/kept.md", content_hash="h-kept")
-    scan = _scan(existing={"/nas/kept.md"})
 
-    plan = build_sync_plan(state_db, registry_db, scan, _config(0.9), NOW)
+    plan = build_sync_plan(state_db, registry_db, _scan(existing={"/nas/kept.md"}), _config(0.9), NOW)
+
     assert plan.newly_missing == [gone]
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-
-    qdrant.delete.assert_not_called()
-    assert _row(state_db, gone)["missing_since"] == NOW
-    assert _row(state_db, gone)["status"] == "completed"
+    assert plan.purge_ready == []
 
 
-def test_tombstone_keeps_first_missing_time_across_syncs(state_db, registry_db, qdrant):
-    """A file still missing on a later sync keeps the time it was first seen missing."""
+def test_tombstone_still_missing_on_a_later_plan_is_not_tombstoned_again(state_db, registry_db):
+    """
+    Ported from test_tombstone_keeps_first_missing_time_across_syncs.
+
+    The first missing time is kept because the planner never lists a row that is already tombstoned as newly
+    missing; the submit only marks rows the plan names. Both plans below are inside the grace period.
+    """
     gone = "/nas/gone.md"
-    _completed(state_db, gone)
+    _tombstone(state_db, gone, FRESH)
     _completed(state_db, "/nas/kept.md")
 
-    # The first sync is 23 h before the second, so the row is still inside the grace period on the second.
-    first = build_sync_plan(state_db, registry_db, _scan(existing={"/nas/kept.md"}), _config(0.9), FRESH)
-    apply_sync_plan(state_db, registry_db, qdrant, first, FRESH)
     later_plan = build_sync_plan(state_db, registry_db, _scan(existing={"/nas/kept.md"}), _config(0.9), NOW)
-    apply_sync_plan(state_db, registry_db, qdrant, later_plan, NOW)
 
     assert later_plan.newly_missing == []
     assert later_plan.purge_ready == []
-    assert _row(state_db, gone)["missing_since"] == FRESH
 
 
-def test_tombstoned_rows_are_not_counted_again_by_the_guard(state_db, registry_db, qdrant):
+def test_tombstoned_rows_are_not_counted_again_by_the_guard(state_db, registry_db):
     """A row tombstoned on an earlier sync and still gone is not vanished again, so the guard ignores it."""
     gone = "/nas/gone.md"
     _completed(state_db, gone)
@@ -292,40 +242,38 @@ def test_tombstoned_rows_are_not_counted_again_by_the_guard(state_db, registry_d
     assert "/nas/old-gone.md" not in plan.newly_missing
 
 
-def test_reappeared_item_clears_missing_since(state_db, registry_db, qdrant):
+def test_reappeared_item_is_planned_as_reappeared(state_db, registry_db):
+    """
+    Ported from test_reappeared_item_clears_missing_since (the plan half).
+
+    Dropped: its missing_since and delete-not-called assertions. Clearing the tombstone is local only and is
+    covered by tests/test_sync_submit.py (test_newly_missing_reappeared_and_stale_rows_are_local_only).
+    """
     path = "/nas/back.md"
     _tombstone(state_db, path, FRESH)
 
     plan = build_sync_plan(state_db, registry_db, _scan(existing={path}), _config(), NOW)
+
     assert plan.reappeared == [path]
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-
-    assert _row(state_db, path)["missing_since"] is None
-    qdrant.delete.assert_not_called()
+    assert plan.purge_ready == []
 
 
-def test_purge_ready_deletes_points_then_row(state_db, registry_db, qdrant):
-    """Qdrant is written first. The row still exists while the delete runs, so a crash leaves it to retry."""
+def test_expired_tombstone_is_planned_for_purge(state_db, registry_db):
+    """
+    Ported from the plan half of test_purge_ready_deletes_points_then_row.
+
+    Dropped: the Qdrant delete ordering (the row still present during the delete, the row gone afterwards). That is
+    covered by tests/test_sync_submit.py (test_purge_sends_delete_and_removes_the_row_only_after_acceptance).
+    """
     path = "/nas/expired.md"
     _tombstone(state_db, path, EXPIRED, chunk_count=3)
-    row_seen_during_delete: list[bool] = []
-
-    def record_row_then_succeed(**kwargs):
-        row_seen_during_delete.append(_row(state_db, path) is not None)
-
-    qdrant.delete.side_effect = record_row_then_succeed
 
     plan = build_sync_plan(state_db, registry_db, _scan(existing=set()), _config(1.0), NOW)
+
     assert plan.purge_ready == [path]
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-
-    assert _deleted_paths(qdrant) == [path]
-    assert qdrant.delete.call_args.kwargs["wait"] is True
-    assert row_seen_during_delete == [True]
-    assert _row(state_db, path) is None
 
 
-def test_tombstone_inside_the_grace_period_is_not_purged(state_db, registry_db, qdrant):
+def test_tombstone_inside_the_grace_period_is_not_purged(state_db, registry_db):
     path = "/nas/fresh.md"
     _tombstone(state_db, path, FRESH)
 
@@ -334,7 +282,7 @@ def test_tombstone_inside_the_grace_period_is_not_purged(state_db, registry_db, 
     assert plan.purge_ready == []
 
 
-def test_purge_ready_is_not_subject_to_the_mass_delete_guard(state_db, registry_db, qdrant):
+def test_purge_ready_is_not_subject_to_the_mass_delete_guard(state_db, registry_db):
     """Five expired tombstones are 50% of the completed rows. They still purge; the guard only gates new tombstones."""
     expired = [f"/nas/e{i}.md" for i in range(5)]
     for path in expired:
@@ -348,17 +296,13 @@ def test_purge_ready_is_not_subject_to_the_mass_delete_guard(state_db, registry_
     scan = _scan(existing=set(active))
 
     plan = build_sync_plan(state_db, registry_db, scan, _config(0.10), NOW)
+
     assert plan.guard_tripped is False
     assert plan.newly_missing == [just_vanished]
     assert sorted(plan.purge_ready) == sorted(expired)
 
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-    assert sorted(_deleted_paths(qdrant)) == sorted(expired)
-    for path in expired:
-        assert _row(state_db, path) is None
 
-
-def test_mass_delete_guard_blocks_newly_missing_not_purge(state_db, registry_db, qdrant):
+def test_mass_delete_guard_blocks_newly_missing_not_purge(state_db, registry_db):
     """Three of eleven completed rows vanish (27%, over 10%). They are not tombstoned; the expired tombstone still purges."""
     vanished = [f"/nas/v{i}.md" for i in range(3)]
     for path in vanished:
@@ -375,13 +319,8 @@ def test_mass_delete_guard_blocks_newly_missing_not_purge(state_db, registry_db,
     assert plan.newly_missing == []
     assert plan.purge_ready == [expired]
 
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-    assert _deleted_paths(qdrant) == [expired]
-    for path in vanished:
-        assert _row(state_db, path)["missing_since"] is None
 
-
-def test_allow_mass_delete_tombstones_the_vanished_rows(state_db, registry_db, qdrant):
+def test_allow_mass_delete_tombstones_the_vanished_rows(state_db, registry_db):
     vanished = [f"/nas/v{i}.md" for i in range(3)]
     for path in vanished:
         _completed(state_db, path)
@@ -402,7 +341,7 @@ def test_allow_mass_delete_tombstones_the_vanished_rows(state_db, registry_db, q
 # ----------------------------------------------------------------------------
 
 
-def test_skipped_root_blocks_moves_and_newly_missing_but_not_purge_or_attachment(state_db, registry_db, qdrant):
+def test_skipped_root_blocks_moves_and_newly_missing_but_not_purge_or_attachment(state_db, registry_db):
     old_moved, new = "/nas/moved.md", "/nas/moved-new.md"
     _completed(state_db, old_moved, content_hash="h1")
     state_db.discover_or_update(new, OWNER, 2.0, origin_path=new, source_type="file")
@@ -428,7 +367,7 @@ def test_skipped_root_blocks_moves_and_newly_missing_but_not_purge_or_attachment
     assert [m["id"] for m in plan.project_upserts] == ["pid-proj"]
 
 
-def test_skipped_root_keeps_projects_whose_marker_is_missing(state_db, registry_db, qdrant):
+def test_skipped_root_keeps_projects_whose_marker_is_missing(state_db, registry_db):
     """A skipped root may hide a marker, so no project is removed in that run."""
     registry_db.upsert_project("pid-old", "/nas/old-proj", "Old", OWNER, SOURCE_ID_NAS)
 
@@ -437,32 +376,36 @@ def test_skipped_root_keeps_projects_whose_marker_is_missing(state_db, registry_
     assert plan.project_removals == []
 
 
-def test_project_marker_is_upserted_with_its_home_source_and_tags(state_db, registry_db, qdrant):
-    """Projects and their tags are written to the registry. The NAS crawl is their home source."""
+def test_project_marker_is_planned_with_its_owner_and_tags(state_db, registry_db):
+    """
+    Ported from test_project_marker_is_upserted_with_its_home_source_and_tags (the plan half).
+
+    Dropped: the registry-row assertions. The hub writes the registry when it publishes a project; that is covered by
+    tests/test_sync_submit.py (test_projects_are_published_before_the_uploads_that_name_them) and the project tests of
+    tests/test_ingest_api.py.
+    """
     scan = _scan(markers=[
         _marker("/root/outer", "pid-outer", name="Outer", tags={"kind": "customer"}),
         _marker("/root/outer/inner", "pid-inner", name="Inner"),
     ])
 
     plan = build_sync_plan(state_db, registry_db, scan, _config(), NOW)
+
     assert [m["id"] for m in plan.project_upserts] == ["pid-outer", "pid-inner"]
-
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-    stored = {p["id"]: p for p in registry_db.list_projects()}
-    assert stored["pid-outer"]["path"] == "/root/outer"
-    assert stored["pid-outer"]["owner"] == OWNER
-    assert stored["pid-outer"]["home_source_id"] == SOURCE_ID_NAS
-    assert registry_db.project_tags("pid-outer") == {"kind": "customer"}
+    outer = plan.project_upserts[0]
+    assert outer["path"] == "/root/outer"
+    assert outer["owner"] == OWNER
+    assert outer["tags"] == {"kind": "customer"}
 
 
-def test_duplicate_marker_id_and_reserved_id_are_ignored(state_db, registry_db, qdrant, caplog):
+def test_duplicate_marker_id_and_reserved_id_are_ignored(state_db, registry_db, caplog):
     scan = _scan(markers=[
         _marker("/root/first", "pid-dup"),
         _marker("/root/copy", "pid-dup"),
         _marker("/root/global", GLOBAL_PROJECT_ID),
     ])
 
-    with caplog.at_level(logging.ERROR, logger="ragnart.sync_plan"):
+    with caplog.at_level(logging.ERROR, logger="ragnart.sync_plan_core"):
         plan = build_sync_plan(state_db, registry_db, scan, _config(), NOW)
 
     assert [m["path"] for m in plan.project_upserts] == ["/root/first"]
@@ -470,26 +413,26 @@ def test_duplicate_marker_id_and_reserved_id_are_ignored(state_db, registry_db, 
     assert "reserved id" in caplog.text
 
 
-def test_removed_marker_removes_project_and_reattaches_its_items(state_db, registry_db, qdrant):
-    """First sync: the marker exists and its file attaches. Second sync: the marker is gone."""
+def test_removed_marker_is_planned_as_removal_and_reattaches_its_items(state_db, registry_db):
+    """
+    Ported from test_removed_marker_removes_project_and_reattaches_its_items (the plan half).
+
+    The project is in the registry because the hub published it on an earlier run; the registry is seeded directly.
+    Dropped: the apply steps and their Qdrant set_payload. The removal request and the attachment request are covered
+    by tests/test_sync_submit.py (test_project_removal_is_sent_and_a_404_counts_as_already_removed and
+    test_attachment_sends_change_metadata_and_sets_the_project_after_acceptance).
+    """
+    registry_db.upsert_project("pid-p", "/root/p", "P", OWNER, SOURCE_ID_NAS)
     doc = "/root/p/doc.md"
-    _completed(state_db, doc, project_id=GLOBAL_PROJECT_ID)
-    first = build_sync_plan(state_db, registry_db, _scan(existing={doc}, markers=[_marker("/root/p", "pid-p")]), _config(), NOW)
-    apply_sync_plan(state_db, registry_db, qdrant, first, NOW)
-    assert _row(state_db, doc)["project_id"] == "pid-p"
-    qdrant.reset_mock()
+    _completed(state_db, doc, project_id="pid-p")
 
-    second = build_sync_plan(state_db, registry_db, _scan(existing={doc}), _config(), NOW)
-    assert second.project_removals == ["pid-p"]
-    assert second.attachment_changes == {doc: GLOBAL_PROJECT_ID}
-    apply_sync_plan(state_db, registry_db, qdrant, second, NOW)
+    plan = build_sync_plan(state_db, registry_db, _scan(existing={doc}), _config(), NOW)
 
-    assert "pid-p" not in [p["id"] for p in registry_db.list_projects()]
-    assert _row(state_db, doc)["project_id"] == GLOBAL_PROJECT_ID
-    assert _set_payload_paths(qdrant) == [(doc, {"project_id": GLOBAL_PROJECT_ID})]
+    assert plan.project_removals == ["pid-p"]
+    assert plan.attachment_changes == {doc: GLOBAL_PROJECT_ID}
 
 
-def test_removal_is_limited_to_the_scanned_owner(state_db, registry_db, qdrant):
+def test_removal_is_limited_to_the_scanned_owner(state_db, registry_db):
     """A --user run scanned only florian. La-Familia's project is not scanned, so it is not removed."""
     registry_db.upsert_project("pid-laf", "/nas/shared/proj", "Shared", "la-familia", SOURCE_ID_NAS)
 
@@ -498,7 +441,7 @@ def test_removal_is_limited_to_the_scanned_owner(state_db, registry_db, qdrant):
     assert plan.project_removals == []
 
 
-def test_attachment_changes_only_rows_whose_project_id_actually_differs(state_db, registry_db, qdrant):
+def test_attachment_changes_only_rows_whose_project_id_actually_differs(state_db, registry_db):
     _completed(state_db, "/root/p/a.md", project_id=GLOBAL_PROJECT_ID)  # should attach
     _completed(state_db, "/root/p/b.md", project_id="pid-p")            # already attached
     _completed(state_db, "/elsewhere/c.md", project_id=GLOBAL_PROJECT_ID)  # not under the project
@@ -512,7 +455,7 @@ def test_attachment_changes_only_rows_whose_project_id_actually_differs(state_db
     assert plan.attachment_changes == {"/root/p/a.md": "pid-p"}
 
 
-def test_attachment_uses_launch_dir_for_sessions_not_file_path(state_db, registry_db, qdrant):
+def test_attachment_uses_launch_dir_for_sessions_not_file_path(state_db, registry_db):
     inside = "claude-session://in-project"
     outside = "claude-session://elsewhere"
     no_dir = "claude-session://no-launch-dir"
@@ -525,66 +468,30 @@ def test_attachment_uses_launch_dir_for_sessions_not_file_path(state_db, registr
     assert plan.attachment_changes == {inside: "pid-p"}
 
 
-def test_moved_item_is_attached_once_under_its_new_path(state_db, registry_db, qdrant):
-    """A file moved from outside a project into it: the attachment is keyed by the new path."""
+def test_moved_item_is_attached_once_under_its_new_path(state_db, registry_db):
+    """
+    A file moved from outside a project into it: the attachment is keyed by the new path.
+
+    Dropped: the apply-time Qdrant set_payload sequence (move then attachment). Their order is covered by
+    tests/test_sync_submit.py (test_the_whole_plan_runs_in_the_documented_order).
+    """
     old, new = "/outside/a.md", "/root/p/a.md"
     _completed(state_db, old, content_hash="h1", project_id=GLOBAL_PROJECT_ID)
     state_db.discover_or_update(new, OWNER, 2.0, origin_path=new, source_type="file")
     scan = _scan(existing={new}, new_hashes={new: "h1"}, markers=[_marker("/root/p", "pid-p")])
 
     plan = build_sync_plan(state_db, registry_db, scan, _config(), NOW)
+
     assert plan.moves == {old: new}
     assert plan.attachment_changes == {new: "pid-p"}
 
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-    assert _set_payload_paths(qdrant) == [(old, {"source_path": new}), (new, {"project_id": "pid-p"})]
-    assert _row(state_db, new)["project_id"] == "pid-p"
-
-
-def test_point_filters_name_both_source_id_and_source_path(state_db, registry_db, qdrant):
-    """
-    Every point write names the item's source_id AND its source_path. The source comes from the key:
-    a NAS move filters on the NAS source, and a Claude session purge on the Claude Code source.
-    """
-    old, new = "/nas/old.md", "/nas/new.md"
-    _completed(state_db, old, content_hash="h1")
-    state_db.discover_or_update(new, OWNER, 2.0, origin_path=new, source_type="file")
-    session = "claude-session://0c3e9f1a-5b7d-4c2e-9f1a-7d6b5e4c3a21"
-    _tombstone(state_db, session, EXPIRED, source_type="claude_session")
-    scan = _scan(existing={new}, new_hashes={new: "h1"})
-
-    plan = build_sync_plan(state_db, registry_db, scan, _config(1.0), NOW)
-    apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-
-    move_call = qdrant.set_payload.call_args
-    assert _filter_value(move_call.kwargs["points"], FIELD_SOURCE_ID) == SOURCE_ID_NAS
-    assert _filter_value(move_call.kwargs["points"], FIELD_SOURCE_PATH) == old
-
-    purge_call = qdrant.delete.call_args
-    assert _filter_value(purge_call.kwargs["points_selector"].filter, FIELD_SOURCE_ID) == SOURCE_ID_CLAUDE_LINUX_SHARED_NFS
-    assert _filter_value(purge_call.kwargs["points_selector"].filter, FIELD_SOURCE_PATH) == session
-
 
 # ----------------------------------------------------------------------------
-# Logs and rendering
+# Rendering and owner scope
 # ----------------------------------------------------------------------------
 
 
-def test_purge_logs_one_line_with_key_chunks_reason_and_missing_since(state_db, registry_db, qdrant, caplog):
-    path = "/nas/expired.md"
-    _tombstone(state_db, path, EXPIRED, chunk_count=5)
-    plan = build_sync_plan(state_db, registry_db, _scan(), _config(1.0), NOW)
-
-    with caplog.at_level(logging.INFO, logger="ragnart.sync_plan"):
-        apply_sync_plan(state_db, registry_db, qdrant, plan, NOW)
-
-    purge_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("purged ")]
-    assert purge_lines == [
-        f"purged {path} chunks=5 reason=tombstone grace period expired missing_since={EXPIRED}"
-    ]
-
-
-def test_format_plan_lists_moves_and_counts_each_category(state_db, registry_db, qdrant):
+def test_format_plan_lists_moves_and_counts_each_category(state_db, registry_db):
     _completed(state_db, "/nas/old.md", content_hash="h1")
     state_db.discover_or_update("/nas/new.md", OWNER, 2.0, origin_path="/nas/new.md", source_type="file")
     plan = build_sync_plan(state_db, registry_db, _scan(existing={"/nas/new.md"}, new_hashes={"/nas/new.md": "h1"}), _config(), NOW)
@@ -597,7 +504,7 @@ def test_format_plan_lists_moves_and_counts_each_category(state_db, registry_db,
     assert "roots skipped (no moves, tombstones or removals): no" in text
 
 
-def test_purge_is_limited_to_the_scanned_owner(state_db, registry_db, qdrant):
+def test_purge_is_limited_to_the_scanned_owner(state_db, registry_db):
     """A --user run must not purge another owner's expired tombstone, even though that row is not seen."""
     shared = "/nas/shared/expired.md"
     _tombstone(state_db, shared, EXPIRED, owner="la-familia")
@@ -607,3 +514,21 @@ def test_purge_is_limited_to_the_scanned_owner(state_db, registry_db, qdrant):
     plan = build_sync_plan(state_db, registry_db, _scan(), _config(1.0), NOW, owners=[OWNER])
 
     assert plan.purge_ready == [own]
+
+
+def test_only_projects_homed_on_nas_are_planned_for_removal(state_db, registry_db):
+    """
+    A project whose marker is gone is removed only when the NAS crawl homed it.
+
+    The four projects below all lack a marker. Only the NAS-homed one is removed. The other three
+    were homed elsewhere (another source, a different case of the NAS id, or no source at all), so
+    this crawl cannot have found them and their absence says nothing.
+    """
+    registry_db.upsert_project("pid-nas", "/nas/a", "A", OWNER, SOURCE_ID_NAS)
+    registry_db.upsert_project("pid-nas-case", "/nas/b", "B", OWNER, SOURCE_ID_NAS.upper())
+    registry_db.upsert_project("pid-claude", "/claude/c", "C", OWNER, SOURCE_ID_CLAUDE_LINUX_SHARED_NFS)
+    registry_db.upsert_project("pid-unhomed", "/old/d", "D", OWNER, None)
+
+    plan = build_sync_plan(state_db, registry_db, _scan(), _config(), NOW)
+
+    assert sorted(plan.project_removals) == ["pid-nas", "pid-nas-case"]

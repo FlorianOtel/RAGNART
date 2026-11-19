@@ -1,5 +1,5 @@
 """
-RAGNART ingestion API (v0.3 session B1): the hub's write endpoints for endpoint sources.
+RAGNART ingestion API (v0.3 sessions B1 and B2): the hub's write endpoints for every source.
 
 An endpoint source is a store that a host submits to (the operator's Mac, for example). The API
 is served by its own uvicorn process on port 8101 (scripts/ragnart-ingest-api.service). The search
@@ -43,12 +43,18 @@ from ragnart.collection import DOCUMENTS_COLLECTION, get_client
 from ragnart.registry import RegistryDB
 from ragnart.schema import (
     FIELD_CONTENT_HASH,
+    FIELD_FILE_TYPE,
+    FIELD_OWNER,
     FIELD_PIPELINE_VERSION,
+    FIELD_PROJECT_ID,
     FIELD_SESSION_ID,
     FIELD_SESSION_TITLE,
     FIELD_PROJECT,
     FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
+    FIELD_SOURCE_TYPE,
+    GLOBAL_PROJECT_ID,
+    OPENCODE_KEY_PREFIX,
     PIPELINE_VERSION_P1,
     SOURCES_HOLDING_PROJECTS,
 )
@@ -59,12 +65,18 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# The connector names of the two endpoint connectors built in B1 (ragnart/connectors.py).
+# The connector names of the connectors that may submit (ragnart/connectors.py).
 CONNECTOR_FILESYSTEM = "filesystem"
 CONNECTOR_CLAUDE_CODE = "claude_code"
+CONNECTOR_OPENCODE = "opencode"
+
+# The connectors whose items are sessions. They send their items as text (never as bytes), and a
+# session is keyed by its id, so it never moves: a change_key from one of them is refused.
+SESSION_CONNECTORS = frozenset({CONNECTOR_CLAUDE_CODE, CONNECTOR_OPENCODE})
 
 # Key namespaces. A claude_code source keys its items by session; a filesystem source keys them by
-# absolute path. The claude prefix is the same one as ragnart/schema.py _CLAUDE_KEY_PREFIX.
+# absolute path; an opencode source keys them by session as well. The claude prefix is the same one
+# as ragnart/schema.py _CLAUDE_KEY_PREFIX, and the opencode prefix is ragnart/schema.py OPENCODE_KEY_PREFIX.
 CLAUDE_KEY_PREFIX = "claude-session://"
 FILESYSTEM_KEY_PREFIX = "/"
 
@@ -79,8 +91,9 @@ _NON_TEXT_FILE_TYPES = frozenset({"ipynb", "jsonl"})
 # ragnart/chat_render.py _parse_claude_chat returns.
 ALLOWED_UPSERT_METADATA = frozenset({FIELD_SESSION_ID, FIELD_PROJECT, FIELD_SESSION_TITLE})
 
-# The only metadata a change_metadata request may set in B1. Anything else is refused with 422.
-CHANGEABLE_METADATA = frozenset({"owner"})
+# The only metadata a change_metadata request may set. Anything else is refused with 422.
+# project_id must name a project in the registry (or 'global'); the owner is checked as a string only.
+CHANGEABLE_METADATA = frozenset({"owner", "project_id"})
 
 # The intake row fields that GET /v1/status returns. The metadata and text of a request are not returned.
 STATUS_FIELDS = (
@@ -89,7 +102,30 @@ STATUS_FIELDS = (
 )
 
 # The payload fields that GET /v1/items reads from each point. No vectors are read.
-ITEM_PAYLOAD_FIELDS = [FIELD_SOURCE_PATH, FIELD_CONTENT_HASH, FIELD_PIPELINE_VERSION]
+# owner, project_id, source_type and file_type are read too, so the NAS reconcile can compare them with its
+# own rows (drift) and rebuild a lost state database from the listing. Every item field is one value; see
+# group_points_by_key() for how points that disagree are reported.
+ITEM_PAYLOAD_FIELDS = [
+    FIELD_SOURCE_PATH,
+    FIELD_CONTENT_HASH,
+    FIELD_PIPELINE_VERSION,
+    FIELD_OWNER,
+    FIELD_PROJECT_ID,
+    FIELD_SOURCE_TYPE,
+    FIELD_FILE_TYPE,
+]
+
+# The per-item fields that a listed item takes from its points, besides chunk_count. Each one is
+# read from the item's first point. When another point of the same item disagrees, the field name is
+# reported in the item's `inconsistent` list, so a caller can see that the value is not reliable.
+ITEM_VALUE_FIELDS = (
+    FIELD_CONTENT_HASH,
+    FIELD_PIPELINE_VERSION,
+    FIELD_OWNER,
+    FIELD_PROJECT_ID,
+    FIELD_SOURCE_TYPE,
+    FIELD_FILE_TYPE,
+)
 
 # Points per Qdrant scroll page.
 SCROLL_PAGE_SIZE = 1000
@@ -169,10 +205,10 @@ async def authenticated_source(
     """
     FastAPI dependency: return the endpoint source that the request's secret belongs to.
 
-    The presented secret is hashed with SHA-256 and compared with the stored hash of each endpoint
-    source, using hmac.compare_digest. Hub sources have no secret and are not endpoint sources, so
-    they can never match. The loop does not stop at the first match, so the time taken does not
-    depend on which source matched.
+    The presented secret is hashed with SHA-256 and compared with the stored hash of each source that
+    holds a secret, using hmac.compare_digest. A source's kind does not decide whether it may submit:
+    a source with a secret hash may, and a source without one (a NULL hash) may not. The loop does not
+    stop at the first match, so the time taken does not depend on which source matched.
 
     Returns the source row ({id, connector, owner, secret_hash}). Callers use id, connector and
     owner only; the hash is never returned to a client.
@@ -183,9 +219,7 @@ async def authenticated_source(
     presented = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     matched = None
-    for source in request.app.state.registry.endpoint_sources():
-        if source["secret_hash"] is None:
-            continue
+    for source in request.app.state.registry.sources_with_secret():
         if hmac.compare_digest(source["secret_hash"], presented):
             matched = source
     if matched is None:
@@ -201,7 +235,8 @@ def _check_key(source: dict, key: str) -> None:
     """
     Refuse a key that is outside the source's namespace, with 422.
 
-    A claude_code source keys by 'claude-session://...'. A filesystem source keys by absolute path.
+    A claude_code source keys by 'claude-session://...'. An opencode source keys by 'opencode://...'.
+    A filesystem source keys by absolute path.
     """
     connector = source["connector"]
     if connector == CONNECTOR_CLAUDE_CODE:
@@ -209,12 +244,17 @@ def _check_key(source: dict, key: str) -> None:
             return
         raise HTTPException(422, f"key {key!r} is outside the {source['id']} namespace: "
                                  f"keys for a claude_code source start with {CLAUDE_KEY_PREFIX!r}")
+    if connector == CONNECTOR_OPENCODE:
+        if key.startswith(OPENCODE_KEY_PREFIX):
+            return
+        raise HTTPException(422, f"key {key!r} is outside the {source['id']} namespace: "
+                                 f"keys for an opencode source start with {OPENCODE_KEY_PREFIX!r}")
     if connector == CONNECTOR_FILESYSTEM:
         if key.startswith(FILESYSTEM_KEY_PREFIX):
             return
         raise HTTPException(422, f"key {key!r} is outside the {source['id']} namespace: "
                                  f"keys for a filesystem source are absolute paths")
-    # Unreachable for the connectors built in B1. Refusing is the safe answer for any other.
+    # Unreachable for the connectors named above. Refusing is the safe answer for any other.
     raise HTTPException(422, f"source {source['id']} has connector {connector!r}, which takes no keys here")
 
 
@@ -276,7 +316,7 @@ def _checked_modified_at(raw: str | None) -> str | None:
     Return an item's modification time as an ISO-8601 UTC string, or refuse it with 422.
 
     The value must carry a UTC offset: a naive time means different instants on different hosts. It is
-    converted to UTC, so the stored form equals the one ingest_file writes (isoformat() of a UTC datetime).
+    converted to UTC, so the stored form is isoformat() of a UTC datetime.
     """
     if raw is None:
         return None
@@ -289,6 +329,56 @@ def _checked_modified_at(raw: str | None) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def configured_owners(config: dict) -> set[str]:
+    """
+    Return the owner names configured in ragnart.yaml: the owner of each `users` entry, and `shared`'s owner.
+
+    These are the only names an upsert's owner may take. The same keys are read by ragnart/scanner.py
+    when the NAS is crawled, so a name the hub accepts is one the crawl would use.
+    """
+    owners = {entry["owner"] for entry in config.get("users", {}).values()}
+    shared = config.get("shared", {})
+    if "owner" in shared:
+        owners.add(shared["owner"])
+    return owners
+
+
+def _checked_owner(config: dict, source: dict, owner: str | None) -> str | None:
+    """
+    Return the owner an upsert may carry for this source, or refuse it with 422.
+
+    A source with a fixed owner (its registry owner is set) takes no owner in the request: the worker
+    writes that fixed owner. A source with no fixed owner (nas, whose items have several owners) must
+    name the owner of each item, and the name must be one configured in ragnart.yaml. The owner is
+    stored on the request row; None means the request did not carry one.
+    """
+    if source["owner"] is not None:
+        if owner is not None:
+            raise HTTPException(422, f"source {source['id']} has the fixed owner {source['owner']!r}: "
+                                     "an upsert may not name an owner")
+        return None
+    if owner is None:
+        raise HTTPException(422, f"source {source['id']} has no fixed owner: an upsert must name the "
+                                 "owner of the item")
+    if owner not in configured_owners(config):
+        raise HTTPException(422, f"owner {owner!r} is not configured in ragnart.yaml (users or shared)")
+    return owner
+
+
+def _checked_project_id(registry: RegistryDB, project_id: str | None) -> str | None:
+    """
+    Return a project id that exists in the hub registry, or 'global'; refuse any other with 422.
+
+    None means the request did not name a project, and passes through unchanged.
+    """
+    if project_id is None or project_id == GLOBAL_PROJECT_ID:
+        return project_id
+    known = {project["id"] for project in registry.list_projects()}
+    if project_id not in known:
+        raise HTTPException(422, f"project {project_id!r} does not exist in the registry")
+    return project_id
+
+
 def _accepted(request_id: str) -> JSONResponse:
     """The 202 answer every write returns: the request id, and the status it was recorded with."""
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": "received"})
@@ -299,12 +389,17 @@ def _accepted(request_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 class TextUpsertBody(BaseModel):
-    """A text upsert: the item's text travels inline. Used by claude_code sources."""
+    """A text upsert: the item's text travels inline. Used by claude_code and opencode sources."""
     key: str
     text: str
     metadata: dict[str, Any] | None = None
     # ISO-8601 with a UTC offset; checked by _checked_modified_at().
     modified_at: str | None = None
+    # The item's owner (only for a source with no fixed owner), its tag, and its ragnart project.
+    # Checked by _checked_owner() and _checked_project_id().
+    owner: str | None = None
+    tag: str | None = None
+    project_id: str | None = None
 
 
 class DeleteBody(BaseModel):
@@ -319,16 +414,31 @@ class ChangeKeyBody(BaseModel):
 
 
 class ChangeMetadataBody(BaseModel):
-    """Change fields of one item of this source. In B1 only `owner` is allowed."""
+    """Change fields of one item of this source: `owner` or `project_id` (see CHANGEABLE_METADATA)."""
     key: str
     metadata: dict[str, Any]
 
 
 class ProjectBody(BaseModel):
-    """A request to publish a ragnart project. Always refused in B1."""
+    """
+    A request to publish a ragnart project from a source with the ragnart_projects capability.
+
+    id, name and path are the marker's fields. owner is the project's owner: it is required for a
+    source with no fixed owner (nas) and must be configured in ragnart.yaml, and it may not be sent
+    to a source with a fixed owner (checked by _checked_owner). tags is the marker's tag set, each
+    value a string; the registry replaces the project's whole tag set with it. A request from a
+    source without the capability is refused before these fields are checked.
+    """
     id: str
     name: str
     path: str | None = None
+    owner: str | None = None
+    tags: dict[str, str] = {}
+
+
+class ProjectRemoveBody(BaseModel):
+    """A request to remove a ragnart project. Only the source that homes the project may remove it."""
+    id: str
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +453,9 @@ async def upsert_bytes(
     file_type: str = Form(...),
     metadata: str | None = Form(default=None),
     modified_at: str | None = Form(default=None),
+    owner: str | None = Form(default=None),
+    tag: str | None = Form(default=None),
+    project_id: str | None = Form(default=None),
     source: dict = Depends(authenticated_source),
 ):
     """
@@ -352,16 +465,21 @@ async def upsert_bytes(
     form. A text-like file above rag.admission.max_text_file_size_bytes is refused with 413 and nothing
     is spooled. The cap is checked while the upload streams, and a partial file is removed. Other
     file types have no size cap here: docling files are checked by the worker.
+
+    Only a filesystem source sends bytes (422 for any other connector). The owner, tag and project_id
+    fields are checked before anything is spooled.
     """
-    # A claude_code source sends sessions as text (POST /v1/upsert/text), never as bytes.
-    if source["connector"] == CONNECTOR_CLAUDE_CODE:
-        raise HTTPException(422, f"source {source['id']} is a claude_code source: send its sessions "
-                                 "with POST /v1/upsert/text, not as bytes")
+    # Only a filesystem source sends bytes. A claude_code or opencode source sends its sessions as text.
+    if source["connector"] != CONNECTOR_FILESYSTEM:
+        raise HTTPException(422, f"source {source['id']} is a {source['connector']} source: only a filesystem "
+                                 "source sends bytes; send its sessions with POST /v1/upsert/text")
     _check_key(source, key)
     parsed_metadata = _parse_metadata_form(metadata)
     parsed_modified_at = _checked_modified_at(modified_at)
 
     state = request.app.state
+    checked_owner = _checked_owner(state.config, source, owner)
+    checked_project_id = _checked_project_id(state.registry, project_id)
     # From here on the canonical type is used: the one stored on the row and the one the size rule sees.
     file_type = _checked_file_type(state.config, file_type)
     size_cap = None
@@ -388,6 +506,7 @@ async def upsert_bytes(
             source["id"], "upsert", key,
             file_type=file_type, metadata=parsed_metadata, modified_at=parsed_modified_at,
             spool_path=str(spool_path), request_id=request_id,
+            owner=checked_owner, tag=tag, project_id=checked_project_id,
         )
     except BaseException:
         # Any failure (the cap, a dropped connection, a registry error) leaves no spool file behind.
@@ -403,16 +522,20 @@ async def upsert_text(
     body: TextUpsertBody,
     source: dict = Depends(authenticated_source),
 ):
-    """Accept an item's text inline. Only claude_code sources send text: a filesystem source sends bytes."""
-    if source["connector"] == CONNECTOR_FILESYSTEM:
-        raise HTTPException(422, f"source {source['id']} is a filesystem source: send its files as bytes "
+    """Accept an item's text inline. Only session sources (claude_code, opencode) send text: a filesystem source sends bytes."""
+    if source["connector"] not in SESSION_CONNECTORS:
+        raise HTTPException(422, f"source {source['id']} is a {source['connector']} source: send its files as bytes "
                                  "with POST /v1/upsert/bytes, not as text")
     _check_key(source, body.key)
     _check_upsert_metadata(body.metadata)
     parsed_modified_at = _checked_modified_at(body.modified_at)
-    request_id = request.app.state.registry.insert_intake(
+    state = request.app.state
+    checked_owner = _checked_owner(state.config, source, body.owner)
+    checked_project_id = _checked_project_id(state.registry, body.project_id)
+    request_id = state.registry.insert_intake(
         source["id"], "upsert", body.key, text=body.text, metadata=body.metadata,
         modified_at=parsed_modified_at,
+        owner=checked_owner, tag=body.tag, project_id=checked_project_id,
     )
     return _accepted(request_id)
 
@@ -436,9 +559,9 @@ async def change_key(
     source: dict = Depends(authenticated_source),
 ):
     """Ask the hub to rewrite one item's key, so a moved file keeps its points."""
-    # A claude_code item is a session, keyed by its id. A session never moves, so the request is refused.
-    if source["connector"] == CONNECTOR_CLAUDE_CODE:
-        raise HTTPException(422, f"source {source['id']} is a claude_code source: sessions are keyed by id "
+    # A session item (claude_code or opencode) is keyed by its id. A session never moves, so the request is refused.
+    if source["connector"] in SESSION_CONNECTORS:
+        raise HTTPException(422, f"source {source['id']} is a {source['connector']} source: sessions are keyed by id "
                                  "and never move")
     _check_key(source, body.key)
     _check_key(source, body.new_key)
@@ -454,15 +577,26 @@ async def change_metadata(
     body: ChangeMetadataBody,
     source: dict = Depends(authenticated_source),
 ):
-    """Ask the hub to change one item's metadata. In B1 only `owner` may change; anything else is 422."""
+    """Ask the hub to change one item's metadata: `owner` or `project_id` (CHANGEABLE_METADATA); anything else is 422."""
     _check_key(source, body.key)
     unknown = set(body.metadata) - CHANGEABLE_METADATA
     if unknown:
         raise HTTPException(422, f"metadata field(s) not changeable in this API version: {sorted(unknown)}")
-    if "owner" in body.metadata and not isinstance(body.metadata["owner"], str):
-        raise HTTPException(422, "owner must be a string")
-    request_id = request.app.state.registry.insert_intake(
-        source["id"], "change_metadata", body.key, metadata=body.metadata,
+    state = request.app.state
+    # The metadata that is stored: a copy of the request's, with the owner replaced by its checked value.
+    stored_metadata = dict(body.metadata)
+    if "owner" in body.metadata:
+        if not isinstance(body.metadata["owner"], str):
+            raise HTTPException(422, "owner must be a string")
+        # The same owner rule as an upsert: a fixed-owner source may not name an owner, and a source
+        # with no fixed owner may name only a configured one. The checked value is the one stored.
+        stored_metadata["owner"] = _checked_owner(state.config, source, body.metadata["owner"])
+    if "project_id" in body.metadata:
+        if not isinstance(body.metadata["project_id"], str):
+            raise HTTPException(422, "project_id must be a string")
+        _checked_project_id(state.registry, body.metadata["project_id"])
+    request_id = state.registry.insert_intake(
+        source["id"], "change_metadata", body.key, metadata=stored_metadata,
     )
     return _accepted(request_id)
 
@@ -518,24 +652,41 @@ def group_points_by_key(payloads: list[dict]) -> list[dict]:
     """
     Group point payloads into one item per source_path (the key), sorted by key.
 
-    Each item carries its chunk count, and the content hash and pipeline version of its points.
-    The points of one item share them, so the first point's values are taken.
+    Each item carries its chunk count, and the values of ITEM_VALUE_FIELDS (content hash, pipeline
+    version, owner, project_id, source_type, file_type). The points of one item should share them, so
+    each value is the one the item's FIRST point carries.
+
+    When a later point of the same item carries a different value, the first point's value stays, and
+    the field's name is listed in the item's `inconsistent` list. The list is empty for an item whose
+    points agree. Nothing is dropped: a caller that needs the true value of a mixed item must look at
+    the points themselves.
 
     The hub keeps no per-item table: the items are derived from the points each time, because the
     hub keeps nothing beyond the chunks themselves (design D19).
     """
     items: dict[str, dict] = {}
+    # Per item, the field names on which a point disagrees with the first point. Kept apart from the
+    # item so the item's shape stays the same for every item.
+    disagreeing: dict[str, set[str]] = {}
     for payload in payloads:
         key = payload[FIELD_SOURCE_PATH]
         if key not in items:
-            items[key] = {
-                "key": key,
-                "chunk_count": 0,
-                "content_hash": payload.get(FIELD_CONTENT_HASH),
-                "pipeline_version": payload.get(FIELD_PIPELINE_VERSION),
-            }
+            item = {"key": key, "chunk_count": 0}
+            for field in ITEM_VALUE_FIELDS:
+                item[field] = payload.get(field)
+            items[key] = item
+            disagreeing[key] = set()
+        else:
+            for field in ITEM_VALUE_FIELDS:
+                if payload.get(field) != items[key][field]:
+                    disagreeing[key].add(field)
         items[key]["chunk_count"] += 1
-    return sorted(items.values(), key=lambda item: item["key"])
+
+    result = []
+    for key, item in items.items():
+        item["inconsistent"] = sorted(disagreeing[key])
+        result.append(item)
+    return sorted(result, key=lambda item: item["key"])
 
 
 @app.get("/v1/items")
@@ -574,27 +725,117 @@ async def info(
 
 
 # ---------------------------------------------------------------------------
-# Projects: refused in B1
+# Projects (session B2): the hub registry is written here, synchronously
+#
+# A project is not an item, so it does not go through the intake queue: the registry row and its
+# tags are written when the request arrives. Only a source with the ragnart_projects capability
+# (SOURCES_HOLDING_PROJECTS, today nas) may hold projects. Every other source is refused with 409,
+# as in session B1. A project id that is already homed on another source is refused with 409 (the
+# D21 gate), so one source can never take over another source's project.
 # ---------------------------------------------------------------------------
 
-@app.post("/v1/projects")
-async def publish_project(
-    body: ProjectBody,
-    source: dict = Depends(authenticated_source),
-):
-    """
-    Refuse to publish a ragnart project from this source, and report the attempt in the log.
+def _holds_projects(source_id: str) -> bool:
+    """True when the source has the ragnart_projects capability. Source ids compare case-insensitively."""
+    capable = {source.casefold() for source in SOURCES_HOLDING_PROJECTS}
+    return source_id.casefold() in capable
 
-    Only sources with the ragnart_projects capability may hold projects. In B1 that is nas alone,
-    so every other source is refused. Project mode arrives in v0.4.
+
+def _project_refusal(source: dict, project_id: str, name: str, why: str | None = None) -> JSONResponse:
+    """
+    The 409 refusal of a project request, logged at WARNING with the source and the project.
+
+    The body keeps the B1 shape: {'refused': True, 'reason': ...}. The client reads the refusal as
+    an answer (ragnart/endpoint_client.py publish_project), not as a failure.
     """
     capable = ", ".join(sorted(SOURCES_HOLDING_PROJECTS))
-    reason = (
+    reason = why or (
         f"{source['id']} cannot hold ragnart projects "
         f"(only sources with the ragnart_projects capability, today {capable})"
     )
     logger.warning(
-        "refused project publish: source=%s project=%s name=%s",
-        source["id"], body.id, body.name,
+        "refused project request: source=%s project=%s name=%s reason=%s",
+        source["id"], project_id, name, reason,
     )
     return JSONResponse(status_code=409, content={"refused": True, "reason": reason})
+
+
+def _project_by_id(registry: RegistryDB, project_id: str) -> dict | None:
+    """Return the registry row of one project, or None. The id is compared exactly."""
+    return next((project for project in registry.list_projects() if project["id"] == project_id), None)
+
+
+def _homed_on_another_source(project: dict, source: dict) -> bool:
+    """
+    True when a project row is homed on a source other than the requesting one (the D21 gate).
+
+    Source ids are compared case-insensitively. A project with no home (the reserved 'global' row)
+    counts as homed elsewhere, so no source can take it over.
+    """
+    home = project["home_source_id"]
+    return home is None or home.casefold() != source["id"].casefold()
+
+
+@app.post("/v1/projects")
+async def publish_project(
+    request: Request,
+    body: ProjectBody,
+    source: dict = Depends(authenticated_source),
+):
+    """
+    Publish one ragnart project from this source: write its registry row and replace its tags.
+
+    Refused with 409 when the source lacks the ragnart_projects capability, or when the project id
+    is already homed on another source. Refused with 422 when the id is the reserved 'global', or
+    when the owner does not pass _checked_owner. On success the registry matches the request.
+    Re-publishing the same project from the same source updates it (upsert, idempotent).
+    """
+    if not _holds_projects(source["id"]):
+        return _project_refusal(source, body.id, body.name)
+
+    if body.id == GLOBAL_PROJECT_ID:
+        raise HTTPException(422, f"project id {GLOBAL_PROJECT_ID!r} is reserved")
+    registry = request.app.state.registry
+    existing = _project_by_id(registry, body.id)
+    if existing is not None and _homed_on_another_source(existing, source):
+        return _project_refusal(
+            source, body.id, body.name,
+            why=f"project {body.id!r} is already homed on {existing['home_source_id']!r}",
+        )
+    checked_owner = _checked_owner(request.app.state.config, source, body.owner)
+
+    # The project row and its tags are written in turn. Both writes are idempotent, so a failure
+    # between them is repaired by the next publish of the same project.
+    registry.upsert_project(body.id, body.path, body.name, checked_owner, source["id"])
+    registry.replace_project_tags(body.id, body.tags)
+    logger.info("published project %s from source %s", body.id, source["id"])
+    return {"published": True, "id": body.id}
+
+
+@app.post("/v1/projects/remove")
+async def remove_project(
+    request: Request,
+    body: ProjectRemoveBody,
+    source: dict = Depends(authenticated_source),
+):
+    """
+    Remove one ragnart project that this source homes: its row, tags, references and grants.
+
+    404 when no such project exists. 409 when the source lacks the capability, or when the project
+    is homed on another source (or is the reserved 'global'). Items attached to the project are not
+    touched here; the sync re-attaches them in the same run.
+    """
+    if not _holds_projects(source["id"]):
+        return _project_refusal(source, body.id, "")
+
+    registry = request.app.state.registry
+    existing = _project_by_id(registry, body.id)
+    if existing is None:
+        raise HTTPException(404, f"no project {body.id!r} in the registry")
+    if _homed_on_another_source(existing, source):
+        return _project_refusal(
+            source, body.id, existing["name"] or "",
+            why=f"project {body.id!r} is homed on {existing['home_source_id']!r}, not on {source['id']!r}",
+        )
+    registry.remove_project(body.id)
+    logger.info("removed project %s from source %s", body.id, source["id"])
+    return {"removed": True, "id": body.id}

@@ -17,12 +17,17 @@ One run goes through each configured source once, in this order:
   d) Submit: the planned requests go to the hub. Each one is recorded in the state database as it
      is accepted, so an interrupted run leaves a consistent state.
   e) Reconcile: the hub's own listing of this source's items is compared with the state. A hub item
-     with no local row is deleted; a completed row missing from the hub is submitted again.
+     with no local row is deleted; a completed row missing from the hub is submitted again; a completed
+     row whose hub points were written by an older pipeline version is submitted again, at most
+     resubmit_batch_size a run (the same rule as the NAS side, ragnart/sync_reconcile.py).
   f) Project markers: each `.ragnart/project.toml` under the root is offered to the hub. The hub
      refuses projects in B1, and the refusal is logged at WARNING.
 
 --dry-run runs (a), (b) and (e) as reads, prints the plan, and writes nothing: no hub write and no
 state write. The state database is opened read-only.
+
+--rebuild-from-hub repopulates an EMPTY state database from the hub's listing. It sends nothing to the hub,
+and it is refused when the state already holds rows. See rebuild_from_hub() for the rule of each item kind.
 
 Dependencies: the standard library, PyYAML and httpx (through ragnart.endpoint_client). No docling,
 qdrant_client or embedder is loaded (tests/test_ingestion_side_imports.py enforces that).
@@ -50,7 +55,7 @@ from ragnart.moves import detect_moves
 from ragnart.projects import parse_project_toml
 from ragnart.ragignore import RagIgnoreMatcher
 from ragnart.scanner import claude_jsonl_key
-from ragnart.schema import validate_source_id
+from ragnart.schema import DEFAULT_RESUBMIT_BATCH_SIZE, pipeline_version_is_older, validate_source_id
 
 logger = logging.getLogger("ragnart.endpoint")
 
@@ -81,14 +86,20 @@ BUILTIN_EXCLUDED_PREFIXES = ("._", "~$")
 PROJECT_MARKER_DIR = ".ragnart"
 PROJECT_MARKER_FILE = "project.toml"
 
-# The statuses with which the hub refuses an upload at the door: 413 too large, 422 not accepted.
-# Nothing is queued for such an upload, so the item is recorded as ignored with the hub's reason.
-REFUSED_AT_DOOR = (413, 422)
+# 413: the hub refused the upload as too large. That is an admission decision: the item will never be accepted
+# as it is. Its old points are deleted, and the row is recorded ignored with the hub's reason. The NAS side
+# (ragnart/sync_submit.py) follows the same rule.
+ADMISSION_REFUSED = 413
+
+# 422: the hub refused the request itself, as a bad request (for example, an owner sent to a fixed-owner source).
+# That is not a decision on the item, so nothing is deleted and the row is left exactly as it was. The planner
+# sends the item again on the next run, and an ERROR line names the cause for the operator.
+REQUEST_REFUSED = 422
 
 # A request is over once it reaches one of these. 'received' and 'processing' are not terminal.
 TERMINAL_STATUSES = ("completed", "ignored", "failed")
 
-_TOP_LEVEL_KEYS = frozenset({"hub_url", "state_db", "log_file", "grace_hours", "sources"})
+_TOP_LEVEL_KEYS = frozenset({"hub_url", "state_db", "log_file", "grace_hours", "sources", "resubmit_batch_size"})
 _SOURCE_KEYS = frozenset({"id", "connector", "root", "secret_file", "ignore_file"})
 
 
@@ -123,6 +134,8 @@ class EndpointConfig:
     log_file: str | None
     grace_hours: float
     sources: tuple[SourceConfig, ...]
+    # The most items a run sends again for an older pipeline version (rule 5 of plan_actions).
+    resubmit_batch_size: int = DEFAULT_RESUBMIT_BATCH_SIZE
 
 
 @dataclass(frozen=True)
@@ -205,6 +218,13 @@ def _checked_grace_hours(value: object) -> float:
     return float(value)
 
 
+def _checked_batch_size(value: object) -> int:
+    """Return a resubmit batch size: a whole number of one or more (a bool is not a number here)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"resubmit_batch_size must be a whole number, one or more; got {value!r}")
+    return value
+
+
 def load_config(path: str) -> EndpointConfig:
     """
     Read and validate an endpoint.yaml file.
@@ -259,6 +279,7 @@ def load_config(path: str) -> EndpointConfig:
         log_file=os.path.expanduser(log_file) if log_file is not None else None,
         grace_hours=_checked_grace_hours(raw.get("grace_hours", DEFAULT_GRACE_HOURS)),
         sources=tuple(sources),
+        resubmit_batch_size=_checked_batch_size(raw.get("resubmit_batch_size", DEFAULT_RESUBMIT_BATCH_SIZE)),
     )
 
 
@@ -547,6 +568,8 @@ def plan_actions(
     grace: timedelta,
     hub_keys: set[str],
     allow_moves: bool,
+    stale_keys: frozenset[str] = frozenset(),
+    resubmit_limit: int = DEFAULT_RESUBMIT_BATCH_SIZE,
 ) -> list[Action]:
     """
     Decide what the hub must hear for one source, and which local rows change. Performs no I/O.
@@ -558,6 +581,9 @@ def plan_actions(
     hub_keys:  the keys the hub lists for this source.
     allow_moves: True for the filesystem connector. A claude_code session never moves: its key is its
                  uuid, so a vanished session is missing and then deleted, like any vanished item.
+    stale_keys:  the hub keys whose points were written by an older pipeline version (see
+                 ragnart/schema.py pipeline_version_is_older).
+    resubmit_limit: the most stale items submitted in one run. The rest wait for a later run.
 
     The actions come back in the order they must run.
     """
@@ -633,6 +659,20 @@ def plan_actions(
         ):
             actions.append(Action("upsert", key, found=found[key], row=row))
 
+    # 5. Older pipeline versions. A completed row whose item is on disk, and whose hub points an older pipeline
+    # wrote, is submitted again. In key order, and at most resubmit_limit a run, so a version change is spread
+    # over runs. An item this run has already submitted is not sent twice.
+    already_submitted = {action.key for action in actions if action.kind == "upsert"}
+    stale_candidates = [
+        key for key in sorted(stale_keys)
+        if key in rows
+        and key in found
+        and key not in already_submitted
+        and rows[key]["status"] == "completed"
+    ]
+    for key in stale_candidates[:resubmit_limit]:
+        actions.append(Action("upsert", key, found=found[key], row=rows[key]))
+
     return actions
 
 
@@ -673,18 +713,29 @@ def _submit_upsert(
     hub_keys: set[str],
 ) -> None:
     """
-    Send one item. Refused at the door (413, 422) means recorded as ignored with the hub's reason.
+    Send one item. Two refusals are answers, and the other failures are raised.
 
-    Before a refused item is recorded ignored, its old points are deleted when it had any. An item had
-    points when its row was completed with chunks, or when the hub lists its key. This is the same rule
-    as the hub's own path, where an item that becomes ignored loses its old points (ragnart/ingest.py
-    deletes before admission). Without the delete, the file's old text would stay searchable.
+    413 (too large, an admission decision): the item is recorded ignored with the hub's reason. Before that,
+    its old points are deleted when it had any. An item had points when its row was completed with chunks,
+    or when the hub lists its key. This is the same rule as the hub's own path, where an item that becomes
+    ignored loses its old points (ragnart/ingest.py deletes before admission). Without the delete, the file's
+    old text would stay searchable.
+
+    422 (a bad request): nothing is deleted and the row is left as it was, so the next run plans the same
+    upsert again. An ERROR names the cause, and the run goes on.
     """
     found = action.found
     try:
         answer = _send_upsert(action, source, client)
     except HubError as exc:
-        if exc.status_code not in REFUSED_AT_DOOR:
+        if exc.status_code == REQUEST_REFUSED:
+            counts["request_error"] += 1
+            logger.error(
+                "%s: %s refused by the hub as a bad request (422); nothing deleted, left for the next run: %s",
+                source.id, found.key, exc.detail,
+            )
+            return
+        if exc.status_code != ADMISSION_REFUSED:
             raise
         row = action.row
         had_points = (
@@ -832,6 +883,7 @@ def run_source(
     grace: timedelta,
     now: datetime,
     dry_run: bool,
+    resubmit_batch_size: int = DEFAULT_RESUBMIT_BATCH_SIZE,
 ) -> Counter:
     """
     Run one source once: poll, scan, plan, submit, reconcile, publish. Returns the counts of the run.
@@ -849,10 +901,11 @@ def run_source(
     counts: Counter = Counter()
     counts.update(_poll_outstanding(source, client, state, rows, dry_run))
 
+    info = client.info()
     if source.connector == CONNECTOR_CLAUDE_CODE:
         scan = scan_claude_code(root_real, source, rows)
     else:
-        accepted = {ext.lstrip(".").lower() for ext in client.info()["accepted_file_types"]}
+        accepted = {ext.lstrip(".").lower() for ext in info["accepted_file_types"]}
         scan = scan_filesystem(root_real, source, accepted, rows)
     counts["found"] = len(scan.found)
 
@@ -868,10 +921,17 @@ def run_source(
     if not scan.complete:
         logger.warning("%s: the walk was incomplete; no item is treated as vanished on this run", source.id)
 
-    hub_keys = {item["key"] for item in client.items()}
+    hub_items = client.items()
+    hub_keys = {item["key"] for item in hub_items}
+    # The items whose points an older pipeline wrote. The current version is the one /v1/info reports.
+    stale_keys = frozenset(
+        item["key"] for item in hub_items
+        if pipeline_version_is_older(item["pipeline_version"], info["pipeline_version"])
+    )
     actions = plan_actions(
         scan.found, rows, scan.complete, now, grace, hub_keys,
         allow_moves=source.connector == CONNECTOR_FILESYSTEM,
+        stale_keys=stale_keys, resubmit_limit=resubmit_batch_size,
     )
     counts.update(_execute(actions, source, client, state, dry_run, hub_keys))
     counts.update(_publish_projects(source, client, scan.project_dirs, dry_run))
@@ -887,9 +947,12 @@ def run(
     grace_hours: float | None = None,
     source_id: str | None = None,
     now: datetime | None = None,
+    resubmit_batch_size: int | None = None,
 ) -> int:
     """
     Run the configured sources (or the one named by source_id) once. Returns an exit code.
+
+    resubmit_batch_size overrides the config's value when given (the command line's --resubmit-batch-size).
 
     A failure in one source is logged and the others still run. The exit code is EXIT_FAILED when any
     source failed. The caller must hold the run lock (main() does).
@@ -897,6 +960,7 @@ def run(
     if grace_hours is not None and grace_hours < 0:
         raise ConfigError(f"grace_hours must be zero or more; got {grace_hours!r}")
     grace = timedelta(hours=config.grace_hours if grace_hours is None else grace_hours)
+    batch = _checked_batch_size(config.resubmit_batch_size if resubmit_batch_size is None else resubmit_batch_size)
     now = now if now is not None else datetime.now(timezone.utc)
 
     sources = list(config.sources)
@@ -913,7 +977,10 @@ def run(
                 # The client is not closed here. The process ends after the run, and closing would also
                 # close a client that a caller passed in (the tests do).
                 client = HubClient(config.hub_url, source.secret_file)
-                run_source(source, client=client, state=state, grace=grace, now=now, dry_run=dry_run)
+                run_source(
+                    source, client=client, state=state, grace=grace, now=now, dry_run=dry_run,
+                    resubmit_batch_size=batch,
+                )
             except SourceError as exc:
                 failed += 1
                 logger.error("%s: %s", source.id, exc)
@@ -923,6 +990,97 @@ def run(
     finally:
         state.close()
     return EXIT_OK if failed == 0 else EXIT_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Rebuild from the hub (session B2, step A.18)
+# ---------------------------------------------------------------------------
+
+# The stat a row restored from the hub carries. No real file has size -1, so the next scan never matches it,
+# and it hashes the file and compares the hash with the hub's (see plan_actions and _describe_file).
+PLACEHOLDER_SIZE = -1
+PLACEHOLDER_MTIME = -1.0
+
+
+def _restore_item(state: EndpointState, source: SourceConfig, item: dict, found: dict[str, FoundFile], counts: Counter) -> None:
+    """
+    Write one hub item as a completed local row, or leave it without a row when it must be submitted again.
+
+    A claude_code session on disk whose rendered text no longer matches the hub's hash has no row: the next
+    run finds it as new and submits it. Every other item is restored completed, with the hub's hash and chunk
+    count, so the next run only compares. A session with no transcript is restored too: the grace period then
+    runs as for any vanished session.
+    """
+    key = item["key"]
+    if source.connector == CONNECTOR_CLAUDE_CODE:
+        on_disk = found.get(key)
+        if on_disk is not None and on_disk.content_hash != item["content_hash"]:
+            counts["session_resubmit"] += 1
+            return
+        if on_disk is None:
+            counts["session_gone"] += 1
+    state.put(
+        source.id, key,
+        size=PLACEHOLDER_SIZE, mtime=PLACEHOLDER_MTIME, content_hash=item["content_hash"],
+        status="completed", chunk_count=item["chunk_count"],
+    )
+    counts["restored"] += 1
+
+
+def rebuild_from_hub(config: EndpointConfig, *, source_id: str | None = None) -> Counter:
+    """
+    Repopulate an EMPTY local state from the hub's listing of each configured source. Sends nothing to the hub.
+
+    Rules, by item kind:
+      - filesystem file: restored with the hub's hash and a placeholder stat. The next scan hashes the file and
+        compares: a changed file is submitted again, an unchanged one only has its stat stored, and a file no
+        longer on disk is missing, so the grace period runs.
+      - claude_code session on disk: restored only when the md5 of its rendered text equals the hub's hash. A
+        session that no longer matches is not restored, so the next run submits it as new.
+      - claude_code session not on disk: restored, so the grace period runs as for any vanished session.
+
+    Every listing and every transcript walk is read before the first write, so a failure before that point
+    leaves the state empty and the rebuild can simply be run again.
+
+    Raises:
+        RuntimeError: the state already holds rows (nothing is read from the hub), or a source cannot be walked
+                      (its root is not a directory, or the walk was incomplete). Nothing is written.
+        ConfigError:  source_id names no configured source.
+    """
+    state = EndpointState(config.state_db)
+    try:
+        rows_present = state.count_rows()
+        if rows_present:
+            raise RuntimeError(f"refusing to rebuild: {config.state_db} already holds {rows_present} row(s)")
+
+        sources = list(config.sources)
+        if source_id is not None:
+            sources = [source for source in sources if source.id.casefold() == source_id.casefold()]
+            if not sources:
+                raise ConfigError(f"no source {source_id!r} in the config")
+
+        # Phase 1: read every listing and walk. Nothing is written yet.
+        plans: list[tuple[SourceConfig, list[dict], dict[str, FoundFile]]] = []
+        for source in sources:
+            client = HubClient(config.hub_url, source.secret_file)
+            items = client.items()
+            found: dict[str, FoundFile] = {}
+            if source.connector == CONNECTOR_CLAUDE_CODE:
+                scan = scan_claude_code(_checked_root(source.root), source, {})
+                if not scan.complete:
+                    raise RuntimeError(f"{source.id}: the transcript walk was incomplete; nothing is rebuilt")
+                found = scan.found
+            plans.append((source, items, found))
+
+        # Phase 2: write the rows.
+        counts: Counter = Counter()
+        for source, items, found in plans:
+            for item in items:
+                _restore_item(state, source, item, found, counts)
+            logger.info("%s: rebuilt from the hub, %d item(s) listed", source.id, len(items))
+        return counts
+    finally:
+        state.close()
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +1099,26 @@ def _build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("--dry-run", action="store_true", help="print the plan; write nothing to the hub or the state")
     run_cmd.add_argument("--grace-hours", type=float, default=None, help="override grace_hours from the config")
     run_cmd.add_argument("--source", default=None, help="run only the source with this id")
+    run_cmd.add_argument(
+        "--resubmit-batch-size", type=int, default=None,
+        help="override resubmit_batch_size from the config: most items sent again per run for an older pipeline version",
+    )
+    run_cmd.add_argument(
+        "--rebuild-from-hub", action="store_true",
+        help="repopulate an EMPTY state database from the hub's listing; sends nothing to the hub, and is refused otherwise",
+    )
     return parser
+
+
+def _run_rebuild(config: EndpointConfig, source_id: str | None) -> int:
+    """Run rebuild_from_hub and return its exit code. A refusal is logged and exits EXIT_FAILED."""
+    try:
+        counts = rebuild_from_hub(config, source_id=source_id)
+    except RuntimeError as exc:
+        logger.error("rebuild refused: %s", exc)
+        return EXIT_FAILED
+    logger.info("rebuild from hub: %s", dict(sorted(counts.items())))
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -959,7 +1136,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("another endpoint run holds the lock on %s: this run does nothing", config.state_db)
         return EXIT_LOCK_HELD
     try:
-        return run(config, dry_run=args.dry_run, grace_hours=args.grace_hours, source_id=args.source)
+        if args.rebuild_from_hub:
+            return _run_rebuild(config, args.source)
+        return run(
+            config, dry_run=args.dry_run, grace_hours=args.grace_hours, source_id=args.source,
+            resubmit_batch_size=args.resubmit_batch_size,
+        )
     except ConfigError as exc:
         logger.error("config error: %s", exc)
         return EXIT_CONFIG
