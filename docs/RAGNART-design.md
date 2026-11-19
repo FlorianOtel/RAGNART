@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction; the web is a scope, scope and grounding not fully orthogonal; relocation tested: spawn in the project folder, operator resumes it; fork verified, one turn one place; the switch stays the operator's instruction, worded per client); Claude Code (Claude Haiku 5.5, 2026-11-18 -- v0.3 session A: source ids and the connector contract, the hub registry and its reshaped project tables, `source_id` and `pipeline_version` on every item and chunk, source-qualified scope terms and the bare-path 422, the per-source reconciliation check, the restore triple; status lines of §1.1, §2.3, §4.1 to §4.5, §4.7, §4.8, §8.3, §8.7, §8.8, §10.1, §10.3, §10.4, §12; one turn, one place marked not built, v0.4); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: the ingestion API, the intake table and worker, endpoint sources MBP and claude-MBP, the source id rule; status lines of §1.1, §2.3, §4.2, §4.5, §4.7, §4.8, §5.2, §10.2, §10.3, §12 and the host table §2.1)
-updated_at: 2026-11-19--10-02
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction; the web is a scope, scope and grounding not fully orthogonal; relocation tested: spawn in the project folder, operator resumes it; fork verified, one turn one place; the switch stays the operator's instruction, worded per client); Claude Code (Claude Haiku 5.5, 2026-11-18 -- v0.3 session A: source ids and the connector contract, the hub registry and its reshaped project tables, `source_id` and `pipeline_version` on every item and chunk, source-qualified scope terms and the bare-path 422, the per-source reconciliation check, the restore triple; status lines of §1.1, §2.3, §4.1 to §4.5, §4.7, §4.8, §8.3, §8.7, §8.8, §10.1, §10.3, §10.4, §12; one turn, one place marked not built, v0.4); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: the ingestion API, the intake table and worker, endpoint sources MBP and claude-MBP, the source id rule; status lines of §1.1, §2.3, §4.2, §4.5, §4.7, §4.8, §5.2, §10.2, §10.3, §12 and the host table §2.1); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API)
+updated_at: 2026-11-19--17-00
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -62,7 +62,7 @@ a **Status** line. Summary:
 | Pipeline `p1` (§5), admission rules (§5.2) | Built |
 | Parallel with git (§1.2): ignore rules and the read-only `ragnart` commands `check-ignore`, `ls-files`, `status` | Built. `add`, `rm`, `mv`, `diff`, `fsck`, `gc`: v0.4 |
 | Item identity for NAS files, `opencode://` and `claude-session://` keys, content hash (§4.2) | Built. Move detection: v0.2 |
-| State-database metadata and payload fields and their indexes (§4.3, §4.4), schema version (§4.1), per-item pipeline version (§4.1) | Built, with `source_id` on every item and chunk and `pipeline_version` on every chunk. The hub's listing of an endpoint source's items: built (v0.3, session B1, §12). The NAS listing: not built (v0.3, session B2) |
+| State-database metadata and payload fields and their indexes (§4.3, §4.4), schema version (§4.1), per-item pipeline version (§4.1) | Built, with `source_id` on every item and chunk and `pipeline_version` on every chunk. The hub's listing of a source's items, for every source including the NAS ones: built (v0.3, sessions B1 and B2, §12) |
 | Projects data model: the `projects`, `project_tags`, `project_references`, `grants` and `sources` tables of the hub registry, with the reserved `global` project; baseline data model (§4.6) | Built, in the hub registry (§4.8): `projects` has `home_source_id`, and there are no `parent`, `mode` or `source_links` columns or tables. `project_references` is written from v0.4, and name uniqueness is v0.4. The RAGNART repository holds the first ragnart project |
 | `project.toml`, marker discovery, tags, `resolve_scope()` (§4.5, §8.8); owner rule as the access rule (§6.5) | Built. `authorize()`, grants and authentication: v0.6 |
 | Project content and membership (§4.5): `ragnart init <name>`, the managed folders beside `.ragnart/`, `.ragnart/` as state only, no meaning for nesting, marker guards | v0.4. Built today, to an earlier model: every file under the directory that holds `.ragnart/` carries its `project_id`, a nested ragnart project records a `parent`, and a missing marker removes its ragnart project at once |
@@ -74,8 +74,8 @@ a **Status** line. Summary:
 | Relevance verdict in the search response: hit id, rerank score, good-hit count, reranker status (§8.7, §9.2) | Not built. It depends on neither v0.3 nor v0.4 |
 | Deletion rules (§10.2), reconciliation (§10.3) | Built: all five rules of §10.2 (the purge record is the sync log line of rule 4), plan-then-apply, and the scheduled reconciliation of §10.3 |
 | OpenCode database backup (§10.5) | v0.2 |
-| Connectors and sources (§4.7), the hub and the ingestion side (§2.3), the three stores (§4.8), `source_id` on every item and chunk (§4.3, §4.4), source-qualified scope terms (§8.8) | Built: the connector contract as a code interface, the three hub sources and the two endpoint sources registered, the hub registry, `source_id` on every item and chunk, and source-qualified scope terms. The NAS ingestion still runs in one ingestion run on Server 2, with one state database; the endpoint sources run on their own host, with that host's state database (§2.3) |
-| Ingestion API, and sources on hosts other than Server 2 (§2.3, §12) | Built (v0.3, session B1): the ingestion API for endpoint sources, and two endpoint sources on the operator's Mac. Not built: NAS ingestion onto the API (v0.3, session B2) |
+| Connectors and sources (§4.7), the hub and the ingestion side (§2.3), the three stores (§4.8), `source_id` on every item and chunk (§4.3, §4.4), source-qualified scope terms (§8.8) | Built: the connector contract as a code interface, the three hub sources and the two endpoint sources registered, the hub registry, `source_id` on every item and chunk, and source-qualified scope terms. Every source, the NAS ones included, submits through the ingestion API (v0.3, session B2). The NAS ingestion runs on Server 2 as an ingestion side, with `rag_state.db` as its state database and its own lock; the endpoint sources run on their own host, with that host's state database (§2.3) |
+| Ingestion API, and sources on hosts other than Server 2 (§2.3, §12) | Built (v0.3, sessions B1 and B2): the ingestion API for every source, the three NAS-side sources on it as an ingestion side on Server 2, and two endpoint sources on the operator's Mac |
 | Kotaemon (§12) | v0.5 |
 
 ### 1.2 Parallel with git
@@ -228,15 +228,20 @@ supplies models to clients; RAGNART does not use it.
 
 ### 2.3 The hub and the ingestion side
 
-**Status.** The split of roles below is the design. Built (v0.3, session B1) for endpoint sources: the
-ingestion API (`ragnart-ingest-api.service`, port 8101, a process separate from search), which records
-each request in the intake table of the hub registry (§4.8) and spools uploaded bytes; and the hub intake
-worker (`ragnart-intake.timer`, every 10 minutes), which applies the requests under the ingestion lock.
-Two endpoint sources run on one host, the operator's Mac: `MBP` (filesystem) and `claude-MBP` (Claude
-Code). Publishing a project record from an endpoint source is refused (§4.5). A failed upload keeps its
-spool file. Built: the NAS ingestion runs on Server 2 in one ingestion run, with one state database and
-the hub registry, and writes to Qdrant directly. Not built: the NAS ingestion on the API (v0.3, session
-B2), and endpoint sources on other hosts (`docs/Implementation-plan.md` §6).
+**Status.** The split of roles below is the design. Built (v0.3, sessions B1 and B2): the ingestion API
+(`ragnart-ingest-api.service`, port 8101, a process separate from search), which records each request in
+the intake table of the hub registry (§4.8) and spools uploaded bytes; and the hub intake worker
+(`ragnart-intake.timer`, every 10 minutes), which applies the requests under the ingestion lock with a pool
+of three workers and keeps the requests for one item in order. The hub, the API plus the intake worker, is the
+only writer of the index. Every source submits through the API, the NAS-side ones included. The NAS ingestion
+runs on Server 2 as an ingestion side (`ragnart-ingest.timer`): it scans, keeps `rag_state.db` as its state
+database, submits to the API on loopback with one secret per source (`nas`, `claude-linux-shared-nfs`,
+`opencode-k11`), and reads the outcome of its requests on its next run. It never opens a Qdrant client. Two
+endpoint sources run on the operator's Mac: `MBP` (filesystem) and `claude-MBP` (Claude Code). A source
+without a fixed owner (`nas`, `claude-linux-shared-nfs`, `opencode-k11`) names the owner of each item in its
+upsert. Projects are published through `POST /v1/projects` for the sources that hold them, behind the
+one-home gate (§14 D21). A failed upload keeps its spool file. Not built: endpoint sources on other hosts, and
+the source-side size pre-check (§5.2) (`docs/Implementation-plan.md` §6).
 
 Ingestion is multi-point: any number of sources (§4.7), on any number of hosts, submit to the
 one index at the hub. RAGNART therefore has two roles.
@@ -323,8 +328,8 @@ part of the pipeline. Retrieval (§5.5) is not part of it either.
   an exact recipe: two `p1` items may have been processed by different revisions of the code.
 
 **Status.** Built: the per-item `pipeline_version` column of the state database, and `pipeline_version`
-on every chunk, stamped by ingestion; every item and chunk is `p1`. Built (v0.3, session B1): `pipeline_version` in the listing that the hub
-returns to an endpoint source. Not built (v0.3, session B2): the same listing for the NAS source.
+on every chunk, stamped by ingestion; every item and chunk is `p1`. Built (v0.3, sessions B1 and B2): `pipeline_version` in the listing that the hub
+returns to every source, and the ingestion side re-submits the items whose `pipeline_version` is older than the hub's (the NAS side at most 200 per run, `rag.nas_ingest.resubmit_batch_size`).
 
 **Two kinds of change, handled differently.**
 
@@ -764,7 +769,7 @@ external file in a project folder, keeps its full path as its key.
 
 **Status.** Built: `home_source_id` on each project in the hub registry, and one source holds ragnart
 projects, with a duplicate rule within one scan ("Marker guards" below). Built (v0.3): the
-write-time gate: a publish request from an endpoint source is refused (§12), so no endpoint source homes a project. Publishing the NAS's records through the API is not built (v0.3, session B2).
+write-time gate: a publish request from a source without the projects capability (an endpoint source) is refused with 409 (§12), so no endpoint source homes a project, and a project id homed on another source is refused with 409. The NAS publishes its records through `POST /v1/projects` (v0.3, session B2).
 
 - **The source is tree-shaped and writable.** RAGNART writes `.ragnart/` and the managed folders
   (§7.3). A source that RAGNART can only read cannot hold a ragnart project, and its items are `global`
@@ -841,9 +846,9 @@ before the search, so tag changes never touch Qdrant.
 These tables are records published for retrieval: scope resolution and the project listing read them
 (§8.8, §12). `project.toml` and the reference files in `resources/` stay the authority. Their place is the hub
 registry (§4.8), where `projects` also records each ragnart project's home source and each ingestion
-side publishes its records (§12). Built today: the sync writes the `projects` and `project_tags` tables
-directly, and the search service reads the registry read-only. Endpoint sources cannot publish (§12). Publishing
-by the NAS through the API is not built (v0.3, session B2).
+side publishes its records (§12). Built today: the NAS sync publishes its project records, and removes them, through `POST /v1/projects` and
+`POST /v1/projects/remove`; the API writes the `projects` and `project_tags` tables, and the search service reads the registry
+read-only. Endpoint sources cannot publish (§12).
 
 **Items outside ragnart projects** are ingested and searched exactly as in the single-user RAG. Every
 item that is not in the managed folders of a ragnart project follows the baseline data model (§4.6)
@@ -927,7 +932,7 @@ to its id (§4.5). A reference changes nothing in the state database or in Qdran
 scanners in `ragnart/scanner.py` and parsers in `ragnart/ingest.py`, run as three sources (`nas`,
 `claude-linux-shared-nfs`, `opencode-k11`) by one ingestion host. The contract is a code interface in
 `ragnart/connectors.py`; the three connectors are registered in the hub registry, and the scanners and
-parsers do not call the interface yet. Built (v0.3, session B1): two endpoint sources on another host, `MBP` (filesystem connector) and `claude-MBP` (Claude Code connector), run by the endpoint runner (`ragnart/endpoint.py`). Endpoint sources are registered with kind `endpoint`, hold no ragnart projects, and their items are `global`. OpenCode on an endpoint host: not built. Not built (v0.3, session B2): the NAS submitting through the API.
+parsers do not call the interface yet. Built (v0.3, session B1): two endpoint sources on another host, `MBP` (filesystem connector) and `claude-MBP` (Claude Code connector), run by the endpoint runner (`ragnart/endpoint.py`). Endpoint sources are registered with kind `endpoint`, hold no ragnart projects, and their items are `global`. OpenCode on an endpoint host: not built. Built (v0.3, session B2): the three NAS-side sources submit through the API. The filesystem source sends bytes. The Claude Code and OpenCode sources render a session with `ragnart/chat_render.py` on the ingestion side and send text, so the API accepts the `opencode` connector on its text route. A source without a fixed owner (the three NAS-side sources) sends the owner of each item, checked against the owners in `ragnart.yaml`; a source with a fixed owner (the Mac's) cannot.
 
 A **connector** is a type: the code that knows one kind of store. A **source** is one configured
 instance of a connector: a store, a place in it, an owner binding and a credential. Three sources
@@ -1002,7 +1007,7 @@ is scheduled. The contract is defined so that one can be added.
 
 **Status.** Built: the hub registry, `sqlite/hub_registry.db` in the data root, with its own schema
 version (§4.1), holds the sources and the ragnart project tables. `rag_state.db` holds the per-item queue
-only, at schema version 4: the project tables removed (by the gated tool `utils/rag_registry_migrate.py`); migration 4 in `_MIGRATIONS` carries no statements. Built (v0.3, session B1): the intake table of the hub registry, with one row per request from an endpoint source, and the spool directory. The listing of an endpoint source's items is built. The NAS listing and the NAS ingestion onto the API are not built (v0.3, session B2).
+only, at schema version 5: the project tables removed (by the gated tool `utils/rag_registry_migrate.py`); migration 4 in `_MIGRATIONS` carries no statements; migration 5 adds `request_id`. Built (v0.3, session B1): the intake table of the hub registry, with one row per request from an endpoint source, and the spool directory. Built (v0.3, session B2): the listing of every source's items, and the NAS ingestion on the API: `rag_state.db` of Server 2 is an ingestion-side state database, at schema version 5 (a `request_id` per queued row), and the hub registry's intake table, at schema version 3, carries the `owner`, `tag` and `project_id` of a request. A lost state database is rebuilt from the listing: `utils/rag_sync_nfs.py --rebuild-from-hub` on Server 2 (it refuses unless `rag_state.db` has no rows) and `--rebuild-from-hub` of the Mac runner.
 
 **The hub holds what retrieval filters on or displays, and what gates a write. The ingestion side
 holds what decides whether to submit, re-submit or delete.** That gives three stores.
@@ -1064,7 +1069,7 @@ already-indexed item that an exclusion rule now matches leaves the index through
 the hub. The result is returned to the source (§2.3), whose queue row records `ignored` and the
 reason. The size rule is the exception to where the rules run: a source applies it before it
 submits, with the limit the hub publishes (§12), so that an oversized file is not uploaded only to
-be refused (not built, v0.3, session B2. Today the hub refuses an oversized text-like upload at the door, with 413, and ingestion applies the limit on Server 2 to NAS files). The size, NUL-byte and
+be refused (not built: the source-side pre-check is deferred. Today the hub refuses an oversized text-like upload at the door, with 413, and the ingestion side marks the row `ignored` and deletes the item's older points). The size, NUL-byte and
 replacement-character rules
 apply to text-like files only: every type except `pdf`, `docx` and `pptx` (docling), `ipynb`,
 Claude Code `.jsonl` sessions and OpenCode sessions.
@@ -2016,7 +2021,7 @@ NAS backups are for emergencies; normal operation never relies on them.
 
 ### 10.2 Deletion rules
 
-**Status.** All five rules are built. Rule 4 is built in its minimal form, the sync log line.
+**Status.** All five rules are built. Rule 4 is built in its minimal form, the sync log line. The NAS sync plans on its own state database and asks the hub: a purge is a `delete` request, and the row is removed once the hub has confirmed it (rule 5 holds through the request status). The 413 refusal of an oversized upload deletes the item's older points and marks the row `ignored`; a 422 deletes nothing and leaves the row pending with an error logged, for the Mac runner as for the NAS.
 
 Deletion is the dangerous operation. The sync applies these rules. They run on the ingestion side
 (§2.3): each rule and each guard counts the rows of one ingestion host only. The hub deletes an item
@@ -2037,7 +2042,7 @@ only when its source asks.
    points are deleted (Qdrant, `wait=true`), and then its row. A tombstoned item found again before its
    purge has its `missing_since` cleared. A queue row that is not `completed` has no points, so when its
    source is gone it is removed at once, without a tombstone. The grace period is 24 hours
-   (`DEFAULT_GRACE_HOURS` in `ragnart/sync_plan.py`).
+   (`DEFAULT_GRACE_HOURS` in `ragnart/sync_plan_core.py`).
 3. Tombstoning is limited to `rag.sync.max_delete_fraction` (0.10 in `ragnart.yaml`) of the **completed**
    rows. When more completed rows would be newly tombstoned than that fraction of all completed rows,
    no tombstone is set, the sync logs an error and exits with code 1. `--allow-mass-delete` lets the
@@ -2064,57 +2069,60 @@ is set only by the source itself, from a complete enumeration.
 **A source that no longer exists.** A lost or reinstalled machine cannot delete its own items.
 Removing every item of one `source_id` is a break-glass operation by the operator, with a
 maintenance tool on the hub, as the purge tools in `utils/` are today. There is no API request for it
-and no automatic policy. Built (v0.3, session B1): `utils/rag_source_remove.py --source <id>` deletes the points, intake rows and spool files of one endpoint source. It is a dry run by default, takes the ingestion lock on `--apply`, keeps the source's registry row and secret hash, and refuses a hub source unless `--allow-hub-source` is given.
+and no automatic policy. Built (v0.3, session B1): `utils/rag_source_remove.py --source <id>` deletes the points, intake rows and spool files of one endpoint source. It is a dry run by default, takes the ingestion lock on `--apply`, keeps the source's registry row and secret hash, and refuses a source that holds ragnart projects (`SOURCES_HOLDING_PROJECTS`, today `nas`) unless `--allow-projects-source` is given.
 
 ### 10.3 Operating rules
 
 **Status.** Built: the single-writer lock covering every writer of the index, idempotent ingestion,
-plan-then-apply sync, and scheduled reconciliation. Built (v0.3, session B1): reconciliation and the purge tools act on hub sources only, so they never compare or delete endpoint points. Notifications are not yet scheduled.
+plan-then-apply sync, and scheduled reconciliation. Built (v0.3, session B2): reconciliation is on the ingestion side, against the hub's listing of each source's items (`ragnart/sync_reconcile.py`), for the NAS sources and the Mac's alike; there are two locks, the index lock for the intake worker and hub maintenance, and the NAS-ingestion lock for the NAS run; the snapshot takes both. The purge tools `utils/rag_purge_corrupt.py` and `utils/rag_purge_rescan.py` are read-only reports. Notifications are not yet scheduled.
 
 - **The hub is the only writer of the index.** No source writes to Qdrant: a source asks the hub
   (§2.3). Within the hub, and within each ingestion host, one writer runs at a time.
-- **Single writer.** Every process that writes `rag_state.db` rows or Qdrant points holds the
-  ingestion lock (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`, required in `ragnart.yaml`)
-  while it writes: `utils/rag_sync_nfs.py`, `utils/rag_ingest_daemon.py`, `utils/rag_reconcile.py --apply`,
-  `utils/rag_purge_rescan.py --apply`, `utils/rag_purge_corrupt.py --confirm`, `utils/rag_reset.py`
-  without `--dry-run`, and `scripts/sqlite-qdrant-snapshot.sh`. The dry runs of `utils/rag_sync_nfs.py`
-  and `utils/rag_reconcile.py` take no lock. `scripts/ragnart-ingest-run.sh` holds
-  the lock for its whole run (sync, daemon, reconciliation, WAL checkpoint, snapshot), and the steps inside the run
-  run under that hold. The one exception is `utils/rag_sparse_migrate.py`, a one-off migration that is
-  run with the timer stopped. The lock is fail-fast: a second writer exits with status 75 at once and
-  prints the holder (pid, host, command line, start time), which is also written into the lock file.
-  It never waits. The planned v0.4 verbs `add`, `commit`, `drop`, `rm` and `gc` will take the same
-  lock on the ingestion side, for as long as they write the state database (§7.3, §10.6).
-  A state database is opened by its own ingestion host only: `rag_state.db` is opened from Server 2
-  only.
+- **Two locks, two writers.** Every process that writes Qdrant points or the hub registry holds the
+  index lock (`RAGNART--databases/rag-ingest.lock`, `rag.ingest_lock`, required in `ragnart.yaml`) while it
+  writes: the intake worker (`ragnart/intake_worker.py`), `utils/rag_source_remove.py --apply`,
+  `utils/rag_reset.py` without `--dry-run`, and `scripts/sqlite-qdrant-snapshot.sh`. The NAS ingestion run
+  holds the NAS-ingestion lock (`RAGNART--databases/rag-nas-ingest.lock`, `rag.nas_ingest.lock`) while it
+  writes `rag_state.db` and submits: `utils/rag_sync_nfs.py` without `--dry-run`, which takes no lock in a dry run.
+  `scripts/ragnart-ingest-run.sh` holds the NAS lock for its whole run (sync, WAL checkpoints, snapshot) and
+  not the index lock, so the intake worker can drain while the NAS run scans. The snapshot script takes both
+  locks, the index lock first and then the NAS lock, so the restore triple is taken while neither writer
+  runs. The one exception is `utils/rag_sparse_migrate.py`, a one-off migration that is run with the timers
+  stopped. A lock is fail-fast: a second writer exits with status 75 at once and prints the holder (pid,
+  host, command line, start time), which is also written into the lock file. It never waits. The planned
+  v0.4 verbs `add`, `commit`, `drop`, `rm` and `gc` will take the lock of the state database they write, on the
+  ingestion side (§7.3, §10.6). A state database is opened by its own ingestion host only: `rag_state.db`
+  is opened from Server 2 only. `hub_registry.db` is also written by the ingestion API (the publish requests
+  and the intake rows) without a lock, so the registry copy of a restore triple is weaker than the other
+  two (§10.4).
 - **Idempotency.** Every operation (ingest a file, sync, backfill, `commit`, `gc`) can be
   re-run safely after a crash.
 - **Failed sync.** A sync that refuses deletion or crashes does not stop the ingestion run. The
-  daemon, the WAL checkpoint and the snapshot step still run. The run then exits with the sync's exit
+  WAL checkpoints and the snapshot step still run. The run then exits with the sync's exit
   code, so `ragnart-ingest.service` is marked failed.
 
-- **Plan-then-apply.** Each sync computes a plan before it writes: project upserts and removals, moves,
-  tombstones, purges, reappearances, stale-row removals and attachment changes. It logs the plan, then
-  applies it in a fixed order. Each Qdrant write (`wait=true`) comes before the SQLite change that
-  records it. `utils/rag_sync_nfs.py --dry-run` prints the plan and exits 0. It runs the scan on a
-  private copy of the queue and creates no Qdrant client, so it writes nothing.
-- **Reconciliation** (`utils/rag_reconcile.py`). Every scheduled ingestion run executes
-  `rag_reconcile.py --apply` after the ingestion daemon and before the snapshot, under the run's lock. It
-  counts the points of every key in one exact facet call on `source_path`. It then classifies each
-  completed row, and it compares the keys of Qdrant with the queue rows. It **repairs**: a NULL
-  `chunk_count` is set to the point count; a row with fewer points than its positive `chunk_count` is
-  reset to `pending` for re-ingestion, which deletes the stale points first; a key with points and no
-  queue row (a zombie) has its points deleted. It **reports and does not repair** an anomaly: more points
-  than `chunk_count`, or points under a zero `chunk_count`. A tombstoned row is never requeued. A
-  `chunk_count` of 0 with no points is consistent and is left alone. The zombie deletion is refused when
-  the zombie points exceed `rag.sync.max_delete_fraction` of all points; the row repairs still run. The
-  run stops, without repairing, if the facet is truncated. The script exits 1 when an anomaly remains or
-  the guard refused the zombie deletion. Its failure does not change the run's exit code: the run logs
-  a WARN. The per-source check is one facet call on `source_id`: it compares each source's points with the
-  sum of its completed rows' `chunk_count`; a mismatch is logged as a WARN, nothing is repaired, and the
-  exit code is unchanged. The default mode is `--dry-run`, which writes nothing. Reconciliation belongs to the
-  ingestion side: it compares one ingestion host's rows with the points of its own sources. A source
-  on another host reconciles against the hub's listing of its items (§2.3; built for the endpoint sources, v0.3).
+- **Plan-then-submit.** The NAS run is, in order: poll the outcome of the previous run's requests, scan,
+  compute the sync plan, reconcile against the hub's listing, submit. The plan covers project upserts and
+  removals, moves, tombstones, purges, reappearances, stale-row removals and attachment changes. The sync
+  logs it, then submits it as API requests in a fixed order: projects, moves (`change_key`), purges
+  (`delete`), attachment changes (`change_metadata`), uploads. A queue row is marked `processing` with the
+  request id when the hub accepts the request, and `completed`, `failed` or `ignored` by the next run's poll
+  of the request's status. A move, a purge or a project removal changes its local row only after the hub has
+  accepted the request. `utils/rag_sync_nfs.py --dry-run` reads the live hub (listing, info, statuses), runs
+  the scan on a private copy of the queue, prints the plan and the reconciliation counts, and exits 0; it
+  sends no request, writes nothing and takes no lock.
+- **Reconciliation** (`ragnart/sync_reconcile.py`). Every ingestion run reconciles each of its sources with the
+  hub's listing of that source's items (`GET /v1/items`: key, content hash, chunk count, pipeline version,
+  owner, `project_id`), the NAS sources and the Mac's alike. It applies four rules. An **orphan**, a hub item
+  with no local row, is deleted on the hub; this is skipped when the local state holds no completed row for
+  that source, and when the orphans exceed `rag.sync.max_delete_fraction` of that source's own completed rows. A
+  completed row that is present on the source and **missing** from the hub is sent again, except a row with a
+  `chunk_count` of 0, which has no points to list. A row whose **pipeline version** on the hub is older than the
+  hub's current one is sent again, at most `rag.nas_ingest.resubmit_batch_size` (200) per NAS run. A row whose
+  hub `owner` or `project_id` **differs** from the local value gets a `change_metadata` request. Reconciliation
+  never touches Qdrant; a source whose listing cannot be read is skipped for that run, and in a dry run it only counts. A lost state database is rebuilt
+  from the listing (§4.8). The run does not compare a source's point count with the sum of its completed rows'
+  `chunk_count`.
 - **Notifications** (failed run, guard tripped, snapshot failed, reconciliation problems) are
   part of the design; the channel and implementation are not defined (§13).
 
@@ -2180,7 +2188,7 @@ placement of Qdrant is decided after the cleanup, from measured memory use.
 | Interface | Role |
 |---|---|
 | HTTP API (Server 2, port 8100) | `GET /v1/search`: hybrid search and reranking (§5.5); answers 503 when Qdrant is unreachable or fails. `GET /health`: `ok` when Qdrant's `/healthz` answers within 2 seconds, otherwise `degraded`. `GET /v1/projects` (built) returns the `global` row and every ragnart project, each with `id`, `path`, `name`, `owner`, `source_id`, `tags` and `item_count` (completed items); the listing has no `parent` or `mode`, as the design has no use for them (§4.5). With `user`, it lists the `global` row and the projects whose owner is that user or `la-familia`, the same owner rule as search. Planned: the relevance verdict in a search response (§8.7), each ragnart project's references to ragnart projects and sessions in the project listing (§4.5), resolution, item listing for metadata queries and for the project catalogue (§7.4), grant management |
-| Ingestion API (the hub) | Built (v0.3, session B1) for endpoint sources; the NAS is not on it yet (v0.3, session B2). The write path from a source to the hub (§2.3). Requests: upsert an item, as bytes with a file type or as text (§4.7); delete an item; change an item's key, change an item's metadata such as `owner`, and change an item's source when a ragnart project moves to another source (v0.4), all three as payload rewrites that carry no content and re-embed nothing (§2.3); list the source's own items with key, content hash, chunk count and pipeline version; read the status of a submitted item; publish the source's ragnart project records, with their references (§4.5); read the current pipeline version, the accepted file types and the admission limits (§5.2). As built (v0.3, session B1): the write requests (upsert, delete, change key, change metadata) answer 202 with a request id and never touch Qdrant; `GET /v1/status/{request_id}`, `GET /v1/items` and `GET /v1/info` are built; a publish request answers 409 for an endpoint source; the change of source is not built (v0.4). Every request carries the Bearer secret of its source, and the source comes from that secret, never from the body. **Write-time gates**, each a sanity check and not a policy: the source is registered and presents its secret; a request touches only items of that source; a published project id is not homed on another source. One secret per source, and nothing richer until tenancy (§13.3). A filesystem source's key is checked to be an absolute path and is not confined to the source's root, by design (§14 D18, D19): the hub keeps no root for an endpoint source, and isolation between sources is by `source_id`, which comes from the authenticated secret. |
+| Ingestion API (the hub) | Built (v0.3, sessions B1 and B2) for every source, the three NAS-side sources included. The write path from a source to the hub (§2.3). Requests: upsert an item, as bytes with a file type or as text (§4.7); delete an item; change an item's key, change an item's metadata such as `owner`, and change an item's source when a ragnart project moves to another source (v0.4), all three as payload rewrites that carry no content and re-embed nothing (§2.3); list the source's own items with key, content hash, chunk count and pipeline version; read the status of a submitted item; publish the source's ragnart project records, with their references (§4.5); read the current pipeline version, the accepted file types and the admission limits (§5.2). As built (v0.3, session B1): the write requests (upsert, delete, change key, change metadata) answer 202 with a request id and never touch Qdrant; `GET /v1/status/{request_id}`, `GET /v1/items` and `GET /v1/info` are built. Built (v0.3, session B2): the text route takes the `opencode` connector besides `claude_code`; an upsert carries `tag` and `project_id` (a project that exists in the registry), and, for a source without a fixed owner, `owner`; a change-metadata request may change `owner` or `project_id`; `POST /v1/projects` publishes a project record and `POST /v1/projects/remove` removes one, for the sources that hold projects (`nas`), and answers 409 for any other source and for a project id homed on another source. The hub stores the content hash of what it received: the md5 of the bytes for a file, the md5 of the rendered text for a Claude Code session, none for an OpenCode session; a NAS Claude Code point written before B2 keeps the md5 of the `.jsonl` file until the session is submitted again. The change of source is not built (v0.4). Every request carries the Bearer secret of its source, and the source comes from that secret, never from the body. **Write-time gates**, each a sanity check and not a policy: the source is registered and presents its secret; a request touches only items of that source; a published project id is not homed on another source. One secret per source, and nothing richer until tenancy (§13.3). A filesystem source's key is checked to be an absolute path and is not confined to the source's root, by design (§14 D18, D19): the hub keeps no root for an endpoint source, and isolation between sources is by `source_id`, which comes from the authenticated secret. |
 | `ragnart` CLI | Read-only commands built (§1.2): `check-ignore`, `ls-files`, `status`. Planned (v0.4): `init`, `init --from`, `capture`, `add`, `add --no-commit`, `commit`, `drop`, `note`, `rm`, `mv`, `repair`, `diff`, `fsck`, `gc`, `where`, `expect`, `calibrate`, `grant`, `revoke`, `transfer`. In project work the CLI is plumbing, called by the agent (§7.3). Until then, the operations tools are the separate `utils/rag_*.py` scripts. |
 | `/ragnart` skill and commands (Claude Code, OpenCode) | Planned (v0.4); today the `/rag` command. Scope and grounding (§8), librarian behaviour, the action vocabulary and the capture policy (§7.3) |
 | Session-start hook, capture hook and status line (Claude Code, OpenCode) | Planned (v0.4). Project detection, the reference to a session started in a project folder (§4.5), and the project's state in every session (§7.4). The capture hook on the harness's fetch tool (§7.3) |
@@ -2297,7 +2305,7 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 | D14 | A vanished item is tombstoned (`missing_since`). Its points stay searchable for 24 hours, then the first sync after that purges its points and row. Reappearance clears the tombstone. The mass-delete guard gates new tombstones, not purges | A vanished file may be a mount failure or a move not yet visible, and a grace period lets a mistake be undone without re-embedding. Purges were vetted when their rows were tombstoned | Each purge is one line in the sync log (§10.2, rule 4). A tombstoned row is not tombstoned again on later syncs |
 | D15 | A file belongs to the ragnart project whose `resources/` or `collateral/` holds it, else to `global`. A session is a `global` item of its owner, keyed by its id; a ragnart project includes it by a reference (D34). The session-start hook references a session started in a project folder, once, when it starts. `launch_dir` is metadata only (§4.5) | A file's place in a managed folder is a present fact. A session's membership is provenance, recorded at a known moment, not a rule re-evaluated against a tree that moves | Moving a ragnart project changes its `projects` row and no session. A launch path spelled differently has no effect, because no rule reads `launch_dir`. Built to the earlier rule, the re-evaluation of every item on every sync, until v0.4 |
 | D16 | The scheduled sync scans every configured root in one run, including the shared La-Familia root. `--user` remains available for manual runs | The per-owner loop in the scheduled run left the shared root out of the index | `utils/rag_sync_nfs.py` is called once per scheduled run. With `--user`, the scan and the deletion checks cover that owner only (§10.2) |
-| D17 | Reconciliation runs in every scheduled run, after the ingestion daemon and under the run lock. It repairs NULL `chunk_count`, short rows and zombie points (the last under a point-count guard). It reports anomalies without repairing them, and it never fails the run | The index can drift from the queue (§10.3). Unattended repair keeps it consistent, and anything not safe to repair is left to a person | One exact facet call on `source_path` per run. The guard counts points, not keys |
+| D17 | Reconciliation runs in every scheduled ingestion run, on the ingestion side, against the hub's listing of each source's items. It deletes orphans (under an empty-state guard and a per-source mass-delete guard), sends again the rows that are missing on the hub or older than its pipeline version, and corrects drift in `owner` and `project_id`. It never touches the index itself, and a source whose listing cannot be read is skipped for that run | The index can drift from the queue (§10.3). Unattended repair keeps it consistent, and the hub stays the only writer of the index | One listing per source per run: about 9 s for the NAS source's 8,703 items. The guard counts items |
 | D18 | A connector is a type and a source is a configured instance of one. Each connector defines its own key, locator and display formats. A key is unique within its source only, and a locator is opaque outside its connector (§4.2, §4.7) | Claude Code and OpenCode sessions already had keys and locators unlike a file path. Naming the pattern removes the assumption of one filesystem namespace | `source_id` on every item and chunk. No format claims universality. A new kind of store is a new connector, not a change to the model |
 | D19 | Ingestion is multi-point. Each ingestion side owns its bookkeeping and the lifecycle of its items. The hub parses, chunks, embeds, stores and searches; it is the only writer of the index, is agnostic to a source's lifecycle, and keeps nothing of an item beyond its chunks (§2.3) | Consistency, deletion and reconciliation are specific to a source, and are decided where the source can be seen. An endpoint is reachable only some of the time, so the hub must not depend on it | Five requests per item: upsert, delete, change of key, change of metadata and change of source. The last three rewrite payload fields and re-embed nothing (D37). A silent source's items stay. After a change of parsing, admission or chunking a source re-submits when it is next reachable (§4.1) |
 | D20 | Three stores: the Qdrant payload and the hub registry in the hub, and a state database on each ingestion host (§4.8) | The hub needs what retrieval filters on or displays and what gates a write; the ingestion side needs what decides a submission. One database held both only because one host played both roles | The ragnart project tables and the sources live in the registry. Each store is inspected and repaired on its own |
