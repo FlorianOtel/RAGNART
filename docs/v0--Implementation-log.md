@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A entry: what was done with commit `969d741`, the four kickoff decisions, deviations, the Part 0 and Part B evidence, open items and the handover to session B); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- v0.3 session A open items: both proposals approved and applied)
-updated_at: 2026-11-18--22-53
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A entry: what was done with commit `969d741`, the four kickoff decisions, deviations, the Part 0 and Part B evidence, open items and the handover to session B); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- v0.3 session A open items: both proposals approved and applied); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1 entry: ingestion API, intake worker, endpoint sources MBP and claude-MBP, live bring-up and DoD, bench and ragignore results; v0.3 status line)
+updated_at: 2026-11-19--10-02
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -36,7 +36,202 @@ log records what happened, including what diverged.
 
 ## v0.3 -- Sources
 
-Plan: `docs/Implementation-plan.md` Section 6, v0.3. Status: **in progress** (see Plan Section 9): session A done, session B planned.
+Plan: `docs/Implementation-plan.md` Section 6, v0.3. Status: **in progress** (see Plan Section 9): sessions A and B1 done, session B2 planned.
+
+### 2026-11-18--22-58 to 2026-11-19--09-42 -- v0.3 session B1: ingestion API, endpoint sources MBP and claude-MBP
+
+Run as a `/brain` pipeline (Claude Haiku 5.5 executing in Actor dispatches). Plan: Plan Section 6 v0.3, session B1,
+which is the first half of the session B that the operator split in two. Second of the three v0.3 sessions (A, B1,
+B2). Part A (code) was reviewed by a separate reviewer before Part B (live) began; the review passed with two minor
+findings, both fixed before the live steps that they touch (Decisions 9).
+
+#### What was done
+
+Commits: `d68634d` (code, Part A and the review fixes), and the docs commit that adds this entry.
+
+- **Part A, `d68634d` (code):**
+  - `config/ragignore`: `*._*` becomes `._*` and `*~$*` becomes `~$*`. A mid-name `._` or `~$` is admitted; a
+    leading one is still excluded (`tests/test_ragignore.py`).
+  - Import split: `ragnart/__init__.py` no longer imports search. `ragnart/chat_render.py` (the Claude Code and
+    OpenCode rendering, moved from `ragnart/ingest.py`) and `ragnart/sync_plan_core.py` (plan computation, moved from
+    `ragnart/sync_plan.py`) load neither docling nor qdrant. `tests/test_ingestion_side_imports.py` enforces the
+    import contract in a fresh interpreter.
+  - Source ids: `validate_source_id()` in `ragnart/schema.py`; `[A-Za-z0-9][A-Za-z0-9-]*`; reserved words compared
+    case-insensitively. Registry unique index on `sources(id COLLATE NOCASE)`. Scope source terms compared
+    case-insensitively and echoed in stored case.
+  - Hub registry migration 2 (`ragnart/registry.py`): `sources.secret` renamed `secret_hash`; `kind` (CHECK `hub` or
+    `endpoint`) and `owner` added; the NOCASE index; the `intake` table; the three hub sources set to `kind='hub'`.
+  - Hub scope: reconciliation (facet and per-source loop), the `utils/rag_purge_corrupt.py` scroll and
+    `utils/rag_purge_rescan.py` restricted to hub sources.
+  - `utils/rag_source_register.py`: dry-run default; `--apply` under the lock; the secret is written first to
+    `--secret-out` (`O_EXCL`, mode 0600) and only its SHA-256 is stored; the secret is never printed.
+  - `ragnart/ingest_api.py` (FastAPI, port 8101): Bearer auth to the source. Writes answer 202 with a request id:
+    `POST /v1/upsert/bytes`, `POST /v1/upsert/text`, `POST /v1/delete`, `POST /v1/change-key`,
+    `POST /v1/change-metadata`. Reads: `GET /v1/status/{request_id}`, `GET /v1/items` (live from Qdrant, grouped by
+    key), `GET /v1/info`. `POST /v1/projects` answers 409 for an endpoint source and logs at WARNING.
+  - `ingest_content()` in `ragnart/ingest.py`: the content-based core for endpoint items, with the admission order of
+    `ingest_file`. `ingest_file` is unchanged in behaviour.
+  - `ragnart/intake_worker.py`: takes the lock (exit 75 when held) and applies intake rows oldest first: upsert,
+    delete, change_key, change_metadata.
+  - `ragnart/endpoint_client.py` (`HubClient`, httpx), `ragnart/endpoint_state.py` (the endpoint's own SQLite state,
+    `user_version` 1), `ragnart/endpoint.py` (the filesystem and Claude Code runners, the plan, reconciliation, and
+    `run` with `--dry-run`, `--grace-hours` and `--source`).
+  - `utils/rag_source_remove.py`: the dry run lists one source's items; `--apply` deletes its points, intake rows and
+    spool files. A hub source is refused without `--allow-hub-source`.
+  - Packaging: base dependencies `httpx` and `pyyaml`; the `hub` extra holds the existing server dependencies.
+    `scripts/ragnart-ingest-api.service`, `scripts/ragnart-intake.service` (`SuccessExitStatus=75`),
+    `scripts/ragnart-intake.timer` (`*:0/10`), `scripts/macos/com.ragnart.ingest.plist` (`StartInterval` 21600).
+    `scripts/install-units.sh` copies the three hub units and enables none of them.
+  - Tests: 607 before, 864 after (`partB-fix2-suite.log`).
+- **Part B (live, Server 2 and the Mac):** registry migration 2 (B.2); `MBP` and `claude-MBP` registered (B.3);
+  search restarted (B.4); ingestion API and intake timer installed (B.5, B.6); wheel installed on the Mac (B.8);
+  Mac configuration (B.9); dry runs (B.10); first real run (B.12); LaunchAgent loaded (B.13); DoD pass in
+  `/Users/fotel/MBP/ragnart-test/` (B.14, `dod-results.md`); hub run with the ingestion timer (B.15).
+- **Part C (docs):** this entry; `docs/RAGNART-design.md` status lines and the §2.1 host table;
+  `docs/Implementation-plan.md` §1, §3, §6, §7, §8 item 16 and §9. `docs/RAG-strategy.md` changes are proposed only,
+  in the session directory (`RAG-strategy-B1-proposed-edits.md`).
+
+#### Decisions
+
+1. **Split** (operator, 2026-11-18). Session B is B1 (this session: the ingestion API, the intake worker, two endpoint
+   sources) and B2 (the NAS ingestion onto the API, re-submission after a version change, rebuild of a lost state
+   database from the listing).
+2. **Endpoint host: the operator's Mac** (`M3Max.local`, 192.168.1.3). Gentle actions only. `~/.claude` is not written.
+   `/Volumes` is never walked.
+3. **Source ids** `MBP` (filesystem, `/Users/fotel/MBP`) and `claude-MBP` (Claude Code, `/Users/fotel/.claude/projects`).
+   Id rule: `[A-Za-z0-9][A-Za-z0-9-]*`, case kept, compared without regard to case (`docs/Implementation-plan.md` §8 item 16).
+4. **`~/Dropbox` rejected as a source.** On the Mac it is the same NFS tree as `nas` (737 items, 42,855 points), so
+   every item would be duplicated. The old `/mnt/nfs/Florian/Gin-AI/chats/MBP` moved to the Mac as `/Users/fotel/MBP`.
+   Its 17 completed `nas` items (171 points) are tombstoned by the hub run and purged later (Open items).
+5. **Separate API service, intake table and worker.** The API runs on port 8101, a process separate from search (which
+   stays read-only on 8100). It records each request in the intake table and spools bytes. The hub intake worker applies
+   the requests under the ingestion lock every 10 minutes (`ragnart-intake.timer`).
+6. **One Bearer secret per source.** The hub registry holds only its SHA-256. The plaintext is written once, to a file
+   on the endpoint host. Plain HTTP on the LAN; the secret is the only protection until tenancy (v0.6).
+7. **Mac runtime:** the uv venv `~/.python-3.12` (Python 3.12.12). The wheel is installed with `pip install --no-deps`.
+   No docling, qdrant or embedder is installed. State, secrets and logs live in `~/.ragnart/`.
+8. **ragignore fix in B1.** `._*` and `~$*` are anchored to the leading characters, so
+   `Geoffrey_A._Moore_-_Crossing_the_Chasm.pdf` is admitted (dry-run counts in `ragignore-dryrun-before.txt`).
+9. **One Brain decision per review fix round:**
+   - `modified_at` must carry a UTC offset (422 otherwise). It is stored as UTC ISO-8601, the form `ingest_file` writes.
+   - `file_type` is canonicalised (lowercase, no dot) and must be in `rag.scanner.include_extensions` (422 otherwise).
+   - A `change_key` onto a key that already has points is refused: the row is `failed` with "target key already has
+     points", and nothing changes.
+   - No `change_key` for a Claude Code source: sessions are keyed by id and never move (422).
+   - A `processing` row left by a crashed worker is reset to `received` when the next worker takes the lock.
+   - A refused upload (413 or 422 at the door) deletes the item's old points before its local row becomes `ignored`,
+     as the hub does for its own items.
+   - A filesystem walk that finds no item while rows exist is incomplete: a WARNING, and no missing or delete.
+   - Secrets are never printed. The register tool's test asserts it.
+   - The secret column is renamed `secret_hash` (migration 2), so the name says what it holds.
+   - `sources.kind` has a CHECK constraint (`hub` or `endpoint`).
+   - The plist has its DOCTYPE line.
+10. Endpoint keys are not confined to a root, by design (`docs/RAGNART-design.md` §14 D18, D19); isolation is by
+    `source_id` (B.14 check 6b). The hub keeps no root for an endpoint source. The API checks a key's form per connector.
+
+#### Deviations from the plan
+
+- **Another source's filesystem key is accepted.** A request with the MBP secret for a `/mnt/nfs/...` key was accepted
+  (202) in B.14 check 6b. The plan's B1 DoD had read that request as refused. The design holds no root for an endpoint
+  source, so the plan's DoD and the design were reworded to match (Decisions 10). The worker's `source_id` filter kept
+  the NAS points unchanged (key count 727 before and after).
+- **The size limit is not applied before submit.** The endpoint submits any file, and the hub refuses an oversized
+  text-like upload at the door with 413. The source-side check moves to B2.
+- **Intake timer is `Persistent=false`,** so a missed slot is not caught up. The next slot drains the queue anyway.
+  `ragnart-ingest.timer` keeps `Persistent=true`.
+- **Units installed by copy.** `scripts/install-units.sh` enabled `ragnart-ingest.timer`, so B.5 and B.6 copied the new
+  units by hand and enabled only the new units. The installer now copies the three hub units and enables none.
+- **Bench: old-code probe run after B.15.** The plan's B.15 step asks for an old-code probe when a bench difference
+  appears. The difference (11 of 14 against the pre-session capture) appeared at B.15. The probe was run afterwards;
+  its result is in Evidence.
+
+#### Evidence
+
+- **Part 0 (before any change):** `ragnart-ingest.timer` stopped (0.1); the lock holder pid 43378 was not alive (0.2);
+  bench captured twice, 14 of 14 (0.3, `bench-pre-diff.txt`); Qdrant 349,332 points (`baseline-counts.txt`);
+  `utils/rag_sync_nfs.py --dry-run` before the ragignore change: 1 project upsert, 17 tombstoned, 0 moves, 0 purges
+  (`ragignore-dryrun-before.txt`); restore triple `2026-11-18-22-58-30`, 7 of 7 pairs (0.6).
+- **B.1:** restore triple `2026-11-19-00-22-06`, 7 of 7 pairs (`partB-B1-snapshot.log`).
+- **B.2:** migration 2 applied under the lock. `user_version` 2; `sources` has `secret_hash`, `kind` (CHECK), `owner` and
+  the NOCASE index; `intake` present; the three hub sources are `kind='hub'`; `projects` 2 (`partB-B2-*.log`).
+- **B.3:** `MBP` (filesystem, endpoint, owner florian) and `claude-MBP` (claude_code, endpoint, owner florian) registered;
+  secret files mode 0600 (`partB-B3-*.log`).
+- **B.4:** search restarted, `/health` 200 after about 4 s; `/v1/projects` 200 with `source_id`; `q=qdrant` 200, 3 hits.
+  Bench 14 of 14 against `bench-pre-2.json` (`bench-post-restart.json`): the code is result-neutral on the old corpus.
+- **B.5:** `ragnart-ingest-api.service` enabled and active. No token 401; wrong token 401; each endpoint secret 200 on
+  `GET /v1/info`; no journal errors (`partB-B5-*.log`).
+- **B.6:** `ragnart-intake.timer` enabled, next run scheduled. Manual run `Result=success`, "intake queue empty: 0 request(s)
+  processed". `ragnart-ingest.timer` inactive (`partB-B6-*.log`).
+- **B.8:** wheel `ragnart-0.1.0-py3-none-any.whl` built from a scratch copy. It contains `endpoint`, `endpoint_client`,
+  `endpoint_state` and `chat_render`; base `Requires-Dist` is `httpx` and `pyyaml`. `pip install --no-deps` on the Mac;
+  `import ragnart.endpoint, ragnart.endpoint_client` succeeds in the Mac venv (`partB-B8-*.log`).
+- **B.9:** `~/.ragnart/` directories 0700; secrets 0600, with digests equal to the hub copies (compared in the shell, not
+  printed); hub-side copies removed with `shred -u`; `GET /v1/info` and `/v1/items` 200 with each secret; `endpoint.yaml`
+  loads (`partB-B9-*.log`).
+- **B.10:** dry runs on the Mac. MBP: 17 planned upserts from 32 files on disk; 15 excluded by the hub's accepted types
+  (`py`, `plist`, `swift`, `log`, no extension). claude-MBP: 93 planned from 94 transcripts (one older duplicate copy of a
+  session uuid; the newest is kept). 0 errors. Hub intake 0 rows; Qdrant 0 points per source (`partB-B10-*.log`).
+- **B.12:** first real run on the Mac, 110 uploads (MBP 17, claude-MBP 93). Hub intake: 110 `completed`, 0 `ignored`,
+  0 `failed`; `Result=success`, "queue empty: 110 processed". Second Mac run: 0 new upserts, 0 errors. Qdrant exact:
+  MBP 171 and claude-MBP 3,090, equal to the intake chunk sums; total 352,593 = 349,332 + 171 + 3,090; the other sources
+  unchanged. `/v1/items` with each secret: MBP 17 items (171 chunks); claude-MBP 88 items (3,090 chunks; five sessions
+  with zero chunks have no points). A `scope=all` search finds an MBP item and a claude-MBP session. The Mac did not
+  reboot (`partB-B12-*.log`).
+- **B.13:** LaunchAgent `com.ragnart.ingest` bootstrapped on the Mac at about 09:10 CET. `plutil -lint` OK. `launchctl
+  print`: not running, interval 21600 s, runs 0, `RunAtLoad` false (`partB-B13-*.log`).
+- **B.14 (Definition of done, `dod-results.md`):** ten checks in `/Users/fotel/MBP/ragnart-test/`, removed afterwards.
+  1. New file: rank 0 of a `scope=all` search, with `source_id` MBP. PASS.
+  2. Edit: content hash changes and the chunks are replaced. PASS.
+  3. Move: change_key completed; the point id is unchanged and nothing is re-embedded. PASS.
+  4. Delete: the default grace marks the item missing; `--grace-hours 0` deletes it. PASS.
+  5. Wrong secret: 401. PASS.
+  6. Isolation: a claude-MBP secret on an MBP key is 422. An MBP secret on a NAS key is 202, and the NAS points are
+     unchanged. PASS for 6a; 6b is by design, see Decisions 10.
+  7. Copied `project.toml`: refused (409) and logged at WARNING; `notes.md` indexed as a `global` item; the registry's
+     projects unchanged. PASS.
+  8. Removal dry run: 18 items, 172 points, 23 intake rows, exactly MBP's keys; nothing written. PASS.
+  9. Endpoint runner idle: search still returns MBP and claude-MBP hits. PASS.
+  10. Cleanup: test folder removed; MBP 17 items and 171 points; claude-MBP 3,090. PASS.
+- **B.15 (hub run; `partB-B15-*.log`):** `ragnart-ingest.timer` started at 09:19. The timer-fired run (09:19 to 09:32)
+  skipped the snapshot, which was under 20 hours old. A forced run (09:32 to 09:35, `RAG_FORCE_SNAPSHOT=1`) took snapshot
+  `2026-11-19-08-34-33`, 7 of 7. Both `Result=success`, exit 0. The first run had 33 pending: 26 new keys (two Moore PDFs
+  admitted by the ragignore fix, and 24 claude sessions), five changed documents and one main session transcript. 0 failed.
+  Reconciliation: 0 anomalies, 0 zombies, 0 mismatches. MBP 171 and claude-MBP 3,090, unchanged; intake rows unchanged.
+  The 17 `chats/MBP` rows are tombstoned (`missing_since` 09:28). The two admitted PDFs are `Geoffrey_A._Moore_-_Crossing_the_Chasm.1999.eng.ISBN0060517123.pdf`
+  under `nas` (`TATA--Personal-family/_Books` and `Dropbox/Books`), 544 chunks each.
+- **Bench:** the bench after the run (`bench-final.json`) gives 11 of 14 against the pre-session capture
+  `bench-pre-2.json`. The differing queries are 2, 3 and 7, all on items that existed before the session. The
+  differences come from the corpus growing by about 4,900 points (endpoint +3,261 at B.12, hub run +1,598; total
+  354,191 in `partB-B15-final-counts.log`). The sparse IDF weights are collection-wide. No new-in-run or endpoint hit
+  appears among the differing results (`partB-B15-bench-detail.log`).
+  The pre-session code (`47997e7`), run as a second service on port 8199 against the same collection, matches the new
+  code 14 of 14 (`bench-oldcode-now.json` against `bench-final.json`). The new code on the old corpus gives 14 of 14
+  (B.4). Two post-run captures give 14 of 14 (`bench-final.json` and `bench-final-2.json`). The gate of
+  `docs/Implementation-plan.md` §4 holds.
+- **Tests:** 607 before, 864 after.
+
+#### Open items
+
+- **Session B2 items:** NAS ingestion onto the API; re-submission after a version change; rebuild of a lost state
+  database from the listing; the source-side size check; the NAS's project publication through the API.
+- **Purge of the 17 `chats/MBP` items:** the first hub run more than 24 hours after 09:28 CET on 2026-11-19 purges them.
+- **OpenCode on the Mac:** not built.
+- **Two text files flagged binary in Dropbox:** `Timeline--TAS-role-transition--Feb2024.md` and `README.txt`.
+- **`resolve_parent`** in `ragnart/projects.py` has no production caller (from session A).
+- **PyYAML:** the Mac venv has 6.0.2; the wheel's metadata pins 6.0.3. Installed with `--no-deps`.
+- **LaunchAgent first run:** it fires about six hours after bootstrap, around 15:10 CET on 2026-11-19.
+
+#### Handover to session B2
+
+- **Tree state:** code at `d68634d`; this entry in the docs commit.
+- **Scope:** Plan Section 6 v0.3, session B2 (the work items listed there under B2).
+- **Build on:** the intake table and worker (`ragnart/intake_worker.py`), `ingest_content()` (`ragnart/ingest.py`), the
+  listing `GET /v1/items` (`ragnart/ingest_api.py`), `HubClient` (`ragnart/endpoint_client.py`), and the endpoint runner
+  (`ragnart/endpoint.py`, `ragnart/endpoint_state.py`).
+- **Live state:** `ragnart-ingest.timer` active (started at B.15); `ragnart-intake.timer` enabled;
+  `ragnart-ingest-api.service` active; the LaunchAgent is loaded.
+- **Tests:** 864 at `d68634d`.
+
 
 ### 2026-11-18--19-13 to 21-41 -- v0.3 session A: sources, pipeline version, hub registry, source-qualified scope
 
