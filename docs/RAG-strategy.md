@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits)
-updated_at: 2026-11-19--20-45
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B1 proposal revised after B2: endpoint host, spool, units, §8.8 sources and secrets, §9.4 restore order)
+updated_at: 2026-11-19--20-48
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -49,6 +49,7 @@ transcripts and OpenCode sessions into one Qdrant collection, and answers
 | | OpenCode 2.x server (`opencode-v2-server.service`) — a corpus source | `http://192.168.1.95:4096` |
 | | The only host that opens `rag_state.db` (§5.6 below) | — |
 | **NAS** — 192.168.1.96 | NFSv4.1 export `/volume1/Disks`, mounted at `/mnt/nfs` on both servers with `local_lock=none` | — |
+| **Endpoint host** — the operator's Mac, 192.168.1.3 (M3Max.local) | Endpoint runner `python -m ragnart.endpoint run --config ~/.ragnart/endpoint.yaml`, from the LaunchAgent `com.ragnart.ingest` (`scripts/macos/com.ragnart.ingest.plist`); sources `MBP` and `claude-MBP` | every 6 hours (`StartInterval` 21600); state `~/.ragnart/state.db`, secrets `~/.ragnart/secrets/`, logs `~/.ragnart/logs/` |
 
 The repository itself lives on NFS (`/mnt/nfs/Florian/Gin-AI/projects/RAGNART`), so both
 servers run the same code. The Python environment is the shared venv
@@ -84,9 +85,10 @@ default) both point to `/mnt/nfs/__Backups/RAGNART--databases/`:
 /mnt/nfs/__Backups/RAGNART--databases/
 ├── rag-ingest.lock                     ← index lock: held by the intake worker and hub maintenance tools (§5.6)
 ├── rag-nas-ingest.lock                 ← NAS-ingestion lock: held by the NAS run (§5.6)
+├── spool/                              ← uploaded bytes of submitted requests, removed once the request is completed or ignored (owner-only; not in the restore triple)
 ├── sqlite/
 │   ├── rag_state.db                    ← ingestion queue (SQLite, WAL mode)
-│   └── hub_registry.db                 ← hub registry: sources and ragnart project tables (SQLite, WAL mode)
+│   └── hub_registry.db                 ← hub registry: sources, ragnart project tables and the intake table of submitted requests (SQLite, WAL mode)
 ├── logs/
 │   ├── rag-ingest.log                  ← ingestion + snapshot log (rotated daily, 7 kept)
 │   └── rag-ingest.log.N.gz
@@ -155,7 +157,9 @@ and the deviations from git are recorded in `docs/RAGNART-design.md` §1.2.
 Notes on the rules in `config/ragignore`:
 
 - A pattern with a trailing `/` matches directories only. A pattern without one (for example
-  `*._*`) also matches a directory whose name fits it, and excludes that directory's contents.
+  `._*`) also matches a directory whose name fits it, and excludes that directory's contents.
+- `._*` (macOS AppleDouble sidecars) and `~$*` (Office lock files) match only a name that starts with `._` or
+  `~$`. A mid-name `._` or `~$`, as in `Geoffrey_A._Moore_-_Crossing_the_Chasm.pdf`, is admitted.
 - An excluded name does not cover a sibling with a longer name (`.Gin-AI-python-3.12/` does
   not match `.Gin-AI-python-3.12.old`). `site-packages/`, `.uv-python/` and `.cache/`
   exclude what makes a directory unwanted, whatever the venv is called.
@@ -1034,6 +1038,9 @@ Anything that touches `rag_state.db` runs on **Server 2** (§5.6).
 | `ragnart-ingest.service` (Server 2) | oneshot | runs `scripts/ragnart-ingest-run.sh` as `florian`; `TimeoutStartSec=7200` kills a stuck run (rows it left `processing` keep their request id, and the next run's poll closes them); `SuccessExitStatus=75` |
 | `ragnart-opencode-backup.service` (Server 2) | oneshot | runs `scripts/opencode-db-backup.sh` as `florian`; backs up `opencode.db` (§9.6) |
 | `ragnart-opencode-backup.timer` (Server 2) | timer | `OnCalendar=*-*-* 03:30:00`, `AccuracySec=10min`, `Persistent=true` (a slot missed while down runs at next boot) |
+| `ragnart-ingest-api.service` (Server 2) | simple, `Restart=on-failure` | `uvicorn ragnart.ingest_api:app --host 0.0.0.0 --port 8101`, `User=florian`; separate from search; enabled by hand |
+| `ragnart-intake.timer` (Server 2) | timer | `OnCalendar=*:0/10` (every 10 minutes), `Persistent=false` (the next slot drains the queue) |
+| `ragnart-intake.service` (Server 2) | oneshot | `python -m ragnart.intake_worker` as `florian`; `SuccessExitStatus=75` (a held index lock is a skipped slot) |
 | `qdrant.service` (Server 1) | simple | §4.1 |
 | `/etc/logrotate.d/ragnart-ingest` (Server 2) | logrotate | §8.6 |
 
@@ -1244,6 +1251,32 @@ OpenCode password file at `opencode.password_env_file`, plus the secrets directo
 (`ragnart-ingest-api.service`, `ragnart-intake.service`, `ragnart-intake.timer`). From then on run the state-DB tools
 there only.
 
+### 8.8 Sources and secrets
+
+Every source is registered in the hub registry and submits its items through the ingestion API with its own
+secret. The registry keeps only the secret's SHA-256.
+
+- **Register.** From the repository root on Server 2:
+  `python utils/rag_source_register.py --id <id> --connector filesystem|claude_code --owner <owner>` is a dry run.
+  Add `--apply --secret-out <path>` to register under the index lock. The secret is written to `<path>` (mode 0600,
+  created exclusively) and is never printed.
+- **Rotate.** `python utils/rag_source_register.py --rotate-secret --id <id> --apply --secret-out <path>` gives an
+  existing source of any kind a new secret, under the index lock; the old secret stops working at once.
+- **Secret files.** The NAS-side sources (`nas`, `claude-linux-shared-nfs`, `opencode-k11`) read theirs from
+  `/home/florian/.ragnart/secrets/<id>` (mode 0600, directory 0700), named in `ragnart.yaml` under
+  `rag.nas_ingest.secrets`. An endpoint host keeps its secrets in `~/.ragnart/secrets/<id>` (mode 0600). After
+  copying a secret file into place, remove the copy written by `--secret-out` with `shred -u`. Do not print,
+  display or paste a secret.
+- **Endpoint runner.** On the endpoint host:
+  `python -m ragnart.endpoint run --config ~/.ragnart/endpoint.yaml [--dry-run] [--grace-hours N] [--source ID]
+  [--resubmit-batch-size N] [--rebuild-from-hub]`. The LaunchAgent `com.ragnart.ingest` runs it every 6 hours;
+  loading the agent submits nothing until the first interval. The package is installed with
+  `pip install --no-deps` into `~/.python-3.12` and does not run from the NFS checkout.
+- **Removal.** `python utils/rag_source_remove.py --source <id>` lists one source's items (dry run). With
+  `--apply`, under the index lock, it deletes that source's points, intake rows and spool files, and keeps the
+  registry row and secret hash. A source that holds ragnart projects (`nas`) is refused unless
+  `--allow-projects-source` is given.
+
 ---
 
 ## 9. Backup, snapshot retention and recovery
@@ -1396,8 +1429,10 @@ cp /mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/hub_registry
    /mnt/nfs/__Backups/RAGNART--databases/sqlite/hub_registry.db
 rm -f /mnt/nfs/__Backups/RAGNART--databases/sqlite/{rag_state,hub_registry}.db-{wal,shm}
 
-bash scripts/ragnart-ingest-run.sh          # sync + re-ingest the gap
-sudo systemctl start ragnart-ingest-api.service ragnart-ingest.timer ragnart-intake.timer
+sudo systemctl start ragnart-ingest-api.service
+bash scripts/ragnart-ingest-run.sh          # sync, submit the gap
+python -m ragnart.intake_worker             # or wait for ragnart-intake.timer
+sudo systemctl start ragnart-ingest.timer ragnart-intake.timer
 ```
 
 The sync decides by mtime and by presence, and the reconciliation by the hub's listing: files changed or
@@ -1409,6 +1444,10 @@ rows after `<ts>`) are lost with it; the ingestion side's poll marks their rows 
 again. Endpoint sources (the Mac) send again the items the restored registry's listing lacks, at their next
 run. A lost `rag_state.db` with no copy can be rebuilt from the hub's listings:
 `python utils/rag_sync_nfs.py --rebuild-from-hub` (§5.8).
+
+The spool (`RAGNART--databases/spool/`) is transient: it holds uploaded bytes until their request is completed or
+ignored, and it is not part of the restore triple. After a restore, a spool file that no intake row names is an
+orphan and may be deleted by hand.
 
 ### 9.5 On-demand snapshot
 
