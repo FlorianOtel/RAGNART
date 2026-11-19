@@ -3,7 +3,7 @@ title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits)
-updated_at: 2026-11-19--20-43
+updated_at: 2026-11-19--20-45
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -745,7 +745,7 @@ Rows written by the v2 ingest code already carry `pipeline_version = 'p1'`, so t
 - **Dry-run** (the default; `--dry-run` is accepted too). Opens the DB read-only, takes no lock, writes
   nothing, and calls neither Qdrant nor the OpenCode API. It prints the count per kind, the hashing volume,
   and the estimated time at `--assumed-mb-per-sec` (default 50).
-- **Apply** (`--apply`). Takes the ingestion lock (§5.6) before it opens the DB. A lock that is held
+- **Apply** (`--apply`). Takes the index lock (§5.6) before it opens the DB. A lock that is held
   exits 75 and names the holder.
 
 **Per-row order** (`process_one()`), committed row by row:
@@ -764,7 +764,7 @@ is logged with the key and the reason, and counted. The row keeps
 `pipeline_version` NULL, and the run continues with the next row. The run exits 1 if any row failed, 0
 otherwise. A re-run retries the failed rows.
 
-**Collisions.** One session uuid can be found in two transcript files (§2.4). If the old-key row's new key already has a row, the two copies are resolved, not failed. The newer file by modification time wins; an exact tie goes to the greatest path. Every Qdrant point under either key is deleted, the old-key row is removed, and the row under the new key keeps its place with `origin_path` set to the winner and status `pending`, so the daemon re-ingests the winning copy. The run summary counts these as `collisions resolved: N`.
+**Collisions.** One session uuid can be found in two transcript files (§2.4). If the old-key row's new key already has a row, the two copies are resolved, not failed. The newer file by modification time wins; an exact tie goes to the greatest path. Every Qdrant point under either key is deleted, the old-key row is removed, and the row under the new key keeps its place with `origin_path` set to the winner and status `pending`, so the next NAS run submits the winning copy. The run summary counts these as `collisions resolved: N`.
 
 **Checkpoint.** `{db_base_path}/sqlite/metadata_backfill.checkpoint` (default; `--checkpoint-file`
 overrides it). One line every 100 rows: UTC time, `done/total` and the last `file_path`. The file is
@@ -772,10 +772,11 @@ appended to, and the counts restart at 0 on each run. It is for the operator to 
 
 **Runbook** (run on Server 2, where `rag_state.db` lives):
 
-1. Snapshot the pair: run `bash scripts/sqlite-qdrant-snapshot.sh` directly. It takes the ingestion lock itself (exit 75 if a sync or daemon holds it), then takes a pair unconditionally.
-   `RAG_FORCE_SNAPSHOT` is read only by `scripts/ragnart-ingest-run.sh`, which also runs sync and the daemon, so this step does not use it.
-2. Keep `ragnart-ingest.timer` stopped, and do not run any sync, daemon or run script, from the code change
-   until step 6 completes. `sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service`
+1. Snapshot the pair: run `bash scripts/sqlite-qdrant-snapshot.sh` directly. It takes both locks itself (exit 75 if a NAS run or the intake worker holds one), then takes a pair unconditionally.
+   `RAG_FORCE_SNAPSHOT` is read only by `scripts/ragnart-ingest-run.sh`, which also runs the sync, so this step does not use it.
+2. Keep `ragnart-ingest.timer` and `ragnart-intake.timer` stopped, and do not run any sync, intake worker or run
+   script, from the code change until step 6 completes.
+   `sudo systemctl stop ragnart-ingest.timer ragnart-ingest.service ragnart-intake.timer ragnart-intake.service`
    Why: the new scanner keys Claude transcripts `claude-session://`. A sync before the backfill would see
    the old `.jsonl`-keyed rows as deleted and queue new keys, which re-ingests the sessions and duplicates
    their points.
@@ -789,7 +790,8 @@ appended to, and the counts restart at 0 on each run. It is for the operator to 
    `systemd-run --user --unit=ragnart-metadata-backfill --working-directory=/mnt/nfs/Florian/Gin-AI/projects/RAGNART ~/Gin-AI/.Gin-AI-python-3.12/bin/python utils/rag_metadata_backfill.py --apply`
    Follow it with `journalctl --user -u ragnart-metadata-backfill.service -f`, and read its state with
    `systemctl --user show -p ActiveState --value ragnart-metadata-backfill.service`.
-6. Restart the timer only after a run that exited 0: `sudo systemctl start ragnart-ingest.timer`.
+6. Restart the timers only after a run that exited 0:
+   `sudo systemctl start ragnart-ingest.timer ragnart-intake.timer`.
    After a run that exited 1, a Claude row that remains NULL is still old-keyed, and a timer started
    now would sync it as deleted. Re-run the backfill first.
    A stalled or failed run is diagnosed in `docs/RAG-troubleshoot.md` §2.14.
@@ -1029,7 +1031,7 @@ Anything that touches `rag_state.db` runs on **Server 2** (§5.6).
 |---|---|---|
 | `ragnart-search.service` (Server 2) | simple, `Restart=on-failure` | `uvicorn ragnart.service:app --host 0.0.0.0 --port 8100`, `User=florian` |
 | `ragnart-ingest.timer` (Server 2) | timer | `OnCalendar=*-*-* 01,07,13,19:00:00`, `AccuracySec=10min`, `Persistent=true` (a slot missed while down runs at next boot) |
-| `ragnart-ingest.service` (Server 2) | oneshot | runs `scripts/ragnart-ingest-run.sh` as `florian`; `TimeoutStartSec=7200` kills a stuck run (crash recovery resets its rows on the next start) |
+| `ragnart-ingest.service` (Server 2) | oneshot | runs `scripts/ragnart-ingest-run.sh` as `florian`; `TimeoutStartSec=7200` kills a stuck run (rows it left `processing` keep their request id, and the next run's poll closes them); `SuccessExitStatus=75` |
 | `ragnart-opencode-backup.service` (Server 2) | oneshot | runs `scripts/opencode-db-backup.sh` as `florian`; backs up `opencode.db` (§9.6) |
 | `ragnart-opencode-backup.timer` (Server 2) | timer | `OnCalendar=*-*-* 03:30:00`, `AccuracySec=10min`, `Persistent=true` (a slot missed while down runs at next boot) |
 | `qdrant.service` (Server 1) | simple | §4.1 |
@@ -1080,7 +1082,8 @@ single entry point for both the timer and manual runs.
 
 The run takes no worker or batch setting; the intake worker's `--workers` is the nearest setting (§5.5).
 
-Daemon stdout/stderr also go to the journal (`journalctl -u ragnart-ingest.service`).
+The run's stdout/stderr also go to the journal (`journalctl -u ragnart-ingest.service`). The intake
+worker logs only to its journal (`journalctl -u ragnart-intake.service`).
 
 ### 8.3 Status and monitoring
 
