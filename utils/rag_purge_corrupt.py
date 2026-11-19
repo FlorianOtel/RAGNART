@@ -8,6 +8,10 @@ binary artifacts, encoding issues) are identified and can be deleted from Qdrant
 Corrupt points are cross-referenced with SQLite to show whether the file is still
 queued for re-ingestion (IN_DB) or already completed (NOT_IN_DB).
 
+Hub sources only (v0.3): the scan always covers the hub's own sources (the registry's kind='hub'
+sources), whatever other filter is given. An endpoint source's points are never reported, and
+--confirm never deletes them.
+
 Usage (run from project root):
     python utils/rag_purge_corrupt.py
     python utils/rag_purge_corrupt.py --dry-run
@@ -30,8 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchAny, MatchValue
 
+from ragnart.cli import open_registry_read_only
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client
 # Single-writer lock: --confirm deletes Qdrant points, so it takes the same lock as the other writers.
 from ragnart.lock import acquire_or_exit, lock_path_from_config
@@ -53,11 +58,16 @@ logger = logging.getLogger(__name__)
 def scan_qdrant_for_corrupt(
     client,
     threshold: float,
+    hub_source_ids: set[str],
     user_filter: str | None = None,
     batch_size: int = 500,
 ) -> dict:
     """
-    Scroll all Qdrant points, identify corrupt ones, and return metadata.
+    Scroll the hub's Qdrant points, identify corrupt ones, and return metadata.
+
+    Only points whose source_id is one of hub_source_ids are scrolled. That condition is always
+    part of the scroll filter, and the optional --user condition is ANDed with it. Endpoint
+    points are therefore never reported, and --confirm never deletes them.
 
     Returns:
         {
@@ -67,22 +77,30 @@ def scan_qdrant_for_corrupt(
             "total_corrupt_points": int,
         }
     """
+    if not hub_source_ids:
+        # An empty set would match no points; refuse rather than report a clean scan.
+        raise ValueError("hub_source_ids is empty: refusing to scan without a hub scope")
+
     corrupt_paths = {}  # path -> min_printable_ratio
     corrupt_points = {}  # path -> point count
     total_points = 0
     total_corrupt_points = 0
 
-    # Build filter if --user is given
-    filters = None
-    if user_filter:
-        filters = Filter(
-            must=[
-                FieldCondition(
-                    key=FIELD_OWNER,
-                    match=MatchValue(value=user_filter),
-                )
-            ]
+    # The hub condition is always present. The --user condition, when given, is ANDed with it.
+    must = [
+        FieldCondition(
+            key=FIELD_SOURCE_ID,
+            match=MatchAny(any=sorted(hub_source_ids)),
         )
+    ]
+    if user_filter:
+        must.append(
+            FieldCondition(
+                key=FIELD_OWNER,
+                match=MatchValue(value=user_filter),
+            )
+        )
+    scroll_filter = Filter(must=must)
 
     # Scroll all points
     offset = 0
@@ -97,7 +115,7 @@ def scan_qdrant_for_corrupt(
                     limit=batch_size,
                     offset=offset,
                     with_payload=True,
-                    scroll_filter=filters,
+                    scroll_filter=scroll_filter,
                 )
                 last_exc = None
                 break
@@ -215,8 +233,16 @@ def main() -> None:
     state_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     state_conn.row_factory = sqlite3.Row
 
+    # The hub's own sources come from the registry, opened read-only. Nothing is written here.
+    registry = open_registry_read_only(config)
+    try:
+        hub_source_ids = registry.hub_source_ids()
+    finally:
+        registry.close()
+
     print()
     print(f"Scanning Qdrant for corrupt content (threshold: {args.threshold:.2f})")
+    print(f"  Scope: hub sources {', '.join(sorted(hub_source_ids))}")
     if args.user:
         print(f"  Filter: owner={args.user}")
     print()
@@ -225,6 +251,7 @@ def main() -> None:
     result = scan_qdrant_for_corrupt(
         qdrant_client,
         threshold=args.threshold,
+        hub_source_ids=hub_source_ids,
         user_filter=args.user,
         batch_size=500,
     )

@@ -6,20 +6,27 @@ version = "0.1.0"
 description = "RAGNART — nested, three-tier RAG (Archive / Runtime / Transient), spun off from SoHoAI"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+# The base install is the endpoint side (the operator's Mac, or any host that submits items): only the
+# two packages the endpoint runner and its HTTP client import. On the Mac install the wheel with
+# pip install --no-deps <artifact>, so no hub package is pulled in; the dependency check is in B.8.
 dependencies = [
+    "httpx==0.28.1",
+    "pyyaml==6.0.3",
+]
+
+# Optional extras. The hub extra is the hub side: the ingestion API, the intake worker, docling,
+# embeddings and Qdrant. Install with: pip install -e ".[hub]"
+[project.optional-dependencies]
+hub = [
     "docling==2.89.0",
     "fastapi==0.135.1",
     "fastembed==0.8.0",
-    "httpx==0.28.1",
-    "pyyaml==6.0.3",
     "python-pptx==1.0.2",
     "qdrant-client==1.17.1",
     "tiktoken==0.12.0",
     "uvicorn==0.42.0",
 ]
-
 # Test-only dependencies. Install with: pip install -e ".[test]"
-[project.optional-dependencies]
 test = [
     "pytest==9.0.3",
 ]

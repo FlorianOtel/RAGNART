@@ -531,6 +531,29 @@ def test_shipped_global_file_excludes_expected_names(tmp_path) -> None:
     )
 
 
+def test_shipped_global_file_narrowed_sidecar_and_lock_rules(tmp_path) -> None:
+    """
+    The real config/ragignore excludes only a LEADING "._" and a LEADING "~$".
+
+    Mid-name "._" and "~$" are real names (the over-match this test guards against
+    hid Geoffrey_A._Moore_-_Crossing_the_Chasm.pdf). A directory named "._x" is still
+    excluded with its contents; a directory "x._y" is not.
+    """
+    (tmp_path / "rag").mkdir()
+    matcher = RagIgnoreMatcher(str(tmp_path / "rag"))  # default global path
+    root = tmp_path / "rag"
+    # Excluded: a leading "._" or "~$" at any depth.
+    assert matcher.is_path_excluded(str(root / "x" / "._foo.pptx")) is True
+    assert matcher.is_path_excluded(str(root / "x" / "~$foo.docx")) is True
+    assert matcher.is_dir_excluded(str(root / "x"), "._dir") is True
+    assert matcher.is_path_excluded(str(root / "x" / "._dir" / "inside.txt")) is True
+    # Admitted: the marker sits mid-name, or inside a directory whose name merely contains it.
+    assert matcher.is_path_excluded(str(root / "Dropbox" / "Geoffrey_A._Moore_-_Crossing_the_Chasm.pdf")) is False
+    assert matcher.is_path_excluded(str(root / "x" / "a~$b.txt")) is False
+    assert matcher.is_dir_excluded(str(root / "x"), "x._y") is False
+    assert matcher.is_path_excluded(str(root / "x" / "x._y" / "f.txt")) is False
+
+
 # ----------------------------------------------------------------------------
 # POSIX character classes, checked character by character against git
 # ----------------------------------------------------------------------------

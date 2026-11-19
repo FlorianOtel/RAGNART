@@ -2,7 +2,10 @@
 Hub registry: the ragnart project tables, kept apart from the ingestion queue (v0.3, session A).
 
 The registry is one SQLite file, sqlite/hub_registry.db, beside rag_state.db. It holds:
-  - sources:            the stores RAGNART ingests from (one row per configured source);
+  - sources:            the stores RAGNART ingests from: hub sources (ingested by the hub) and
+                        endpoint sources (submitted to by a host through the ingestion API);
+  - intake:             requests received from endpoint sources, waiting for the hub's intake
+                        worker, and their results;
   - projects:           the ragnart projects, with their home source;
   - project_tags:       the tags of each project;
   - project_references: links from a project to sessions or other projects (v0.4 writes them);
@@ -10,7 +13,11 @@ The registry is one SQLite file, sqlite/hub_registry.db, beside rag_state.db. It
 
 The ingestion queue (ingestion_queue) stays in rag_state.db (ragnart/state.py). The two
 files are separate, so each has its own schema version (PRAGMA user_version). The
-registry's version starts at 1 and has its own migrations, _MIGRATIONS below.
+registry's schema version is 2; its migrations are in _MIGRATIONS below.
+
+Source ids are case-preserving for storage and display, and every comparison of them is
+case-insensitive. A unique index on sources(id COLLATE NOCASE) makes 'MBP' and 'mbp' the
+same source, so only one of them can be registered.
 
 Opening a RegistryDB with read_only=False creates the file if needed and applies any
 pending migration. Opening it with read_only=True never writes.
@@ -18,11 +25,19 @@ pending migration. Opening it with read_only=True never writes.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .schema import SOURCE_ID_CLAUDE_LINUX_SHARED_NFS, SOURCE_ID_NAS, SOURCE_ID_OPENCODE_K11
+from .schema import (
+    SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
+    SOURCE_ID_NAS,
+    SOURCE_ID_OPENCODE_K11,
+    validate_source_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +109,84 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         "INSERT OR IGNORE INTO projects (id, path, name, owner, home_source_id) "
         "VALUES ('global', NULL, 'Global', NULL, NULL)",
     ]),
+    (2, [
+        # secret is renamed, not replaced: migration 1 left it empty, so nothing is lost. The
+        # column now holds only the SHA-256 hex digest of a source's secret, never the secret.
+        "ALTER TABLE sources RENAME COLUMN secret TO secret_hash",
+        # kind is 'hub' for a source the hub ingests itself, 'endpoint' for a source that a host
+        # submits to through the ingestion API. The default makes every existing row a hub source.
+        # The CHECK refuses any other value, so a bad kind cannot be written even by direct SQL.
+        "ALTER TABLE sources ADD COLUMN kind TEXT NOT NULL DEFAULT 'hub' "
+        "CHECK (kind IN ('hub', 'endpoint'))",
+        # owner is the fixed owner of an endpoint source. Hub sources keep owner_binding instead.
+        "ALTER TABLE sources ADD COLUMN owner TEXT",
+        # Source ids are unique case-insensitively, so 'MBP' and 'mbp' cannot both be registered.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_id_nocase ON sources(id COLLATE NOCASE)",
+        # The three sources built in v0.3 are hub sources. Set explicitly, although the default
+        # already gives them 'hub'. The values are the SOURCE_ID_* constants, not input.
+        "UPDATE sources SET kind = 'hub' "
+        f"WHERE id IN ('{SOURCE_ID_NAS}', '{SOURCE_ID_CLAUDE_LINUX_SHARED_NFS}', '{SOURCE_ID_OPENCODE_K11}')",
+        # One row per request from an endpoint source. kind says what to do, status says how far
+        # the hub's intake worker has got. Payload columns are filled as the kind needs them:
+        # text for an upsert sent as text, spool_path for an upsert sent as bytes, new_key for a
+        # change_key. metadata holds a JSON object. modified_at is the item's modification time as
+        # an ISO-8601 UTC string, when the endpoint sent one. The result columns are set by the worker.
+        """
+        CREATE TABLE IF NOT EXISTS intake (
+            id                TEXT PRIMARY KEY,
+            source_id         TEXT NOT NULL,
+            kind              TEXT NOT NULL CHECK (kind IN ('upsert', 'delete', 'change_key', 'change_metadata')),
+            key               TEXT NOT NULL,
+            new_key           TEXT,
+            file_type         TEXT,
+            text              TEXT,
+            metadata          TEXT,
+            modified_at       TEXT,
+            spool_path        TEXT,
+            status            TEXT NOT NULL DEFAULT 'received'
+                              CHECK (status IN ('received', 'processing', 'completed', 'ignored', 'failed')),
+            admission_reason  TEXT,
+            error             TEXT,
+            chunk_count       INTEGER,
+            content_hash      TEXT,
+            pipeline_version  TEXT,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
+        )
+        """,
+        # The intake worker takes the oldest 'received' rows, so this index serves that query.
+        "CREATE INDEX IF NOT EXISTS idx_intake_status_created ON intake (status, created_at)",
+    ]),
 ]
+
+# The result columns of an intake row that the hub's intake worker may set. The request's own
+# fields (source, kind, key, text, metadata, ...) are fixed at insert time and never listed here.
+_UPDATABLE_INTAKE_FIELDS = frozenset({
+    "status",
+    "spool_path",
+    "admission_reason",
+    "error",
+    "chunk_count",
+    "content_hash",
+    "pipeline_version",
+})
+
+
+def _now() -> str:
+    """
+    Return the current UTC time as an ISO-8601 string with a fixed six-digit microsecond field.
+
+    The fixed width keeps string order equal to time order, which the intake queue relies on.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _intake_row_to_dict(row: sqlite3.Row) -> dict:
+    """Return an intake row as a dict, with its metadata JSON decoded back into a dict."""
+    data = dict(row)
+    if data["metadata"] is not None:
+        data["metadata"] = json.loads(data["metadata"])
+    return data
 
 
 class RegistryDB:
@@ -150,12 +242,215 @@ class RegistryDB:
         """
         Return every registered source as {id, connector, owner_binding}, sorted by id.
 
-        The secret column is never returned, so a caller cannot read a secret through this method.
+        The secret_hash column is never returned, so a caller cannot read a secret hash through
+        this method. source_by_id() returns the hash, for the one caller that must check it.
         """
         cur = self._conn.execute(
             "SELECT id, connector, owner_binding FROM sources ORDER BY id"
         )
         return [dict(row) for row in cur.fetchall()]
+
+    def register_source(
+        self,
+        source_id: str,
+        connector: str,
+        kind: str,
+        owner: str | None,
+        secret_hash: str,
+    ) -> None:
+        """
+        Register a new source. Only the SHA-256 hex digest of its secret is stored, never the secret.
+
+        The id is checked with validate_source_id() first, then stored as given (case preserved).
+        An id that matches an existing one case-insensitively is refused: the unique index on
+        sources(id COLLATE NOCASE) rejects it, and that rejection is raised here as ValueError.
+
+        Args:
+            source_id:   The id to register, e.g. 'MBP'.
+            connector:   The connector type, e.g. 'filesystem' or 'claude_code'.
+            kind:        'hub' (ingested by the hub itself) or 'endpoint' (submitted to by a host).
+            owner:       The fixed owner of an endpoint source; None for a hub source.
+            secret_hash: The SHA-256 hex digest of the source's secret.
+
+        Raises:
+            ValueError: the id is invalid or reserved, the kind is unknown, or the id is already
+                        registered in any letter case.
+        """
+        validate_source_id(source_id)
+        if kind not in ("hub", "endpoint"):
+            raise ValueError(f"unknown source kind {kind!r}: use 'hub' or 'endpoint'")
+        try:
+            self._conn.execute(
+                "INSERT INTO sources (id, connector, kind, owner, secret_hash) VALUES (?, ?, ?, ?, ?)",
+                (source_id, connector, kind, owner, secret_hash),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                f"source id {source_id!r} is already registered (ids are compared case-insensitively)"
+            ) from exc
+        self._conn.commit()
+
+    def source_by_id(self, source_id: str) -> dict | None:
+        """
+        Return the source whose id equals source_id, compared case-insensitively, or None.
+
+        The dict has id (the stored id, in its stored case), connector, kind, owner and
+        secret_hash. The request gate uses secret_hash to check a presented secret. The
+        plaintext secret is never stored, so it cannot be returned.
+        """
+        row = self._conn.execute(
+            "SELECT id, connector, kind, owner, secret_hash FROM sources WHERE id = ? COLLATE NOCASE",
+            (source_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def endpoint_sources(self) -> list[dict]:
+        """
+        Return every endpoint source (kind 'endpoint') as {id, connector, owner, secret_hash}.
+
+        The ingestion API's auth gate compares a presented secret's hash with each of these.
+        Hub sources are left out: they have no secret, so they can never authenticate.
+        """
+        cur = self._conn.execute(
+            "SELECT id, connector, owner, secret_hash FROM sources WHERE kind = 'endpoint' ORDER BY id"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def hub_source_ids(self) -> set[str]:
+        """
+        Return the ids of the hub sources (kind 'hub'): the sources the hub ingests itself.
+
+        The hub-side tools (reconciliation, purges) act only on these. Endpoint sources are
+        left out, so their points are never compared, deleted or reported by those tools.
+        """
+        rows = self._conn.execute("SELECT id FROM sources WHERE kind = 'hub'").fetchall()
+        return {row["id"] for row in rows}
+
+    # ------------------------------------------------------------------
+    # Intake: requests from endpoint sources
+
+    def insert_intake(
+        self,
+        source_id: str,
+        kind: str,
+        key: str,
+        *,
+        new_key: str | None = None,
+        file_type: str | None = None,
+        text: str | None = None,
+        metadata: dict | None = None,
+        modified_at: str | None = None,
+        spool_path: str | None = None,
+        request_id: str | None = None,
+    ) -> str:
+        """
+        Record one request from an endpoint source with status 'received', and return its request id.
+
+        The request id is a uuid4 hex string unless the caller passes one. The API passes its own,
+        so the spool file can be named after the request before the row exists: the row is then
+        inserted with spool_path already set, and the intake worker never sees a bytes upsert
+        without its file. The table checks kind (upsert, delete, change_key or change_metadata).
+        metadata is a dict, stored as JSON and returned as a dict. modified_at is stored as given;
+        the API has already checked it is an ISO-8601 UTC string.
+        """
+        if request_id is None:
+            request_id = uuid.uuid4().hex
+        now = _now()
+        self._conn.execute(
+            "INSERT INTO intake (id, source_id, kind, key, new_key, file_type, text, metadata, "
+            "modified_at, spool_path, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)",
+            (
+                request_id, source_id, kind, key, new_key, file_type, text,
+                None if metadata is None else json.dumps(metadata),
+                modified_at, spool_path, now, now,
+            ),
+        )
+        self._conn.commit()
+        return request_id
+
+    def intake_by_id(self, request_id: str) -> dict | None:
+        """Return the intake row with this request id as a dict (metadata decoded), or None."""
+        row = self._conn.execute("SELECT * FROM intake WHERE id = ?", (request_id,)).fetchone()
+        return _intake_row_to_dict(row) if row is not None else None
+
+    def next_intake(self) -> dict | None:
+        """
+        Claim the oldest 'received' request and mark it 'processing', in one statement.
+
+        The UPDATE ... RETURNING is a single SQLite statement, so two claimants cannot take the
+        same row. Oldest means the smallest created_at; rowid breaks ties, so requests stored in
+        the same microsecond keep their insertion order. Returns the claimed row, or None when no
+        request is waiting.
+        """
+        rows = self._conn.execute(
+            "UPDATE intake SET status = 'processing', updated_at = ? "
+            "WHERE id = (SELECT id FROM intake WHERE status = 'received' "
+            "            ORDER BY created_at, rowid LIMIT 1) "
+            "RETURNING *",
+            (_now(),),
+        ).fetchall()
+        self._conn.commit()
+        return _intake_row_to_dict(rows[0]) if rows else None
+
+    def reset_processing_intake(self) -> int:
+        """
+        Put every request left 'processing' back to 'received', and return how many were reset.
+
+        A worker that died mid-request leaves its row 'processing', and next_intake() never claims
+        such a row again. The intake worker calls this right after it takes the ingestion lock. The
+        lock means no other worker is running, so every 'processing' row is an orphan of an earlier
+        run. updated_at is refreshed, so the row shows when it was reset.
+        """
+        cur = self._conn.execute(
+            "UPDATE intake SET status = 'received', updated_at = ? WHERE status = 'processing'",
+            (_now(),),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def update_intake(self, request_id: str, **fields) -> None:
+        """
+        Set result columns of one intake row, and bump its updated_at.
+
+        Only the names in _UPDATABLE_INTAKE_FIELDS may be set (status, spool_path,
+        admission_reason, error, chunk_count, content_hash, pipeline_version). Any other name
+        raises ValueError before the SQL is built, so a column name never comes from outside.
+        """
+        unknown = set(fields) - _UPDATABLE_INTAKE_FIELDS
+        if unknown:
+            raise ValueError(f"cannot update intake field(s): {sorted(unknown)}")
+        assignments = [f"{name} = ?" for name in fields] + ["updated_at = ?"]
+        self._conn.execute(
+            f"UPDATE intake SET {', '.join(assignments)} WHERE id = ?",
+            (*fields.values(), _now(), request_id),
+        )
+        self._conn.commit()
+
+    def intake_for_source(self, source_id: str) -> list[dict]:
+        """
+        Return every intake row of one source, compared case-insensitively, as dicts.
+
+        Used by the per-source removal tool: its dry-run counts the rows, and its apply reads their
+        spool paths before the rows are deleted.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM intake WHERE source_id = ? COLLATE NOCASE", (source_id,)
+        ).fetchall()
+        return [_intake_row_to_dict(row) for row in rows]
+
+    def delete_intake_for_source(self, source_id: str) -> int:
+        """
+        Delete every intake row of one source, compared case-insensitively, and return the count.
+
+        Used by the per-source removal tool. The rows are the source's request history and any
+        work still waiting, so removing the source removes them too.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM intake WHERE source_id = ? COLLATE NOCASE", (source_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     # ------------------------------------------------------------------
     # Projects

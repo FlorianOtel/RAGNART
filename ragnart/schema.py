@@ -7,6 +7,8 @@ string literals for Qdrant payload keys anywhere else in the codebase.
 
 from __future__ import annotations
 
+import re
+
 # ---------------------------------------------------------------------------
 # Qdrant payload field name constants
 # ---------------------------------------------------------------------------
@@ -48,6 +50,38 @@ SOURCE_ID_NAS = "nas"                                       # filesystem connect
 SOURCE_ID_CLAUDE_LINUX_SHARED_NFS = "claude-linux-shared-nfs"  # Claude Code transcripts under the NFS-shared ~/.claude/projects
 SOURCE_ID_OPENCODE_K11 = "opencode-k11"                     # OpenCode server on K11 (Server 2)
 
+# The shape of a source id: letters and digits, with hyphens allowed after the first
+# character. No ':' (it separates the source from the path in a scope term), no '_', no spaces.
+_SOURCE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+# Words that can never be a source id, because scope terms and the API use them as keywords.
+# They are compared case-insensitively, so 'TAG' and 'Global' are refused as well.
+RESERVED_SOURCE_IDS = frozenset({"tag", "name", "all", "project", "web", "none", "global"})
+
+
+def validate_source_id(source_id: str) -> None:
+    """
+    Raise ValueError unless source_id is a valid source id.
+
+    A valid id matches [A-Za-z0-9][A-Za-z0-9-]* as a whole string (fullmatch, so a trailing
+    newline is refused too), and its casefolded form is not in RESERVED_SOURCE_IDS. The id
+    keeps its case for storage and display. Every comparison of ids is case-insensitive, so
+    'MBP' and 'mbp' name the same source and cannot both be registered.
+
+    Args:
+        source_id: The candidate id, as the operator typed it.
+
+    Raises:
+        ValueError: if the id has a character outside the allowed shape, or is reserved.
+    """
+    if not _SOURCE_ID_PATTERN.fullmatch(source_id):
+        raise ValueError(
+            f"invalid source id {source_id!r}: use letters, digits and '-' only, "
+            "starting with a letter or a digit"
+        )
+    if source_id.casefold() in RESERVED_SOURCE_IDS:
+        raise ValueError(f"source id {source_id!r} is reserved")
+
 # The sources whose connector has the ragnart_projects capability, that is, the
 # sources that can hold ragnart projects (design §4.5). scope.py reads this set
 # instead of importing ragnart.connectors, because that module pulls in the
@@ -66,11 +100,17 @@ _OPENCODE_KEY_PREFIX = "opencode://"
 
 def source_id_for_key(key: str) -> str:
     """
-    Return the source id of an item from its queue key.
+    Return the source id of a HUB item from its queue key.
 
     This is the only place the key-prefix rule is written. A key starting with
     'claude-session://' belongs to the Claude Code source, one starting with
     'opencode://' to the OpenCode source, and any other key is a NAS path.
+
+    It is for hub items only: the hub's own sources, whose keys are full paths or session
+    prefixes and whose queue rows live in rag_state.db. An endpoint item's source_id comes
+    from the authenticated request (the source the presented secret belongs to), never from
+    its key. Endpoint keys, such as a path on a laptop, would map to 'nas' here and must not
+    be passed in.
 
     Args:
         key: The ingestion-queue key (file_path column): a NAS path, a

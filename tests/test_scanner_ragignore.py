@@ -64,8 +64,8 @@ def test_scan_admits_only_non_excluded_included_files(tmp_path) -> None:
     _write(str(root / "photo.jpg"))              # extension not on the whitelist
     _write(str(root / "node_modules" / "x.md"))  # global rule: node_modules/
     _write(str(root / "Library" / "y.md"))        # global rule: Library/
-    _write(str(root / "._foo.pptx"))              # global rule: *._*
-    _write(str(root / "~$lock.docx"))             # global rule: *~$*
+    _write(str(root / "._foo.pptx"))              # global rule: ._*
+    _write(str(root / "~$lock.docx"))             # global rule: ~$*
 
     result, admitted = _scan(tmp_path, root)
 

@@ -42,6 +42,10 @@ TAG_PREFIX = "tag:"
 # Prefix of a name term. Reserved: name terms are not built until v0.4.
 NAME_PREFIX = "name:"
 
+# The project-holding sources, casefolded, so that a term's source can be checked against
+# them case-insensitively (source ids are compared case-insensitively everywhere).
+_HOLDING_PROJECTS_FOLDED = frozenset(source.casefold() for source in SOURCES_HOLDING_PROJECTS)
+
 
 class ScopeError(ValueError):
     """
@@ -80,7 +84,9 @@ def resolve_scope(scope_terms: list[str], registry_db: RegistryDB) -> tuple[Filt
 
     # Every ragnart project, in a stable order. The reserved global row is excluded.
     projects = [p for p in registry_db.list_projects() if p["id"] != GLOBAL_PROJECT_ID]
-    source_ids = {source["id"] for source in registry_db.list_sources()}
+    # Maps the casefolded id of each registered source to its stored id. A term's source is
+    # looked up through this map, so 'NAS:' finds the source stored as 'nas'.
+    source_ids = {source["id"].casefold(): source["id"] for source in registry_db.list_sources()}
 
     select_all = False
     matched_ids: set[str] = set()
@@ -117,25 +123,33 @@ def resolve_scope(scope_terms: list[str], registry_db: RegistryDB) -> tuple[Filt
     }
 
 
-def _ids_for_path_term(term: str, projects: list[dict], source_ids: set[str]) -> set[str]:
+def _ids_for_path_term(term: str, projects: list[dict], source_ids: dict[str, str]) -> set[str]:
     """
     Return the ids of the projects a `<source>:<path>` or `<source>:<path>/` term selects.
 
-    The text before the first ':' is the source. It must be a registered source whose
-    connector can hold ragnart projects. Only projects whose home source is that source
-    are then matched, by exact path or by subtree (for a trailing slash).
+    The text before the first ':' is the source, matched case-insensitively. It must be a
+    registered source whose connector can hold ragnart projects. Only projects whose home
+    source is that source are then matched, by exact path or by subtree (for a trailing slash).
+
+    source_ids maps the casefolded id of each registered source to its stored id. From here
+    on the stored id is used, so the error text names the source as the operator typed it
+    but the matching uses the stored form.
     """
-    source, separator, path = term.partition(":")
+    typed_source, separator, path = term.partition(":")
     if not separator:
         raise ScopeError(f"{term}: a path term must name its source, e.g. nas:<path>")
-    if source not in source_ids:
-        raise ScopeError(f"{term}: unknown source '{source}'")
+    stored_source = source_ids.get(typed_source.casefold())
+    if stored_source is None:
+        raise ScopeError(f"{term}: unknown source '{typed_source}'")
     # The capability check reads the schema set, not the connector table (see SOURCES_HOLDING_PROJECTS).
-    if source not in SOURCES_HOLDING_PROJECTS:
-        raise ScopeError(f"{term}: {source} cannot hold ragnart projects")
+    if stored_source.casefold() not in _HOLDING_PROJECTS_FOLDED:
+        raise ScopeError(f"{term}: {stored_source} cannot hold ragnart projects")
 
-    # Only the projects homed in this source can match this term.
-    homed = [p for p in projects if p["home_source_id"] == source]
+    # Only the projects homed in this source can match this term. Compared case-insensitively.
+    homed = [
+        p for p in projects
+        if (p["home_source_id"] or "").casefold() == stored_source.casefold()
+    ]
     if path.endswith("/"):
         return _ids_for_subtree_term(term, path, homed)
     return _ids_for_exact_path_term(term, path, homed)

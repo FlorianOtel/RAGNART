@@ -1,0 +1,12 @@
+[Unit]
+Description=RAGNART hub intake worker — every 10 minutes
+
+[Timer]
+# Every 10 minutes, on the hour and at :10, :20, ... (endpoint requests wait at most one slot).
+OnCalendar=*:0/10
+# A missed slot needs no catch-up: the next slot drains the queue anyway.
+Persistent=false
+Unit=ragnart-intake.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the endpoint runner on the operator's Mac (MBP endpoint, host M3Max.local).
+
+  Install on the Mac (not on the hub): copy to ~/Library/LaunchAgents/com.ragnart.ingest.plist, then
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ragnart.ingest.plist
+
+  The runner reads its secrets and sources from ~/.ragnart/endpoint.yaml and ~/.ragnart/secrets/.
+  This plist holds no secret. StartInterval 21600 is every six hours; RunAtLoad false means loading
+  the agent does not submit anything until the first interval elapses.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ragnart.ingest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/fotel/.python-3.12/bin/python</string>
+        <string>-m</string>
+        <string>ragnart.endpoint</string>
+        <string>run</string>
+        <string>--config</string>
+        <string>/Users/fotel/.ragnart/endpoint.yaml</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/fotel/.ragnart/logs/launchd.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/fotel/.ragnart/logs/launchd.err</string>
+</dict>
+</plist>

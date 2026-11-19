@@ -56,15 +56,17 @@ Downloads/
 # pip package metadata directories
 *.dist-info/
 
-# --- File name substrings (matched anywhere in the name) ------------------------
+# --- File name patterns (each rule says what it matches) ------------------------
 
-# Synology NAS streaming metadata
+# Synology NAS streaming metadata. Matches anywhere in the name.
 *@synoeastream*
-# macOS AppleDouble resource-fork sidecars (e.g. ._foo.pptx).
-# No trailing '/', so like any gitignore pattern without one this also matches
-# directories whose name contains "._" and excludes them with their contents.
-*._*
-# Microsoft Office lock/temp files (e.g. ~$foo.pptx).
-# No trailing '/', so like any gitignore pattern without one this also matches
-# directories whose name contains "~$" and excludes them with their contents.
-*~$*
+# macOS AppleDouble resource-fork sidecars (e.g. ._foo.pptx). Only a LEADING "._" is
+# excluded, so a mid-name "._" (e.g. Geoffrey_A._Moore_-_Crossing_the_Chasm.pdf) is
+# admitted. No slash, so like any gitignore pattern without one this matches the
+# basename at any depth, and a directory whose name starts with "._" is excluded
+# together with its contents.
+._*
+# Microsoft Office lock/temp files (e.g. ~$foo.pptx). Only a LEADING "~$" is excluded,
+# so a mid-name "~$" (e.g. a~$b.txt) is admitted. Same matching as above: any depth,
+# and a directory whose name starts with "~$" is excluded together with its contents.
+~$*

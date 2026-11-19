@@ -24,9 +24,9 @@ Parsing:
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -34,8 +34,10 @@ import tempfile
 import threading
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import tiktoken
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
@@ -59,11 +61,13 @@ from qdrant_client.models import (
 
 from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_sparse
 from .embeddings import embed_batch, embed_sparse
-from .hashing import hash_file
-from .opencode_client import get_json, load_password
+from .hashing import hash_file, hash_text
+from .chat_render import _parse_claude_chat, _parse_opencode_session
 from .projects import project_id_for_path
 from .registry import RegistryDB
-from .scanner import claude_dot_claude_dir
+# Not used by this module any more (the .claude lookup moved to chat_render.py). The name is
+# kept here because tests/test_ingest_admission.py monkeypatches ingest.claude_dot_claude_dir.
+from .scanner import claude_dot_claude_dir  # noqa: F401
 from .schema import (
     FIELD_CHUNK_INDEX,
     FIELD_CONTENT_HASH,
@@ -75,9 +79,7 @@ from .schema import (
     FIELD_PAGE,
     FIELD_PARENT_TEXT,
     FIELD_PIPELINE_VERSION,
-    FIELD_PROJECT,
     FIELD_PROJECT_ID,
-    FIELD_SESSION_ID,
     FIELD_SESSION_TITLE,
     FIELD_SOURCE_ID,
     FIELD_SOURCE_PATH,
@@ -202,38 +204,6 @@ def _get_converter() -> DocumentConverter:
 # Parsing
 # ---------------------------------------------------------------------------
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-
-
-@functools.lru_cache(maxsize=8)
-def _build_title_map(dot_claude_dir: Path) -> dict[str, str]:
-    """Walk ~/.claude/chats/ symlinks → {realpath: human_title}.
-    Excludes UUID-named symlinks (auto-created by Claude Code, not user-chosen).
-    Returns {} if chats dir absent or inaccessible.
-    """
-    chats_dir = dot_claude_dir / "chats"
-    if not chats_dir.is_dir():
-        return {}
-    title_map: dict[str, str] = {}
-    try:
-        for category in chats_dir.iterdir():
-            if not category.is_dir():
-                continue
-            for f in category.iterdir():
-                if f.suffix != ".jsonl" or not f.is_symlink():
-                    continue
-                if _UUID_RE.match(f.stem):
-                    continue
-                try:
-                    title_map[str(f.resolve())] = f.stem
-                except OSError:
-                    continue
-    except OSError as exc:
-        logger.warning("_build_title_map: cannot scan %s: %s", chats_dir, exc)
-    return title_map
-
 
 def _parse_ipynb(path: Path) -> str:
     """
@@ -264,306 +234,6 @@ def _parse_ipynb(path: Path) -> str:
 
 # OLE2 magic bytes — Composite Document File V2 (binary .ppt format)
 _OLE2_MAGIC = b"\xD0\xCF\x11\xE0"
-
-
-def _synthesize_title(path: Path, max_chars: int = 60) -> str:
-    """Derive a title from the first non-empty, non-command user message.
-    Falls back to path.stem (UUID) on any failure.
-    """
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return path.stem
-    for raw in lines:
-        try:
-            entry = json.loads(raw.strip())
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if entry.get("type") != "user" or entry.get("isMeta"):
-            continue
-        content = (entry.get("message") or {}).get("content", "")
-        if isinstance(content, str):
-            text = content.strip()
-        elif isinstance(content, list):
-            text = " ".join(
-                b.get("text", "").strip()
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
-        else:
-            text = ""
-        if not text or text.startswith("<"):
-            continue
-        title = text.replace("\n", " ").strip()[:max_chars]
-        if len(text) > max_chars:
-            title += "..."
-        return title
-    return path.stem
-
-
-def _parse_claude_chat(path: Path) -> tuple[str, dict, str | None]:
-    """
-    Extract user/assistant text turns from a Claude Code session JSONL.
-
-    Returns (text, metadata, launch_dir):
-      - metadata contains session_id, project and session_title for storage as
-        Qdrant payload fields.
-      - launch_dir is the first non-empty `cwd` in the transcript, verbatim (never
-        normalised), or None. It goes to the SQLite `launch_dir` column only, never
-        into the Qdrant payload.
-
-    Skips: meta entries, tool_use blocks, tool_result blocks, thinking blocks,
-    XML-tagged command strings, and file-history-snapshot entries.
-    """
-    import json as _json
-
-    session_id = ""
-    cwd = ""
-    timestamp = ""
-    model = ""
-    git_branch = ""
-    version = ""
-
-    turns: list[str] = []
-
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return "", {}, None
-
-    for raw_line in lines:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        try:
-            entry = _json.loads(raw_line)
-        except _json.JSONDecodeError:
-            continue
-
-        entry_type = entry.get("type", "")
-
-        # Collect session metadata from any entry
-        if not session_id:
-            session_id = entry.get("sessionId", "")
-        if not cwd:
-            cwd = entry.get("cwd", "")
-        if not git_branch:
-            git_branch = entry.get("gitBranch", "")
-        if not version:
-            version = entry.get("version", "")
-
-        if entry_type == "user":
-            if entry.get("isMeta"):
-                continue
-            msg = entry.get("message", {})
-            content = msg.get("content", "")
-            text = ""
-            if isinstance(content, str):
-                c = content.strip()
-                if c and not c.startswith("<"):
-                    text = c
-            elif isinstance(content, list):
-                parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        t = block.get("text", "").strip()
-                        if t:
-                            parts.append(t)
-                text = "\n".join(parts)
-            if text:
-                if not timestamp:
-                    timestamp = entry.get("timestamp", "")
-                turns.append(f"**User**: {text}")
-
-        elif entry_type == "assistant":
-            msg = entry.get("message", {})
-            if not model:
-                model = msg.get("model", "")
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        t = block.get("text", "").strip()
-                        if t:
-                            parts.append(t)
-                text = "\n".join(parts)
-                if text:
-                    turns.append(f"**Claude**: {text}")
-
-    if not turns:
-        return "", {}, None
-
-    project = Path(cwd).name if cwd else "unknown"
-
-    header = (
-        f"# Claude Code Session\n\n"
-        f"Session: {session_id}\n"
-        f"Project: {project}  ({cwd})\n"
-        f"Date: {timestamp}\n"
-        f"Model: {model}\n"
-        f"Branch: {git_branch}\n"
-        f"Version: {version}\n\n"
-        f"---\n\n"
-    )
-
-    body = "\n\n".join(turns)
-    text = header + body
-
-    # --- session_title derivation ---
-    if "projects" not in path.parts:
-        # Not in the Claude Code layout (e.g. a plain notes.jsonl on the NAS). There is no
-        # `.claude` directory or parent session to look up, so the synthesized title is the
-        # only title. This is what such a file got before the Claude Code re-key.
-        session_title = _synthesize_title(path)
-    else:
-        # The .claude directory is found by anchoring on the `projects` component, so the
-        # same code handles main sessions, direct subagents and workflow-depth subagents.
-        dot_claude_dir = claude_dot_claude_dir(path)
-        if "subagents" in path.parts:
-            # Subagent path: .../projects/<mangled>/<uuid>/subagents/[workflows/wf_X/]agent-xxx.jsonl
-            # The parent session is <mangled>/<uuid>.jsonl, whatever the depth below <uuid>.
-            idx = path.parts.index("subagents")
-            session_uuid = path.parts[idx - 1]
-            parent_jsonl = Path(*path.parts[: idx - 1]) / f"{session_uuid}.jsonl"
-            title_map = _build_title_map(dot_claude_dir)
-            parent_title = title_map.get(str(parent_jsonl.resolve())) or _synthesize_title(parent_jsonl)
-            session_title = f"{parent_title} [subagent]"
-        else:
-            # Main session path: .../projects/<mangled>/<uuid>.jsonl
-            title_map = _build_title_map(dot_claude_dir)
-            session_title = title_map.get(str(path.resolve())) or _synthesize_title(path)
-
-    metadata = {
-        FIELD_SESSION_ID:    session_id,
-        FIELD_PROJECT:       project,
-        FIELD_SESSION_TITLE: session_title,
-    }
-    return text, metadata, cwd or None
-
-
-def _parse_opencode_session(
-    path: str, oc_api_url: str, password_env_file: str | None = None
-) -> tuple[str, dict, str | None]:
-    """
-    Fetch an OpenCode 2.x session via its HTTP API and extract user/assistant text turns.
-
-    path is the synthetic key "opencode://{session_id}".
-    oc_api_url is the opencode API base URL (e.g. "http://192.168.1.95:4096").
-    password_env_file names the file holding OPENCODE_SERVER_PASSWORD
-    (opencode.password_env_file; see ragnart/opencode_client.py).
-
-    Routes (OpenCode 2.x, Basic auth):
-      GET /api/session/{id}          -> {"data": {title, time, location.directory, ...}}
-      GET /api/session/{id}/message  -> {"data": [...], "cursor": {"next", ...}}
-        newest-first by default, so we ask for order=asc; cursor.next is set while
-        a page is non-empty, so the walk stops at the first empty page.
-
-    Returns (text, metadata, launch_dir) with session_id and session_title. No `project`
-    field — opencode sessions have no path-derived project (the launch
-    directory is cwd-at-launch metadata, not topic classification). The
-    directory is preserved inside the searchable header body as forensic context.
-    launch_dir is location.directory verbatim, or None when the session has none.
-    It goes to the SQLite `launch_dir` column only, never into the Qdrant payload.
-
-    HTTP, auth and non-JSON errors are RAISED, so the item is marked failed and
-    retried; only a session with no user/assistant text returns ("", {}, None).
-    """
-    # Parse session_id from synthetic path
-    if not path.startswith("opencode://"):
-        return "", {}, None
-    session_id = path[len("opencode://"):]
-    if not session_id:
-        return "", {}, None
-
-    password = load_password(password_env_file)
-
-    # Session metadata (title, created timestamp, launch directory)
-    session = get_json(oc_api_url, f"/api/session/{session_id}", password).get("data", {})
-    session_title = (session.get("title") or "").strip()
-    launched_from = (session.get("location") or {}).get("directory", "") or ""
-    created_ms = (session.get("time") or {}).get("created", 0)
-    created_timestamp = (
-        datetime.fromtimestamp(created_ms / 1000.0).isoformat() if created_ms else ""
-    )
-
-    # All messages, oldest first, walked page by page. The page cap only guards
-    # against a self-referential cursor (200 x 200 = 40,000 messages).
-    messages: list[dict] = []
-    params: dict[str, str] = {"order": "asc", "limit": "200"}
-    for _page_index in range(200):
-        page = get_json(oc_api_url, f"/api/session/{session_id}/message", password, params)
-        items = page.get("data", [])
-        if not items:
-            break
-        messages.extend(items)
-        next_cursor = (page.get("cursor") or {}).get("next")
-        if not next_cursor:
-            break
-        # The cursor carries the order; the server rejects cursor + order together.
-        params = {"cursor": next_cursor, "limit": "200"}
-
-    turns: list[str] = []
-
-    # Extract text turns. 2.x messages are typed by a top-level "type":
-    #   user      -> "text" (the prompt as typed)
-    #   assistant -> "content": [{type: text|reasoning|tool, ...}]; keep only "text"
-    # Everything else (synthetic, system, skill, shell, compaction, idle,
-    # agent/model/location switches) is harness bookkeeping, not conversation.
-    first_user_text = ""
-    for message in messages:
-        message_type = message.get("type", "")
-
-        if message_type == "user":
-            combined_text = (message.get("text") or "").strip()
-            if combined_text and not combined_text.startswith("/"):  # Skip slash commands
-                turns.append(f"**User**: {combined_text}")
-                if not first_user_text:
-                    first_user_text = combined_text
-
-        elif message_type == "assistant":
-            text_parts = [
-                (part.get("text") or "").strip()
-                for part in message.get("content") or []
-                if part.get("type") == "text"
-            ]
-            combined_text = "\n".join(t for t in text_parts if t)
-            if combined_text:
-                turns.append(f"**Assistant**: {combined_text}")
-
-    if not turns:
-        return "", {}, None
-
-    # Synthesise session_title if absent or empty
-    if not session_title:
-        if first_user_text:
-            # Use first non-empty user text (up to 60 chars), stripping leading <
-            text = first_user_text.lstrip("<").replace("\n", " ").strip()[:60]
-            session_title = text + "..." if len(first_user_text) > 60 else text
-        else:
-            session_title = session_id  # Fallback to session_id
-
-    # Build header block. "Launched from" is forensic information about cwd
-    # at session start — NOT a project classification (opencode sessions have
-    # no genuine path-derived project; see schema.py FIELD_PROJECT comment).
-    header = (
-        f"# Opencode Session\n\n"
-        f"Session: {session_id}\n"
-        f"Launched from: {launched_from}\n"
-        f"Date: {created_timestamp}\n"
-        f"Title: {session_title}\n\n"
-        f"---\n\n"
-    )
-
-    body = "\n\n".join(turns)
-    text = header + body
-
-    # No FIELD_PROJECT — opencode points intentionally omit the project field.
-    metadata = {
-        FIELD_SESSION_ID:    session_id,
-        FIELD_SESSION_TITLE: session_title,
-    }
-    return text, metadata, launched_from or None
 
 
 def _parse_pptx(path: Path) -> str:
@@ -677,6 +347,17 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
         raise RuntimeError(f"docling failed: {exc}") from exc
 
 
+def _is_text_like_type(raw_file_type: str) -> bool:
+    """
+    True when a file of this declared type is read directly as UTF-8 text.
+
+    The rule by type alone: docling types and the ipynb and jsonl parsers are not text-like.
+    is_text_like_path() adds the key-prefix rules on top of this, and ingest_content() uses it
+    directly, because an endpoint upload's type comes from its request, not from a file name.
+    """
+    return raw_file_type not in _DOCLING_TYPES and raw_file_type not in {"ipynb", "jsonl"}
+
+
 def is_text_like_path(file_path: str) -> bool:
     """
     True when ingest reads the file directly as UTF-8 text.
@@ -690,8 +371,7 @@ def is_text_like_path(file_path: str) -> bool:
         not file_path.startswith("opencode://")
         # A claude-session key has no file suffix, so without this it would look text-like.
         and not file_path.startswith("claude-session://")
-        and raw_file_type not in _DOCLING_TYPES
-        and raw_file_type not in {"ipynb", "jsonl"}
+        and _is_text_like_type(raw_file_type)
     )
 
 
@@ -768,6 +448,77 @@ def _select_chunks(text: str, file_type: str) -> tuple[list[tuple[str, str]], st
 
 
 # ---------------------------------------------------------------------------
+# Admission rules, shared by ingest_file (NAS and hub items) and ingest_content (endpoint items).
+#
+# Each helper returns the reason an item is ignored, or None when the item passes. The reason
+# text is what the queue (mark_ignored) or the intake row (admission_reason) records, so both
+# paths write the same wording for the same rule.
+# ---------------------------------------------------------------------------
+
+def _admission_limits(rag_cfg: dict) -> tuple[int, float, int]:
+    """
+    Return (max_text_bytes, fffd_threshold, max_chunks) from rag_cfg["admission"].
+
+    Code defaults apply when a key is absent, as ingest_file has always done.
+    """
+    admission_cfg = rag_cfg.get("admission", {})
+    max_text_bytes = admission_cfg.get("max_text_file_size_bytes", 5_000_000)
+    fffd_threshold = admission_cfg.get("fffd_ratio_threshold", 0.005)
+    max_chunks = admission_cfg.get("max_chunks_per_item", 5000)
+    return max_text_bytes, fffd_threshold, max_chunks
+
+
+def _size_cap_reason(size_bytes: int, max_text_bytes: int) -> str | None:
+    """Size cap for a text-like file, checked from its size before it is read at all."""
+    if size_bytes > max_text_bytes:
+        return f"too large: {size_bytes} bytes > {max_text_bytes} byte cap"
+    return None
+
+
+def _replacement_reason(text: str, fffd_threshold: float) -> str | None:
+    """Replacement-character check for a text-like file, on the decoded text. A high ratio means binary."""
+    replacement_ratio = fffd_ratio(text)
+    if replacement_ratio > fffd_threshold:
+        return f"binary: {replacement_ratio:.1%} replacement chars"
+    return None
+
+
+def _printable_reason(text: str) -> str | None:
+    """
+    Printable-ratio gate for parsed text, applied to every item type.
+
+    Documents below GATE_THRESHOLD are binary or corrupt. The rule lives in textquality.py so
+    that ingest and the purge tool cannot drift apart.
+    """
+    printable = printable_ratio(text)
+    if printable < GATE_THRESHOLD:
+        return f"binary content: {printable:.0%} printable chars"
+    return None
+
+
+def _chunk_cap_reason(chunk_count: int, max_chunks: int) -> str | None:
+    """Chunk cap, applied to every item type before any embedding happens."""
+    if chunk_count > max_chunks:
+        return f"too large: {chunk_count} chunks > {max_chunks} chunk cap"
+    return None
+
+
+def item_filter(source_id: str, key: str) -> Filter:
+    """
+    Return the Qdrant filter that selects the points of one item: one source, one key.
+
+    Both conditions are required. A key alone is not enough to name an item, because another
+    source could hold the same key string. The source_id is matched exactly, as stored.
+    """
+    return Filter(
+        must=[
+            FieldCondition(key=FIELD_SOURCE_ID, match=MatchValue(value=source_id)),
+            FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=key)),
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
 # Worker loop
 # ---------------------------------------------------------------------------
 
@@ -819,10 +570,7 @@ async def ingest_file(
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
 
     # Admission caps (ragnart.yaml rag.admission). Code defaults apply when a key is absent.
-    admission_cfg = rag_cfg.get("admission", {})
-    max_text_bytes = admission_cfg.get("max_text_file_size_bytes", 5_000_000)
-    fffd_threshold = admission_cfg.get("fffd_ratio_threshold", 0.005)
-    max_chunks = admission_cfg.get("max_chunks_per_item", 5000)
+    max_text_bytes, fffd_threshold, max_chunks = _admission_limits(rag_cfg)
 
     file_name     = Path(file_path).name
     raw_file_type = Path(file_path).suffix.lstrip(".").lower()
@@ -897,12 +645,10 @@ async def ingest_file(
             if is_text_like:
                 # Size cap is checked from the filesystem before the file is read at all.
                 size_bytes = Path(file_path).stat().st_size
-                if size_bytes > max_text_bytes:
-                    logger.warning("Skipping %s — %d bytes exceeds cap", file_path, size_bytes)
-                    state_db.mark_ignored(
-                        file_path,
-                        f"too large: {size_bytes} bytes > {max_text_bytes} byte cap",
-                    )
+                size_reason = _size_cap_reason(size_bytes, max_text_bytes)
+                if size_reason is not None:
+                    logger.warning("Skipping %s — %s", file_path, size_reason)
+                    state_db.mark_ignored(file_path, size_reason)
                     return
                 # NUL sniff on the raw bytes, before any parsing. Binary files almost
                 # always have a NUL near the start; text files never do.
@@ -920,12 +666,10 @@ async def ingest_file(
         # decoded above, so the file is not read a second time. U+FFFD is what the
         # UTF-8 decoder emits for undecodable bytes, so a high ratio means the file is binary.
         if is_text_like:
-            replacement_ratio = fffd_ratio(text)
-            if replacement_ratio > fffd_threshold:
-                logger.warning(
-                    "Skipping %s — %.1f%% replacement chars", file_path, replacement_ratio * 100,
-                )
-                state_db.mark_ignored(file_path, f"binary: {replacement_ratio:.1%} replacement chars")
+            replacement_reason = _replacement_reason(text, fffd_threshold)
+            if replacement_reason is not None:
+                logger.warning("Skipping %s — %s", file_path, replacement_reason)
+                state_db.mark_ignored(file_path, replacement_reason)
                 return
 
         # For chat sessions, the raw file_name is a meaningless identifier
@@ -972,13 +716,10 @@ async def ingest_file(
         # that crowd out legitimate search results.
         # The ratio rule (and its threshold) lives in ragnart/textquality.py so that
         # ingest and the purge tool cannot drift apart.
-        _printable = printable_ratio(text)
-        if _printable < GATE_THRESHOLD:
-            logger.warning(
-                "Skipping %s — parsed text is %.0f%% printable (binary/corrupt content)",
-                file_path, _printable * 100,
-            )
-            state_db.mark_ignored(file_path, f"binary content: {_printable:.0%} printable chars")
+        printable_reason = _printable_reason(text)
+        if printable_reason is not None:
+            logger.warning("Skipping %s — %s (binary/corrupt content)", file_path, printable_reason)
+            state_db.mark_ignored(file_path, printable_reason)
             return
 
         # ------------------------------------------------------------------
@@ -989,9 +730,10 @@ async def ingest_file(
 
         # Chunk cap applies to every file type. It is checked here, before embedding,
         # so an item that would produce thousands of vectors costs no embedding time.
-        if n > max_chunks:
-            logger.warning("Skipping %s — %d chunks exceeds cap %d", file_name, n, max_chunks)
-            state_db.mark_ignored(file_path, f"too large: {n} chunks > {max_chunks} chunk cap")
+        chunk_reason = _chunk_cap_reason(n, max_chunks)
+        if chunk_reason is not None:
+            logger.warning("Skipping %s — %s", file_name, chunk_reason)
+            state_db.mark_ignored(file_path, chunk_reason)
             return
 
         state_db.set_progress(file_path, f"chunking ({n} chunks)")
@@ -1147,3 +889,304 @@ async def ingest_file(
         logger.error("Ingestion failed for %s: %s", file_path, exc, exc_info=True)
         state_db.mark_failed(file_path, str(exc))
         raise
+
+
+# ---------------------------------------------------------------------------
+# Content-based ingestion for endpoint items (v0.3 session B1)
+#
+# An endpoint item is identified by the source it was submitted to and by its key. The key is an
+# opaque string here: it is never opened as a file, and its prefix never decides the source. The
+# caller passes the source id, taken from the authenticated request. Admission, parsing, chunking,
+# embedding and the point payload follow ingest_file. There is no StateDB: the intake worker
+# records the result on the intake row.
+# ---------------------------------------------------------------------------
+
+# A declared file type becomes the suffix of a temporary link during parsing, so it must be a
+# plain word. A dot or a slash could name a path outside the parse directory.
+_FILE_TYPE_PATTERN = re.compile(r"[a-z0-9]+")
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """
+    What ingest_content did with one endpoint item.
+
+    status:           'completed' (points written, or nothing to write) or 'ignored' (an admission
+                      rule refused the item; reason says which). 'failed' is never returned here:
+                      when ingest_content raises, the intake worker records the request as failed.
+    reason:           the admission reason when ignored, else None.
+    chunk_count:      points written (0 when ignored or empty).
+    content_hash:     MD5 of the uploaded bytes, or of the text as UTF-8. None when no hash was
+                      taken (ignored items and items with no chunks).
+    pipeline_version: the pipeline version the points carry.
+    """
+
+    status: Literal["completed", "ignored", "failed"]
+    reason: str | None
+    chunk_count: int
+    content_hash: str | None
+    pipeline_version: str
+
+
+def _declared_file_type(file_type: str) -> str:
+    """
+    Return a declared file type in canonical form: lowercase, no leading dot, a plain word.
+
+    Raises ValueError for anything else. The declared type is used as a file suffix when the spool
+    file is parsed, so an unchecked value could name a path outside the parse directory.
+    """
+    raw_file_type = file_type.lstrip(".").lower()
+    if not _FILE_TYPE_PATTERN.fullmatch(raw_file_type):
+        raise ValueError(f"invalid file type {file_type!r}: use letters and digits only")
+    return raw_file_type
+
+
+async def _parse_spool(spool_path: str, raw_file_type: str) -> str:
+    """
+    Parse a spool file by its declared file type, not by a file name.
+
+    _parse_to_text() and docling choose a format from the file name, and a spool file has none.
+    So the spool file is linked, inside a temporary directory, to a name whose suffix is the
+    declared type, and the parse runs on that link. The spool file itself is not moved or renamed.
+    The temporary directory is removed when the parse ends, whether or not it succeeded.
+    """
+    # A symlink target is resolved from the link's own directory when it is relative, so the target
+    # is made absolute first.
+    target = Path(spool_path).absolute()
+    with tempfile.TemporaryDirectory(prefix="ragnart-parse-") as link_dir:
+        link_path = Path(link_dir) / f"document.{raw_file_type}"
+        os.symlink(target, link_path)
+        return await asyncio.to_thread(_parse_to_text, str(link_path), raw_file_type)
+
+
+async def _admit_and_parse_spool(
+    spool_path: str,
+    raw_file_type: str,
+    max_text_bytes: int,
+    fffd_threshold: float,
+) -> tuple[str | None, str | None]:
+    """
+    Run the bytes admission checks in ingest_file's order, and parse the spool file.
+
+    Order: size cap, NUL sniff (text-like files only, before any parse), parse, then the
+    replacement-character check (text-like files only). Returns (text, None) when the item
+    passes, or (None, reason) when it is ignored.
+    """
+    text_like = _is_text_like_type(raw_file_type)
+    if text_like:
+        size_reason = _size_cap_reason(Path(spool_path).stat().st_size, max_text_bytes)
+        if size_reason is not None:
+            return None, size_reason
+        nul_reason = sniff_binary_text(Path(spool_path))
+        if nul_reason is not None:
+            return None, nul_reason
+
+    text = await _parse_spool(spool_path, raw_file_type)
+
+    if text_like:
+        replacement_reason = _replacement_reason(text, fffd_threshold)
+        if replacement_reason is not None:
+            return None, replacement_reason
+    return text, None
+
+
+async def ingest_content(
+    *,
+    source_id: str,
+    key: str,
+    owner: str,
+    rag_cfg: dict,
+    qdrant_client: QdrantClient,
+    spool_path: str | None = None,
+    file_type: str | None = None,
+    text: str | None = None,
+    chat_meta: dict | None = None,
+    embed_concurrency: int = 5,
+    modified_at: str | None = None,
+) -> IngestResult:
+    """
+    Parse, chunk, embed and upsert one endpoint item, replacing its earlier points.
+
+    Give exactly one content form:
+      spool_path + file_type: uploaded bytes. The file type is the one the request declared. The
+                              item is stored with source_type 'file' and file_type as declared.
+      text:                   text rendered by the endpoint (a Claude Code session in B1). It is
+                              not parsed. It is stored with source_type 'claude_session' and
+                              file_type 'claude_chat'.
+
+    Args:
+        source_id:   The source the item belongs to, in its stored case. Taken from the
+                     authenticated request by the intake worker, never from the key.
+        key:         The item's key within the source. Matched as a string; never opened.
+        owner:       The owner written to every point (the source's registered owner).
+        rag_cfg:     config["rag"]: embedding model, Ollama URL and rag.admission caps.
+        qdrant_client: Qdrant client for the documents collection.
+        spool_path:  Path of the uploaded bytes (see above). Read, not removed: the caller removes it.
+        file_type:   The declared type of the uploaded bytes, e.g. 'pdf', 'md'.
+        text:        The rendered text (see above).
+        chat_meta:   Optional fields spread into every point: session_id, project, session_title
+                     for chat text. The identity and freshness fields are written after it, so
+                     they always win.
+        embed_concurrency: Max parallel embedding requests for this item.
+        modified_at: The item's modification time as an ISO-8601 UTC string, written unchanged to
+                     every point. The API produces it in the same form ingest_file writes
+                     (datetime.isoformat() of a UTC datetime). None when the caller does not know it.
+
+    Returns:
+        An IngestResult. Admission refusals come back as status 'ignored' with the reason, the
+        same wording ingest_file records. Exceptions (a parse failure, an embedding failure, a
+        Qdrant error) propagate to the caller.
+
+    Raises:
+        ValueError: when neither or both content forms are given, when a spool is given with no
+                    file_type, or when file_type is not a plain word.
+    """
+    if (spool_path is None) == (text is None):
+        raise ValueError("ingest_content needs exactly one of spool_path (bytes) or text")
+    if spool_path is not None and file_type is None:
+        raise ValueError("ingest_content needs file_type with spool_path")
+
+    model      = rag_cfg.get("embedding_model", "bge-m3")
+    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.95:11434/api/embeddings")
+    max_text_bytes, fffd_threshold, max_chunks = _admission_limits(rag_cfg)
+    chat_fields = dict(chat_meta or {})
+
+    # The type stored on the points. Bytes keep their declared type. Text is a rendered chat session.
+    if spool_path is not None:
+        raw_file_type = _declared_file_type(file_type)
+        stored_file_type = raw_file_type
+        source_type = "file"
+    else:
+        raw_file_type = None
+        stored_file_type = "claude_chat"
+        source_type = "claude_session"
+
+    # ------------------------------------------------------------------
+    # Step 0: delete stale points of this item (delete-before-insert), as ingest_file does. It runs
+    # before admission, so an item that is now ignored loses its old points too.
+    # ------------------------------------------------------------------
+    ensure_collection(qdrant_client)
+    qdrant_client.delete(
+        collection_name=DOCUMENTS_COLLECTION,
+        points_selector=FilterSelector(filter=item_filter(source_id, key)),
+    )
+
+    # ------------------------------------------------------------------
+    # Admission and parse
+    # ------------------------------------------------------------------
+    if spool_path is not None:
+        item_text, reason = await _admit_and_parse_spool(
+            spool_path, raw_file_type, max_text_bytes, fffd_threshold,
+        )
+    else:
+        # Rendered text is not parsed and has no size cap, NUL sniff or replacement check, as
+        # ingest_file does for session text.
+        item_text, reason = text, None
+    if reason is not None:
+        logger.warning("Skipping %s — %s", key, reason)
+        return IngestResult("ignored", reason, 0, None, PIPELINE_VERSION_P1)
+
+    # The file name shown on hits: the last part of the key, or the session title for chats.
+    # The key is split as a string. It is not a path.
+    file_name = key.rsplit("/", 1)[-1]
+    if chat_fields.get(FIELD_SESSION_TITLE):
+        file_name = chat_fields[FIELD_SESSION_TITLE]
+
+    if not item_text.strip():
+        logger.warning("Empty document, skipping: %s", key)
+        return IngestResult("completed", None, 0, None, PIPELINE_VERSION_P1)
+
+    reason = _printable_reason(item_text)
+    if reason is not None:
+        logger.warning("Skipping %s — %s (binary/corrupt content)", key, reason)
+        return IngestResult("ignored", reason, 0, None, PIPELINE_VERSION_P1)
+
+    # ------------------------------------------------------------------
+    # Chunk
+    # ------------------------------------------------------------------
+    pairs, strategy = _select_chunks(item_text, stored_file_type)
+    n = len(pairs)
+    reason = _chunk_cap_reason(n, max_chunks)
+    if reason is not None:
+        logger.warning("Skipping %s — %s", file_name, reason)
+        return IngestResult("ignored", reason, 0, None, PIPELINE_VERSION_P1)
+    logger.info("Chunked %s → %d chunks  strategy=%s  file_type=%s", file_name, n, strategy, stored_file_type)
+    if not pairs:
+        logger.warning("No chunks produced, skipping: %s", key)
+        return IngestResult("completed", None, 0, None, PIPELINE_VERSION_P1)
+
+    # ------------------------------------------------------------------
+    # Hash: MD5 of the uploaded bytes, or of the text as UTF-8. Taken before embedding, as
+    # ingest_file takes its hash before building the points.
+    # ------------------------------------------------------------------
+    if spool_path is not None:
+        _size_bytes, content_hash = await asyncio.to_thread(hash_file, spool_path)
+    else:
+        content_hash = hash_text(item_text)
+
+    # ------------------------------------------------------------------
+    # Embed the child texts (as ingest_file does)
+    # ------------------------------------------------------------------
+    child_texts = [child for child, _ in pairs]
+    vectors = await embed_batch(
+        child_texts, model=model, ollama_url=ollama_url, concurrency=embed_concurrency,
+    )
+
+    # ------------------------------------------------------------------
+    # Build the points. The payload follows ingest_file, with the endpoint's identity fields.
+    # ------------------------------------------------------------------
+    now_iso = datetime.now(timezone.utc).isoformat()
+    sparse_ready = _is_sparse_ready(qdrant_client)
+    points = []
+    for chunk_idx, ((child_text, parent_text), vector) in enumerate(zip(pairs, vectors)):
+        if sparse_ready:
+            sparse_indices, sparse_values = embed_sparse(child_text)
+            point_vector = {
+                "": vector,  # "" is the Qdrant key for the unnamed dense vector
+                SPARSE_VECTOR_NAME: SparseVector(indices=sparse_indices, values=sparse_values),
+            }
+        else:
+            point_vector = vector  # dense-only until migration is complete
+
+        points.append(
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=point_vector,
+                payload={
+                    # The chat fields come first, so the identity and freshness fields written
+                    # after them always win. source_id is the one passed in, never one from the key.
+                    **chat_fields,
+                    FIELD_TEXT:        child_text,
+                    FIELD_PARENT_TEXT: parent_text,
+                    FIELD_OWNER:       owner,
+                    FIELD_SOURCE_PATH: key,
+                    FIELD_FILE_NAME:   file_name,
+                    FIELD_FILE_TYPE:   stored_file_type,
+                    FIELD_PAGE:        0,   # page-level tracking: future enhancement
+                    FIELD_CHUNK_INDEX: chunk_idx,
+                    FIELD_TAG:         "",
+                    FIELD_SOURCE_ID:   source_id,
+                    FIELD_PIPELINE_VERSION: PIPELINE_VERSION_P1,
+                    # Endpoint items attach to the global project in B1 (no project publishing yet).
+                    FIELD_PROJECT_ID:  GLOBAL_PROJECT_ID,
+                    FIELD_SOURCE_TYPE: source_type,
+                    FIELD_MODIFIED_AT: modified_at,
+                    FIELD_INGESTED_AT: now_iso,
+                    FIELD_CONTENT_HASH: content_hash,
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Upsert in batches, as ingest_file does (see _UPSERT_BATCH_SIZE for why)
+    # ------------------------------------------------------------------
+    for batch_start in range(0, len(points), _UPSERT_BATCH_SIZE):
+        qdrant_client.upsert(
+            collection_name=DOCUMENTS_COLLECTION,
+            points=points[batch_start : batch_start + _UPSERT_BATCH_SIZE],
+        )
+
+    logger.info(
+        "Ingested %s: %d points  source=%s owner=%s", file_name, len(points), source_id, owner,
+    )
+    return IngestResult("completed", None, len(points), content_hash, PIPELINE_VERSION_P1)

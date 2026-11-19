@@ -23,6 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 OWNER = "tester"
 MAX_DELETE_FRACTION = 0.10
 MISSING_AT = "2026-11-15T00:00:00+00:00"
+# The hub's own sources, as the registry seeds them. Every test here uses NAS-style keys.
+HUB_SOURCE_IDS = {"nas", "claude-linux-shared-nfs", "opencode-k11"}
 
 
 @pytest.fixture
@@ -53,7 +55,9 @@ def _qdrant(points_by_key: dict[str, int], points_by_source: dict[str, int] | No
             source = source_id_for_key(key)
             points_by_source[source] = points_by_source.get(source, 0) + count
 
-    def facet(collection_name, key, exact, limit):
+    def facet(collection_name, key, exact, limit, facet_filter=None):
+        # This mock answers from the given tables and does not apply facet_filter. The hub-scope
+        # filter is tested with a fake that does apply it, in tests/test_reconcile_hub_scope.py.
         table = points_by_key if key == "source_path" else points_by_source
         return FacetResponse(hits=[FacetValueHit(value=k, count=c) for k, c in table.items()])
 
@@ -80,7 +84,9 @@ def _row(state_db: StateDB, path: str) -> dict:
 
 
 def _run(reconcile_module, state_db, client, dry_run: bool = False) -> dict:
-    return reconcile_module.run_reconciliation(state_db, client, dry_run, MAX_DELETE_FRACTION)
+    return reconcile_module.run_reconciliation(
+        state_db, client, dry_run, MAX_DELETE_FRACTION, HUB_SOURCE_IDS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,9 +287,11 @@ def test_per_source_check_matches_when_chunk_sums_equal_points(reconcile_module,
 
     summary = _run(reconcile_module, state_db, client)
 
+    # One entry per hub source, sorted; a hub source with no rows and no points still appears.
     assert summary["sources"] == [
         {"source_id": "claude-linux-shared-nfs", "chunk_sum": 3, "points": 3, "match": True},
         {"source_id": "nas", "chunk_sum": 2, "points": 2, "match": True},
+        {"source_id": "opencode-k11", "chunk_sum": 0, "points": 0, "match": True},
     ]
     assert summary["source_mismatches"] == 0
 
@@ -299,7 +307,11 @@ def test_per_source_mismatch_is_reported_but_changes_neither_repairs_nor_exit_co
     with caplog.at_level(logging.WARNING):
         summary = _run(reconcile_module, state_db, client)
 
-    assert summary["sources"] == [{"source_id": "nas", "chunk_sum": 4, "points": 9, "match": False}]
+    assert summary["sources"] == [
+        {"source_id": "claude-linux-shared-nfs", "chunk_sum": 0, "points": 0, "match": True},
+        {"source_id": "nas", "chunk_sum": 4, "points": 9, "match": False},
+        {"source_id": "opencode-k11", "chunk_sum": 0, "points": 0, "match": True},
+    ]
     assert summary["source_mismatches"] == 1
     assert summary["anomalies"] == []
     assert summary["filled"] == 0 and summary["requeued"] == 0
@@ -317,6 +329,8 @@ def test_per_source_check_uses_the_key_not_the_source_id_column(reconcile_module
 
     assert summary["sources"] == [
         {"source_id": "claude-linux-shared-nfs", "chunk_sum": 5, "points": 5, "match": True},
+        {"source_id": "nas", "chunk_sum": 0, "points": 0, "match": True},
+        {"source_id": "opencode-k11", "chunk_sum": 0, "points": 0, "match": True},
     ]
 
 

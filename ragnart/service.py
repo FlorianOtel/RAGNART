@@ -20,13 +20,12 @@ import yaml
 from fastapi import FastAPI, HTTPException, Query
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from ragnart import search_rag
 from ragnart.cli import FatalError, open_queue_read_only, open_registry_read_only
 from ragnart.collection import ensure_collection, get_client
 from ragnart.registry import RegistryDB
 from ragnart.schema import GLOBAL_PROJECT_ID
 from ragnart.scope import ScopeError, resolve_scope
-from ragnart.search import resolve_max_hits_per_source
+from ragnart.search import resolve_max_hits_per_source, search_rag
 from ragnart.state import StateDB
 
 logging.basicConfig(

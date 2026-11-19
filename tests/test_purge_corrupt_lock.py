@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ragnart.lock import EXIT_LOCK_HELD
+from ragnart.registry import RegistryDB
 from ragnart.schema import FIELD_PARENT_TEXT, FIELD_SOURCE_ID, FIELD_SOURCE_PATH
 from ragnart.state import StateDB
 
@@ -52,6 +53,8 @@ def main_env(purge_corrupt, tmp_path, monkeypatch):
     """
     # Create the SQLite file with the real schema, so the read-only open in main() succeeds.
     StateDB(str(tmp_path / "sqlite" / "rag_state.db")).close()
+    # main() also reads the hub sources from the registry (read-only), so it must exist too.
+    RegistryDB(str(tmp_path / "sqlite" / "hub_registry.db")).close()
 
     client = MagicMock(name="qdrant")
     # One page with one corrupt point. next_offset None ends the scroll.

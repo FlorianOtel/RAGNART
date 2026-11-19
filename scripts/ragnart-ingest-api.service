@@ -1,0 +1,20 @@
+[Unit]
+Description=RAGNART ingestion API (endpoint writes on port 8101; reads GET /v1/items live from Qdrant)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=florian
+WorkingDirectory=/mnt/nfs/Florian/Gin-AI/projects/RAGNART
+Environment=HOME=/home/florian
+# A separate process from ragnart-search.service (port 8100, read-only). It only records intake
+# requests; the hub's intake worker (ragnart-intake.service) applies them under the ingestion lock.
+ExecStart=/home/florian/Gin-AI/.Gin-AI-python-3.12/bin/uvicorn ragnart.ingest_api:app --host 0.0.0.0 --port 8101
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

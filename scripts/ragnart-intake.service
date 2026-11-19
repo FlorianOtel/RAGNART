@@ -1,0 +1,19 @@
+[Unit]
+Description=RAGNART hub intake worker (applies endpoint requests from the ingestion API)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=florian
+WorkingDirectory=/mnt/nfs/Florian/Gin-AI/projects/RAGNART
+Environment=HOME=/home/florian
+# Exits 75 (EXIT_LOCK_HELD) when another writer holds the ingestion lock. That is a skipped slot,
+# not a failure, so systemd treats it as success and the timer's next slot runs normally.
+ExecStart=/home/florian/Gin-AI/.Gin-AI-python-3.12/bin/python -m ragnart.intake_worker
+SuccessExitStatus=75
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,7 @@ points at the existing scanner and parser functions by reference. No logic
 moves here, and nothing is rewired through it yet: the scanner and ingestion
 code still call their own functions directly.
 
-Dependency direction. This module imports ragnart.scanner and ragnart.ingest.
+Dependency direction. This module imports ragnart.scanner, ragnart.chat_render and ragnart.ingest.
 Neither of those may import this module. Doing so would create an import cycle
 and let the connector table drive code it was only meant to describe.
 """
@@ -19,7 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .ingest import _parse_claude_chat, _parse_opencode_session, _parse_to_text
+from .chat_render import _parse_claude_chat, _parse_opencode_session
+from .ingest import _parse_to_text
 from .scanner import scan_claude_chats, scan_nfs_roots, scan_opencode_sessions
 from .schema import (
     SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,

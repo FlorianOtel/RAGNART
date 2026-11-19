@@ -30,6 +30,11 @@ cp "${REPO}/scripts/ragnart-ingest.service" "${UNIT_DIR}/ragnart-ingest.service"
 cp "${REPO}/scripts/ragnart-ingest.timer"   "${UNIT_DIR}/ragnart-ingest.timer"
 cp "${REPO}/scripts/ragnart-opencode-backup.service" "${UNIT_DIR}/ragnart-opencode-backup.service"
 cp "${REPO}/scripts/ragnart-opencode-backup.timer"   "${UNIT_DIR}/ragnart-opencode-backup.timer"
+# Hub units for the ingestion API and the intake worker (v0.3). Copied only, never enabled here:
+# they are enabled by hand during the bring-up, and the intake timer must not start by itself.
+cp "${REPO}/scripts/ragnart-ingest-api.service" "${UNIT_DIR}/ragnart-ingest-api.service"
+cp "${REPO}/scripts/ragnart-intake.service"     "${UNIT_DIR}/ragnart-intake.service"
+cp "${REPO}/scripts/ragnart-intake.timer"       "${UNIT_DIR}/ragnart-intake.timer"
 
 echo "Installing logrotate config (replaces SoHoAI's /etc/logrotate.d/rag-ingest)..."
 install -m 0644 "${REPO}/scripts/ragnart-ingest-logrotate" /etc/logrotate.d/ragnart-ingest

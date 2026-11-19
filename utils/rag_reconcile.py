@@ -32,6 +32,11 @@ exit code: it is a signal for a human, not a row kind.
 Zombie points: facet keys that have no queue row at all. Their points are deleted, unless the
 mass-delete guard trips (see run_reconciliation()).
 
+Hub sources only (v0.3): this tool reads and repairs the hub's own sources, the ones whose kind is
+'hub' in the registry. Every facet and every zombie check is restricted to points whose source_id is
+one of those sources. Points of an endpoint source (a host that submits through the ingestion API)
+are never counted, compared, reported or deleted here: the hub has no queue rows for them.
+
 Usage (run from project root):
     python utils/rag_reconcile.py            # dry-run (default): report only, write nothing
     python utils/rag_reconcile.py --dry-run
@@ -51,10 +56,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchAny, MatchValue
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ragnart.cli import open_registry, open_registry_read_only  # noqa: E402
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.schema import FIELD_SOURCE_ID, FIELD_SOURCE_PATH, source_id_for_key  # noqa: E402
@@ -114,17 +120,22 @@ def classify_row(row: dict, qdrant_point_count: int) -> str:
 # Qdrant and SQLite helpers
 # ---------------------------------------------------------------------------
 
-def count_points_by_source_path(qdrant_client: Any) -> dict[str, int]:
+def count_points_by_source_path(qdrant_client: Any, hub_source_ids: set[str]) -> dict[str, int]:
     """
-    Return {source_path: number of points} for every key that has at least one point.
+    Return {source_path: number of points} for every HUB key that has at least one point.
 
-    One facet call answers for the whole collection. Values with a count of 0 are dropped:
-    they carry no points, so they can neither be a zombie nor a point count for any row.
-    Raises RuntimeError if the facet hit FACET_LIMIT, because the answer may then be partial.
+    One facet call answers for the whole collection, filtered to the hub sources: the filter
+    keeps any endpoint point out of the answer, so it can never be a zombie. Values with a count
+    of 0 are dropped: they carry no points, so they can neither be a zombie nor a point count for
+    any row. Raises RuntimeError if the facet hit FACET_LIMIT, because the answer may then be partial.
     """
     response = qdrant_client.facet(
         collection_name=DOCUMENTS_COLLECTION,
         key=FIELD_SOURCE_PATH,
+        # Hub points only. An endpoint point has no queue row here, so it would look like a zombie.
+        facet_filter=Filter(
+            must=[FieldCondition(key=FIELD_SOURCE_ID, match=MatchAny(any=sorted(hub_source_ids)))]
+        ),
         exact=True,
         limit=FACET_LIMIT,
     )
@@ -204,6 +215,7 @@ def run_reconciliation(
     qdrant_client: Any,
     dry_run: bool,
     max_delete_fraction: float,
+    hub_source_ids: set[str],
 ) -> dict:
     """
     Classify every row, repair what can be repaired, and delete zombie points.
@@ -211,19 +223,31 @@ def run_reconciliation(
     In a dry run nothing is written: the summary reports what would be done. The repair
     counts and the zombie deletes are then 'would' figures.
 
+    Hub scope: hub_source_ids (the registry's kind='hub' sources) limits everything this run
+    looks at. The facet on source_path is filtered to those sources, so the zombie check, the
+    point counts and the mass-delete guard all see hub points only. The per-source check
+    iterates the same hub ids and nothing else. An endpoint source is neither compared nor
+    logged here, and its points are never deleted here.
+
     The mass-delete guard for zombie points is the same arithmetic as the sync's guard in
     ragnart/sync_plan.py (its max_delete_fraction check, limit = fraction x total). The measure is POINTS,
     not keys: the damage a zombie delete does is points removed from the index, and the
     total point count comes free from the same facet, so no extra call is needed. Counting
     keys against completed rows would let one large zombie file look small, and would make
-    a few tiny zombie keys look like a mass deletion.
+    a few tiny zombie keys look like a mass deletion. Under the hub scope, total is the number of
+    HUB points only; the arithmetic itself is unchanged.
 
     The guard tripping does NOT stop the row repairs: those are independent of it. It only
     refuses the zombie deletes, and the run reports the refusal through the summary.
 
     Returns a summary dict, see the keys assembled at the end of this function.
     """
-    points_by_key = count_points_by_source_path(qdrant_client)
+    if not hub_source_ids:
+        # An empty set would match no points, so every queue row would look requeue-able and the
+        # guard would see a zero total. Refuse rather than run on that.
+        raise ValueError("hub_source_ids is empty: refusing to reconcile without a hub scope")
+
+    points_by_key = count_points_by_source_path(qdrant_client, hub_source_ids)
     points_by_source = count_points_by_source_id(qdrant_client)
 
     # Every queue row, whatever its status. A key with a row of any status is not a zombie.
@@ -269,10 +293,11 @@ def run_reconciliation(
     total_points = sum(points_by_key.values())
 
     # Per-source check: completed chunk_count sum against points stored under each source_id.
-    # A WARN only. Computed before the repairs, so it shows the state as found.
+    # A WARN only. Computed before the repairs, so it shows the state as found. Only hub sources
+    # are checked: an endpoint source has no queue rows here, so it would always mismatch.
     sums = chunk_sums_by_source(rows)
     source_checks = []
-    for source_id in sorted(set(sums) | set(points_by_source)):
+    for source_id in sorted(hub_source_ids):
         chunk_sum = sums.get(source_id, 0)
         points = points_by_source.get(source_id, 0)
         matches = chunk_sum == points
@@ -404,11 +429,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if dry_run:
         # The dry-run never takes the lock and never writes: SQLite is opened read-only,
-        # and Qdrant is only read (facet).
+        # and Qdrant is only read (facet). The registry is read-only too. It must already be at
+        # schema version 2 (the sync applies the migration), or hub_source_ids() fails loudly.
+        registry = open_registry_read_only(config)
+        try:
+            hub_source_ids = registry.hub_source_ids()
+        finally:
+            registry.close()
         state_db = StateDB(db_path, read_only=True)
         qdrant_client = get_client(config["rag"]["qdrant_url"], timeout=120)
         try:
-            summary = run_reconciliation(state_db, qdrant_client, True, max_delete_fraction)
+            summary = run_reconciliation(
+                state_db, qdrant_client, True, max_delete_fraction, hub_source_ids
+            )
         finally:
             state_db.close()
         print_report(summary)
@@ -418,10 +451,19 @@ def main(argv: list[str] | None = None) -> int:
     # Under the scheduled run, the run script already holds it and this returns at once.
     acquire_or_exit(lock_path_from_config(config))
 
+    # Under the lock, the write open of the registry is safe. It also applies a pending migration.
+    registry = open_registry(config)
+    try:
+        hub_source_ids = registry.hub_source_ids()
+    finally:
+        registry.close()
+
     state_db = StateDB(db_path)
     qdrant_client = get_client(config["rag"]["qdrant_url"], timeout=120)
     try:
-        summary = run_reconciliation(state_db, qdrant_client, False, max_delete_fraction)
+        summary = run_reconciliation(
+            state_db, qdrant_client, False, max_delete_fraction, hub_source_ids
+        )
     finally:
         state_db.close()
     print_report(summary)

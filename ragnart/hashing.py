@@ -30,3 +30,14 @@ def hash_file(path: str) -> tuple[int, str]:
             digest.update(block)
             size_bytes += len(block)
     return size_bytes, digest.hexdigest()
+
+
+def hash_text(text: str) -> str:
+    """
+    Return the MD5 hex digest of `text` encoded as UTF-8.
+
+    Used for endpoint items that arrive as text (rendered by the endpoint), where there is no
+    file on the hub to hash. The digest is of the text the hub ingests, so an edit to the
+    rendered text changes it.
+    """
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
