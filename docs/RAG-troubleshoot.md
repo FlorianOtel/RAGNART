@@ -2,8 +2,8 @@
 title: "RAGNART — RAG troubleshooting guide"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: metadata backfill entry §2.14; automatic collision resolution §2.14; skipped-root message §2.6 and §2.12); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: sync plan, moves, tombstones and grace period §2.15; reconciliation anomalies and refused zombie deletes §2.16; GET /v1/search 422 §4.8 (smoke and compare tools send scope=all); sync message and La-Familia entries §1, §2.6, §2.12)
-updated_at: 2026-11-16--12-04
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed"); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state troubleshooting guide); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore checks, sync guards, ignored-reason entries, Qdrant 503 and /health behaviour); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048, context-length 500 entry in §2.13); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: OpenCode database backup entry in §3); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: metadata backfill entry §2.14; automatic collision resolution §2.14; skipped-root message §2.6 and §2.12); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: sync plan, moves, tombstones and grace period §2.15; reconciliation anomalies and refused zombie deletes §2.16; GET /v1/search 422 §4.8 (smoke and compare tools send scope=all); sync message and La-Familia entries §1, §2.6, §2.12); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits)
+updated_at: 2026-11-19--20-43
 context: >
   Troubleshooting guide for RAGNART, the RAG retrieval and ingestion stack: Qdrant on
   Server 1 (um690, 192.168.1.93) and the search service, ingestion timer, Ollama bge-m3
@@ -23,13 +23,13 @@ context: >
 | Host | Address | Runs |
 |---|---|---|
 | Server 1 (`um690`) | 192.168.1.93 | Qdrant `:6333` (systemd `qdrant`, storage on local NVMe `/var/lib/qdrant/storage`); SoHoAI gateway (tmux session `SoHoAI`, not a systemd unit) |
-| Server 2 (`NucBoxK11`) | 192.168.1.95 | `ragnart-search.service` `:8100`; `ragnart-ingest.timer` → `ragnart-ingest.service`; Ollama `bge-m3` `:11434`; llama-swap `:8000` serving the reranker at `/v1/rerank` (tmux session `llama-swap`) |
-| NAS | `/mnt/nfs/__Backups/RAGNART--databases/` | `sqlite/rag_state.db`, `logs/`, `qdrant-snapshots/documents/`, `rag-ingest.lock` |
+| Server 2 (`NucBoxK11`) | 192.168.1.95 | `ragnart-search.service` `:8100`; `ragnart-ingest.timer` → `ragnart-ingest.service`; `ragnart-ingest-api.service` `:8101`; `ragnart-intake.timer` → `ragnart-intake.service`; Ollama `bge-m3` `:11434`; llama-swap `:8000` serving the reranker at `/v1/rerank` (tmux session `llama-swap`) |
+| NAS | `/mnt/nfs/__Backups/RAGNART--databases/` | `sqlite/rag_state.db`, `sqlite/hub_registry.db`, `logs/`, `qdrant-snapshots/documents/`, `rag-ingest.lock`, `rag-nas-ingest.lock`, `spool/` |
 
 - Repo: `/mnt/nfs/Florian/Gin-AI/projects/RAGNART`. Every `python utils/...` command below
   runs from the repo root after `source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate`.
 - **Anything that opens `rag_state.db` runs on Server 2 only.** That includes `sqlite3`,
-  `rag_status.py`, `rag_sync_nfs.py`, `rag_ingest_daemon.py`, `rag_reset.py`,
+  `rag_status.py`, `rag_sync_nfs.py`, `rag_reset.py`,
   `rag_purge_corrupt.py` and `scripts/sqlite-qdrant-snapshot.sh`. The DB is in WAL mode,
   whose `-shm` index only works when every connection is on one host (see §2.9).
 - Privileged commands: `sudo …` where a password prompt is acceptable, otherwise
@@ -84,17 +84,20 @@ One run of `ragnart-ingest.service` (`scripts/ragnart-ingest-run.sh`) does, in o
 
 | Step | What | Typical duration |
 |---|---|---|
-| 1 | `rag_sync_nfs.py`: walk every configured root (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`), `~/.claude/projects` and the OpenCode API; plan and apply: queue new/changed files, move renamed files, tombstone files that are gone, purge tombstones older than 24 h | ~10 min |
-| 2 | `rag_ingest_daemon.py --workers 3 --batch 20`: take the NFS lock, parse → chunk → embed → upsert every `pending` file | seconds to hours, depending on the backlog |
-| 3 | `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db` | seconds |
-| 4 | `sqlite-qdrant-snapshot.sh --keep 7` if the newest NAS snapshot is older than 20 h (§3) | ~4–5 min |
+| 1 | `rag_sync_nfs.py`: poll the outcome of the previous run's requests, walk every configured root (`/mnt/nfs/Florian`, `/mnt/nfs/La-Familia`), `~/.claude/projects` and the OpenCode API, plan, reconcile against the hub's listing of each source, and submit to the ingestion API: new/changed files as uploads, renamed files as key changes, gone files as tombstones, tombstones older than 24 h as delete requests | about 10 to 15 min (the three listings take about 15 s) |
+| 2 | `PRAGMA wal_checkpoint(TRUNCATE)` on `rag_state.db`, then on `hub_registry.db` | seconds |
+| 3 | `sqlite-qdrant-snapshot.sh --keep 7` if the newest NAS snapshot is older than 20 h (§3) | ~4–5 min |
 
-The service is killed after `TimeoutStartSec=7200` (2 h). Env overrides for a manual run:
-`RAG_WORKERS`, `RAG_BATCH`, `RAG_LOGFILE`, `RAG_SNAPSHOT_MIN_AGE_H`, `RAG_FORCE_SNAPSHOT=1`.
+The run submits requests; the hub's intake worker (`ragnart-intake.timer`, every 10 minutes,
+`ragnart-intake.service`) parses, chunks, embeds and writes the points. The service is killed after
+`TimeoutStartSec=7200` (2 h). Env overrides for a manual run: `RAG_LOGFILE`, `RAG_SNAPSHOT_MIN_AGE_H`,
+`RAG_FORCE_SNAPSHOT=1`.
 
 Queue states in `ingestion_queue`: `pending` → `processing` → `completed`; a failure goes
 back to `pending` until `retry_count` reaches `max_retries` (5), then `ignored` with
-`skip_reason` set. `failed` rows are reset to `pending` by the next sync.
+`skip_reason` set. `failed` rows are reset to `pending` by the next sync. `processing` means submitted to
+the hub and waiting for its outcome, which the next run's poll reads. The retries are counted over runs,
+one per run.
 
 ### 2.1 Did the last run succeed? Is one running now?
 
@@ -123,35 +126,38 @@ A source dropping to 0, or a jump of hundreds of files under one directory, is t
 
 | Symptom | Check | Cause | Fix |
 |---|---|---|---|
-| `ActiveState=activating` for close to 2 h | `tail -f …/logs/rag-ingest.log`; `python utils/rag_status.py --watch /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log` | Large backlog, or a slow Qdrant / Ollama call | Let it hit the 2 h cap; the next slot continues. For a big backlog run the daemon by hand (below). |
-| Rows stuck in `processing` | `python utils/rag_status.py` | Daemon was killed mid-file | Nothing: `crash_recovery()` resets them to `pending` at the next daemon start. |
+| `ActiveState=activating` for close to 2 h | `tail -f …/logs/rag-ingest.log` | A large scan, or a slow hub (the listing or an upload) | Let it hit the 2 h cap; the next slot continues. The intake worker drains the requests on its own timer. |
+| Rows stuck in `processing` | `python utils/rag_status.py`; `curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8101/v1/status/<request_id>` | The request is still waiting in the hub's intake table, or the intake worker is not running | Nothing, when the intake queue is draining: the next run's poll closes the row (`completed`, `failed`, `ignored`). A request the hub no longer knows (404) is marked `failed` and sent again. Check `systemctl status ragnart-intake.timer ragnart-intake.service`. |
 | Run started late after a reboot | `systemctl list-timers` | `Persistent=true` fires a missed slot at boot | Expected. |
 
 Manual run (Server 2, when `ActiveState` is `inactive`):
 
 ```bash
-# Whole pipeline exactly as the timer runs it:
+# The NAS side exactly as the timer runs it:
 sudo systemctl start ragnart-ingest.service
-# Or only the daemon, logging to the shared log:
-python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
-  --log-file /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
+# Or only the sync, logging to the shared log:
+python utils/rag_sync_nfs.py 2>&1 | tee -a /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
+# Apply the waiting requests now (instead of waiting for the intake timer):
+python -m ragnart.intake_worker            # --workers 1 for a gentler load on Ollama
 ```
 
-`--workers` and `--batch` are both required. GPU embedding (Ollama on Server 2):
-`--workers 3 --batch 20`. CPU embedding: `--workers 1 --batch 5`.
+The intake worker's `--workers` (default 3) is the number of requests applied at once; with CPU embedding
+use `--workers 1`. The Ollama concurrency per item is fixed at 5.
 
 ### 2.3 "another writer holds the ingestion lock" (exit 75)
 
-**Symptom.** A run, a sync, the daemon, a purge, a reset or the snapshot script exits with
-status 75 and prints one line to stderr:
+**Symptom.** A NAS run, a sync, the intake worker, a reset or the snapshot script exits with
+status 75 and prints one line to stderr, naming the lock path (`rag-ingest.lock` for the index lock,
+`rag-nas-ingest.lock` for the NAS-ingestion lock):
 
 ```
-ragnart: another writer holds the ingestion lock (/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock): pid N on HOST, <command>, since <time>
+ragnart: another writer holds the ingestion lock (<path>): pid N on HOST, <command>, since <time>
 ```
 
-A timer run shows the same line in `journalctl -u ragnart-ingest.service`, and the unit is
-marked failed with status 75. Nothing is written: the writer exits before its first write.
-The next scheduled slot runs normally.
+A timer run of `ragnart-ingest.service` or `ragnart-intake.service` shows the same line in its journal;
+systemd counts exit 75 as success for both units (`SuccessExitStatus=75`), so a skipped slot is not a
+failure. Nothing is written: the writer exits before its first write. The next scheduled slot runs normally.
+The snapshot takes both locks, index first; it is skipped (exit 75) while either is held.
 
 **Cause.** Only one index writer may hold the lock at a time, on any host. The writers and the
 lock are described in `docs/RAG-strategy.md` §5.6. The holder keeps the lock until it exits; a
@@ -162,6 +168,7 @@ second writer does not wait.
 ```bash
 # The lock file holds one line: the holder's pid, host, command and start time.
 cat /mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock
+cat /mnt/nfs/__Backups/RAGNART--databases/rag-nas-ingest.lock
 
 # Is that pid still running? Run this on the host named in the line.
 ps -o pid,lstart,args -p <pid>
@@ -170,11 +177,12 @@ ps -o pid,lstart,args -p <pid>
 # (`flock --nonblock` is not reliable on this Synology NFSv4.1 mount).
 ~/Gin-AI/.Gin-AI-python-3.12/bin/python -c "
 import fcntl
-f = open('/mnt/nfs/__Backups/RAGNART--databases/rag-ingest.lock', 'a')
-try:
-    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print('lock free')
-except BlockingIOError:
-    print('lock HELD')
+for name in ('rag-ingest.lock', 'rag-nas-ingest.lock'):
+    f = open('/mnt/nfs/__Backups/RAGNART--databases/' + name, 'a')
+    try:
+        fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print(name, 'lock free')
+    except BlockingIOError:
+        print(name, 'lock HELD')
 "
 ```
 
@@ -212,7 +220,8 @@ Work down the layers. Steps 1–2 run on Server 2.
    | Status | Meaning | Fix |
    |---|---|---|
    | no row | The scanner did not see it | Go to step 3 |
-   | `pending` | Not processed yet | Wait for the next slot, or run the daemon (§2.2) |
+   | `pending` | Not submitted yet | Wait for the next slot, or run the sync (§2.2) |
+   | `processing` | Submitted, waiting for the hub | Wait for the intake timer, or run `python -m ragnart.intake_worker`; the next sync's poll closes the row |
    | `ignored`, `skip_reason` = `binary content: NN% printable chars` | Parsed text was under 85 % printable (scanned or encrypted PDF, OLE2 `.pptx`, garbage) | Fix or replace the file; a changed mtime re-queues it automatically |
    | `ignored`, other reason | 5 attempts failed; `skip_reason` is the last error | Fix the cause, then re-queue (§2.10) |
    | `completed` | Points should exist | Go to step 4 |
@@ -334,11 +343,10 @@ ping -c 5 192.168.1.93
 
 **Cause / fix:**
 
-- Every ingest first deletes the file's old points by `source_path`. Without the keyword
-  index this is a scan over millions of points and exceeds the client timeout (60 s; 120 s
-  in `rag_sync_nfs.py`). `ensure_collection()` creates the index on every process start;
-  if it is missing, any daemon or service start recreates it, and Qdrant builds it in the
-  background.
+- Every ingest first deletes the item's old points by `source_id` and `source_path`. Without the keyword
+  index this is a scan over millions of points and exceeds the client timeout (60 s).
+  `ensure_collection()` creates the index on every process start; if it is missing, any intake-worker or
+  service start recreates it, and Qdrant builds it in the background.
 - A `yellow` collection (large segment merge after bulk deletes or a big file) can stall
   single requests. Failed files go back to `pending` and are retried on later runs; for bulk
   maintenance wait with `python utils/qdrant_status.py --watch`.
@@ -374,7 +382,10 @@ ssh 192.168.1.93 "pgrep -af 'rag_|ragnart'"
 - `integrity_check` reports errors → restore the DB from the newest snapshot pair:
   §8 / `docs/RAG-strategy.md` §9.4 (state-DB-only restore). Restore only the main `.db`
   file, delete `rag_state.db-wal` and `rag_state.db-shm`, then run
-  `python utils/rag_sync_nfs.py --user florian` to reconcile.
+  `python utils/rag_sync_nfs.py --user florian`: the sync and its reconciliation compare the restored rows
+  with the hub's listing and submit the gap. With no usable copy, rebuild the file from the hub:
+  `python utils/rag_sync_nfs.py --rebuild-from-hub` (about 10 minutes and 8 GB of memory; it refuses unless
+  the state database has no rows).
 - Prevention: every tool that opens the DB runs on Server 2 (§0). `rag_purge_corrupt.py`
   opens it read-only (`mode=ro`), but still belongs on Server 2.
 
@@ -386,8 +397,8 @@ Server 2, no ingestion run active:
 sqlite3 /mnt/nfs/__Backups/RAGNART--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL, error_msg=NULL
     WHERE file_path = '/exact/path/to/file';"
-python utils/rag_ingest_daemon.py --workers 1 --batch 5 \
-  --log-file /mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log
+python utils/rag_sync_nfs.py              # submits the pending row
+python -m ragnart.intake_worker --workers 1
 ```
 
 Touching the file on disk (`touch /path/to/file`) has the same effect at the next sync,
@@ -431,8 +442,8 @@ systemctl restart ollama`. Failed files are retried by the next runs.
 - `Deletion phase SKIPPED: root(s) not scannable this run: …`, or
 - `Deletion phase SKIPPED: N completed file(s) would be tombstoned, more than 10% of the M completed rows …`.
 
-Nothing was deleted. Queueing of new and modified files still ran, and the ingest daemon
-still ran (`docs/RAG-strategy.md` §8.2). The ingestion unit ends failed.
+Nothing was deleted. Queueing of new and modified files and their submission still ran, and the WAL
+checkpoints and the snapshot still ran (`docs/RAG-strategy.md` §8.2). The ingestion unit ends failed.
 
 **Check:**
 
@@ -480,8 +491,8 @@ nothing (§2.15).
 
 The admission rules are in `docs/RAGNART-design.md` §5. The sync re-queues an `ignored`
 row only when its file's mtime changes. A change to a cap in `ragnart.yaml` applies to new and
-changed files. Existing `ignored` and `completed` rows are re-checked with
-`utils/rag_purge_rescan.py` (`docs/RAG-strategy.md` §8.5).
+changed files. Existing `ignored` and `completed` rows are listed with
+`utils/rag_purge_rescan.py`, a report (`docs/RAG-strategy.md` §8.5).
 
 To see the reason for each ignored file:
 
@@ -590,17 +601,29 @@ tombstones nothing, removes no stale rows and exits 1. Moves still apply. The `-
 `mass-delete guard tripped (tombstones refused): yes`. Before overriding, find out why so many files vanished
 (§2.6, §2.12). If the change is intended, run the sync with `--allow-mass-delete`.
 
-### 2.16 Reconciliation reports an anomaly or refuses the orphan delete
+### 2.16 Reconciliation sends an item again, corrects it, or refuses an orphan delete
 
-Reconciliation (`docs/RAG-strategy.md` §5.8) runs at the end of every scheduled run. Its output sits in
-the ingestion log, after `--- rag_reconcile.py --apply ---`. It never fails the unit. When it exits 1,
-the run script logs `WARN: reconciliation exited non-zero — see log above`.
+Reconciliation (`docs/RAG-strategy.md` §5.8) runs inside every `rag_sync_nfs.py` run, after the scan and before the
+submit, for each NAS-side source. It compares `rag_state.db` with the hub's listing (`GET /v1/items`) and acts only
+through API requests; it never writes Qdrant. Each source ends with one summary line, `<source>: reconcile {counts}`,
+and the run summary prints the same counts under `Reconcile:`.
 
 | Log line | Meaning | What to check |
 |---|---|---|
-| `Reconciliation anomaly, not repaired: <path> chunk_count=N points=M` (ERROR) | More points than the row records (M > N), or points under a `chunk_count` of 0. Nothing was changed. | Count the points under that key (below). Then re-queue the row (§2.10). Ingestion deletes every point under a key before it writes new ones, so the count comes back consistent. |
-| `Zombie points, no queue row: <key> points=N` (WARN) | Points exist under a key with no queue row of any status. For example, a row removed by hand or by a reset. | If the key is a file that should be indexed, `ragnart ls-files <path>` shows its state. Otherwise nothing is needed: the next run deletes these points. |
-| `Zombie delete REFUSED: N zombie point(s) exceed X% of the M total points (limit L). No points were deleted.` (ERROR) | The mass-delete guard for zombie points. Measured in points, not keys. | Read the `Zombie points` WARN lines to see which keys carry them. Do not delete by hand until the cause is clear. The row repairs in the same run still applied. |
+| `<source>: N orphan(s) on the hub, but the local state holds no completed row for this source; no delete sent` (WARNING) | Empty-state guard: the state database has no completed row for the source, as after a lost or reset `rag_state.db`. | Do not delete by hand. Rebuild the rows (`python utils/rag_sync_nfs.py --rebuild-from-hub`), or restore `rag_state.db` from the snapshot triple. |
+| `<source>: N orphan(s) on the hub, more than the mass-delete limit L (P% of C completed rows of this source); no delete sent. …` (WARNING) | Mass-delete guard, per source: more orphans than `rag.sync.max_delete_fraction` of this source's completed rows. Nothing was deleted. | Find why the rows vanished (a reset, a lost or restored state DB, a key change). `--dry-run` shows `orphan_would_delete` and `orphan_guard_tripped`. |
+| `<source>: deleted orphan <key> (no local row)` | A hub item with no row in the state DB was deleted. | Normally nothing. |
+| `<source>: orphan <key> not deleted (retried next run): <error>` (WARNING) | The delete request failed. | `systemctl status ragnart-ingest-api.service`. |
+| `<source>: <key> is not listed by the hub; submitting it again` | A completed row whose file is on disk has no points on the hub, for example a hub write that failed after the request was accepted. The row goes back to pending and is sent in the same run. | Normally nothing. If the same key returns every run, check the intake request's error (`/v1/status/<id>`). |
+| `<source>: N item(s) on an older pipeline version; M resubmitted this run, K deferred` | Items ingested by an older pipeline version are sent again, at most `rag.nas_ingest.resubmit_batch_size` (200) per run; the rest wait for the next runs. | Expected after a pipeline-version change; the count falls run by run. |
+| `<source>: corrected <key> on the hub: ['owner', 'project_id']` | The hub's `owner` or `project_id` differed from the state DB; a `change_metadata` request was sent. | Normally nothing. Many at once point to a wrong owner mapping or project markers. |
+| `<source>: metadata of <key> not corrected (retried next run): <error>` (WARNING) | That request failed. | The ingestion API. |
+| `<source>: <key> has points that disagree on [...]` (WARNING) | The item's points carry different values of a listed field. | Re-send the item (touch the file, or reset its row to pending), which rewrites all its points. |
+| `<source>: the hub listing could not be read; reconcile skipped this run: <error>` (ERROR) | `GET /v1/items` failed. The other sources still reconcile. | The API, and the source's secret (`/v1/info` returns 401 for a wrong one). |
+| `<source>: the hub did not answer the reconcile info call; reconcile skipped: <error>` (ERROR) | `GET /v1/info` failed. | As above. |
+
+`missing_zero_chunks_skipped` in the counts is informational: completed rows with zero chunks (empty transcripts,
+empty notebooks) have no points, so the hub cannot list them, and they are left alone.
 
 **Count the points under one key** (Server 2, read-only; the collection is `documents` on Server 1):
 
@@ -613,11 +636,9 @@ sqlite3 "$DB" "SELECT status, chunk_count, pipeline_version, missing_since FROM 
   WHERE file_path = '/exact/path/to/file';"
 ```
 
-**Re-run.** `python utils/rag_reconcile.py` (or `--dry-run`) reports every kind without writing, and it
-is safe while the timer runs. `--apply` takes the ingestion lock, so it exits 75 and names the holder
-while a run is active (§2.3). Anomalies are never repaired, so `--apply` alone does not clear one: it
-must be fixed as above. The exit code is `0` when no anomaly remains and the guard did not trip, and `1`
-otherwise.
+**Re-run.** `python utils/rag_sync_nfs.py --dry-run` reads the live hub, prints the counts for each rule per source,
+sends nothing and writes nothing. It takes no lock, so it is safe while the timers run. On a settled corpus every rule
+shows zero except `missing_zero_chunks_skipped`.
 
 ---
 
@@ -778,19 +799,17 @@ embeddings that score in the same band as real content. New ingests are protecte
 source has no queue row, are not.
 
 ```bash
-# Server 2. Report only (default): [N pts] IN_DB/NOT_IN_DB ratio path
-python utils/rag_purge_corrupt.py --dry-run --user florian
-python utils/rag_purge_corrupt.py --dry-run --threshold 0.75 --save /tmp/corrupt_paths.txt
-# Delete corrupt points whose source file no longer exists on disk
-python utils/qdrant_status.py && python utils/rag_purge_corrupt.py --confirm
-# Also delete when the file still exists (re-ingesting it would recreate them -- fix or
-# exclude the file first)
-python utils/rag_purge_corrupt.py --confirm --force
+# Server 2. Report only: [N pts] IN_DB/NOT_IN_DB ratio path
+python utils/rag_purge_corrupt.py --user florian
+python utils/rag_purge_corrupt.py --threshold 0.75 --save /tmp/corrupt_paths.txt
+python utils/rag_purge_corrupt.py --source nas        # one source
 ```
 
-`IN_DB` rows can also be cleaned by removing or renaming the file and running a sync;
-`NOT_IN_DB` rows can only be removed with `--confirm`. Run `--confirm` only when
-`qdrant_status.py` reports green; it deletes with `wait=true` and retries on Qdrant 500s.
+The tool reports and deletes nothing (it has no `--confirm`, `--force` or `--dry-run`). `IN_DB` rows are
+cleaned by removing or renaming the file and running a sync, which sends the delete after the grace period. A
+`NOT_IN_DB` item (points with no queue row) is an orphan: the next sync's reconciliation deletes it on the
+hub, under the guards of `docs/RAG-strategy.md` §5.8; check `python utils/qdrant_status.py` is green before a
+large delete drains.
 
 ### 4.5 Results are not reranked (no `rerank_score`), or ordering got worse
 
@@ -944,7 +963,7 @@ python utils/qdrant_status.py --watch 30   # poll until green and lag 0
 
 - **yellow**: a segment merge is running (after bulk deletes or a large ingest). Single
   requests may time out (`timed out after 0ns` on locked segments). Wait for green before
-  bulk maintenance (`rag_purge_corrupt.py --confirm`, large re-ingests).
+  bulk maintenance (a large delete drain by the intake worker, large re-ingests, `utils/rag_source_remove.py --apply`).
 - **green with lag > 0**: idle. Vacuum runs only when a segment has ≥ 20 % deleted
   vectors, so spread-out deletes leave a stable lag; harmless.
 - On this hybrid collection the "Indexed" figure counts dense **and** sparse vectors, so
@@ -968,7 +987,9 @@ python utils/qdrant_status.py --watch 30   # poll until green and lag 0
 
 | What | Where | How |
 |---|---|---|
-| Ingestion runs (sync, daemon, checkpoint, snapshot) | `/mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log` (+ `.1.gz` … `.7.gz`) | `grep -E ' (ERROR|WARNING):'`; run markers `=== RAG ingestion starting/complete ===`; live: `python utils/rag_status.py --watch <log>` |
+| Ingestion runs (sync, checkpoints, snapshot) | `/mnt/nfs/__Backups/RAGNART--databases/logs/rag-ingest.log` (+ `.1.gz` … `.7.gz`) | `grep -E ' (ERROR|WARNING):'`; run markers `=== RAG ingestion starting/complete ===`; live: `tail -f <log>` |
+| Hub intake (the points are written here) | journal of `ragnart-intake.service` (Server 2) | `ssh root@localhost 'journalctl -u ragnart-intake.service --since today --no-pager'` |
+| Ingestion API | journal of `ragnart-ingest-api.service` (Server 2) | `ssh root@localhost 'journalctl -u ragnart-ingest-api.service --since -1h --no-pager'` |
 | Ingestion stdout/stderr, tracebacks, "No pending files" | journal of `ragnart-ingest.service` (Server 2) | `ssh root@localhost 'journalctl -u ragnart-ingest.service --since today --no-pager'` |
 | Search requests, reranker fallbacks, Qdrant connect at start | journal of `ragnart-search.service` (Server 2) | `ssh root@localhost 'journalctl -u ragnart-search.service --since -1h --no-pager'` |
 | Queue state | `sqlite/rag_state.db` (Server 2 only) | `python utils/rag_status.py [--user florian] [--ignored] [--list-pending 50]` |
@@ -990,9 +1011,9 @@ Points that apply here:
   `/mnt/nfs/__Backups/RAGNART--databases/qdrant-snapshots/documents/`; the DB copy was
   taken right after the WAL checkpoint, so only the main `.db` file is needed. Delete any
   `rag_state.db-wal` / `-shm` before the first open.
-- Stop `ragnart-ingest.timer` first, and keep `ragnart-search.service` from recreating an
+- Stop `ragnart-ingest.timer`, `ragnart-intake.timer` and `ragnart-ingest-api.service` first, and keep `ragnart-search.service` from recreating an
   empty `documents` collection (§5.3) while Qdrant is being restored.
-- Afterwards run `python utils/rag_sync_nfs.py --user florian` and the daemon (§2.2) to
+- Afterwards run `python utils/rag_sync_nfs.py --user florian` and the intake worker (`python -m ragnart.intake_worker`, §2.2) to
   pick up everything changed since the snapshot; ingestion is idempotent.
 - `utils/rag_reset.py [--user OWNER] [--yes]` resets the queue to `pending` (all rows, or one
   owner) for a full re-ingest. A full reset refuses when `documents` is an alias: it exits
