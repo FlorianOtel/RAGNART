@@ -15,7 +15,7 @@ Steps. Each one is re-runnable.
                                    that does not exist is 'absent'), what --apply would copy,
                                    and the registry state if the registry file exists.
 
-    --apply                        Under the ingestion lock. Opens StateDB (this applies queue
+    --apply                        Under both ingestion locks, index then NAS. Opens StateDB (this applies queue
                                    migration 3, the source_id column, if it is still pending)
                                    and RegistryDB (creates the file if needed). Then:
                                    1. Refuses if project_links or source_links has rows. Those
@@ -66,7 +66,11 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ragnart.cli import registry_db_path, state_db_path  # noqa: E402
-from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
+from ragnart.lock import (  # noqa: E402
+    acquire_or_exit,
+    lock_path_from_config,
+    nas_ingest_lock_path_from_config,
+)
 from ragnart.registry import RegistryDB  # noqa: E402
 from ragnart.schema import SOURCE_ID_NAS  # noqa: E402
 from ragnart.state import StateDB  # noqa: E402
@@ -426,8 +430,11 @@ def main(argv: list[str] | None = None) -> int:
         print_report(report)
         return exit_code(report)
 
-    # Apply: take the single-writer ingestion lock before any database is opened for writing.
+    # Apply: take both single-writer ingestion locks before any database is opened for writing.
+    # The index lock comes first, then the NAS lock. This tool writes rag_state.db, which the
+    # NAS run owns, so it needs both. Same order as every other writer, so no deadlock.
     acquire_or_exit(lock_path_from_config(config))
+    acquire_or_exit(nas_ingest_lock_path_from_config(config))
     state_db = StateDB(state_path)
     registry = RegistryDB(registry_path)
     try:

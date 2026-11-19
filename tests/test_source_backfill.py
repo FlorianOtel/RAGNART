@@ -298,22 +298,54 @@ def test_refusal_is_reported_by_the_dry_run_too(backfill, state_db):
     assert backfill.exit_code(summary) == 1
 
 
-def test_main_apply_takes_the_lock_before_writing(backfill, tmp_path, monkeypatch):
-    StateDB(str(tmp_path / "sqlite" / "rag_state.db")).close()
-    qdrant = FakeQdrant(_points())
-    lock_mock = MagicMock(name="acquire_or_exit")
-    config = {
-        "rag": {"qdrant_url": "http://unused:6333", "ingest_lock": str(tmp_path / "rag.lock")},
+def _apply_config(tmp_path):
+    """A config with both lock keys. Both are required by the apply path."""
+    return {
+        "rag": {
+            "qdrant_url": "http://unused:6333",
+            "ingest_lock": str(tmp_path / "rag.lock"),
+            "nas_ingest": {"lock": str(tmp_path / "rag-nas.lock")},
+        },
         "db_base_path": str(tmp_path),
     }
-    monkeypatch.setattr(backfill.yaml, "safe_load", lambda handle: config)
+
+
+def test_main_apply_takes_the_index_lock_then_the_nas_lock_before_writing(backfill, tmp_path, monkeypatch):
+    StateDB(str(tmp_path / "sqlite" / "rag_state.db")).close()
+    qdrant = FakeQdrant(_points())
+    # Each stub returns None, which is what acquire_or_exit returns under an ancestor's lock.
+    taken = []
+    monkeypatch.setattr(backfill.yaml, "safe_load", lambda handle: _apply_config(tmp_path))
     monkeypatch.setattr(backfill, "get_client", lambda url, timeout=60: qdrant)
-    monkeypatch.setattr(backfill, "acquire_or_exit", lock_mock)
+    monkeypatch.setattr(backfill, "acquire_or_exit", lambda path: taken.append(path))
 
     assert backfill.main(["--apply"]) == 0
 
-    lock_mock.assert_called_once()
+    assert taken == [str(tmp_path / "rag.lock"), str(tmp_path / "rag-nas.lock")]
     assert len(qdrant.set_payload_calls) == 3
+
+
+def test_main_apply_with_nas_lock_held_exits_75_and_writes_nothing(backfill, tmp_path, monkeypatch):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    StateDB(str(tmp_path / "sqlite" / "rag_state.db")).close()
+    qdrant = FakeQdrant(_points())
+    nas_lock = str(tmp_path / "rag-nas.lock")
+
+    # The index lock is free. The NAS lock is held, so main() must stop before any write.
+    def _nas_held(lock_path):
+        if lock_path == nas_lock:
+            sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(backfill.yaml, "safe_load", lambda handle: _apply_config(tmp_path))
+    monkeypatch.setattr(backfill, "get_client", lambda url, timeout=60: qdrant)
+    monkeypatch.setattr(backfill, "acquire_or_exit", _nas_held)
+
+    with pytest.raises(SystemExit) as exc:
+        backfill.main(["--apply"])
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    assert qdrant.set_payload_calls == []
 
 
 def test_print_report_covers_dry_run_refusal_and_apply(backfill, state_db, capsys):

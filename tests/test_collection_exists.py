@@ -227,9 +227,13 @@ def main_env(rag_reset, queue_db, monkeypatch, tmp_path):
     monkeypatch.setattr(
         rag_reset.yaml,
         "safe_load",
-        # rag.ingest_lock is required by lock_path_from_config(), which main() calls before any write.
+        # rag.ingest_lock and rag.nas_ingest.lock are both required by main() before any write.
         lambda f: {
-            "rag": {"qdrant_url": "http://unused:6333", "ingest_lock": str(tmp_path / "rag-ingest.lock")},
+            "rag": {
+                "qdrant_url": "http://unused:6333",
+                "ingest_lock": str(tmp_path / "rag-ingest.lock"),
+                "nas_ingest": {"lock": str(tmp_path / "rag-nas-ingest.lock")},
+            },
             "db_base_path": str(tmp_path),
         },
     )
@@ -295,6 +299,41 @@ def test_main_with_lock_held_exits_with_constant_and_resets_nothing(
     main_env.delete.assert_not_called()
     main_env.delete_collection.assert_not_called()
     # No SQLite write either: every row keeps its original status.
+    assert _statuses(queue_db) == ["completed", "completed", "completed"]
+
+
+def test_main_apply_takes_the_index_lock_then_the_nas_lock(rag_reset, queue_db, main_env, monkeypatch, tmp_path):
+    # Both locks are taken on the apply path, index first, then NAS. Each stub returns None,
+    # which is what acquire_or_exit returns for a lock an ancestor already holds.
+    taken = []
+    monkeypatch.setattr(rag_reset, "acquire_or_exit", lambda path: taken.append(path))
+    monkeypatch.setattr("sys.argv", ["rag_reset.py", "--user", "florian", "--yes"])
+
+    rag_reset.main()
+
+    assert taken == [str(tmp_path / "rag-ingest.lock"), str(tmp_path / "rag-nas-ingest.lock")]
+    main_env.delete.assert_called()
+
+
+def test_main_with_nas_lock_held_exits_75_before_any_write(rag_reset, queue_db, main_env, monkeypatch, tmp_path):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    # The index lock is free. The NAS lock is held by the NAS run, so main() must stop before any write.
+    nas_lock = str(tmp_path / "rag-nas-ingest.lock")
+
+    def _nas_held(lock_path):
+        if lock_path == nas_lock:
+            sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(rag_reset, "acquire_or_exit", _nas_held)
+    monkeypatch.setattr("sys.argv", ["rag_reset.py", "--yes"])
+
+    with pytest.raises(SystemExit) as exc:
+        rag_reset.main()
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    main_env.delete_collection.assert_not_called()
+    main_env.delete.assert_not_called()
     assert _statuses(queue_db) == ["completed", "completed", "completed"]
 
 

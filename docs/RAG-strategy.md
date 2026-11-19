@@ -2,8 +2,8 @@
 title: "RAGNART — RAG strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B1 proposal revised after B2: endpoint host, spool, units, §8.8 sources and secrets, §9.4 restore order)
-updated_at: 2026-11-19--20-48
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule); Claude Code (Claude Haiku 5.5, 2026-11-13 -- RAGNART v0.1 move: name and path corrections only, content unchanged); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- rewritten as a current-state reference); Claude Code (Claude Haiku 5.5, 2026-11-14 -- .ragignore inclusion and exclusion, admission, sync guards, rescan tool); Claude Code (Claude Haiku 5.5, 2026-11-14 -- Ollama context length 2048 and rejection of over-length input); Claude Code (Claude Haiku 5.5, 2026-11-14 -- global and per-directory exclusion files paragraph); Claude Code (Claude Haiku 5.5, 2026-11-14 -- ls-files accepts <path> arguments in §8.3); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A: continuous worker pool, max_hits_per_source, OpenCode database backup §9.6); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: schema version and v2 columns §5.1, payload fields §4.3, Claude Code session keys §2.4, metadata backfill runbook §5.7; one item per session uuid §2.4 and §5.3; collision handling and snapshot step §5.7); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: ragnart project markers and attachment §5.1, plan-then-apply sync, moves and tombstones §5.3, scope and GET /v1/projects §6.4, collapse by content_hash §6.1, reconciliation §5.8, La-Familia in every scheduled run §2.1 and §8.2); Claude Code (Claude Fable 5.2, 2026-11-16 -- §-table of state tables: grants version renumbered to v0.6); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved v0.3 session A proposal: §1.3 and §9 restore triples with hub_registry.db, copies inspected with immutable=1); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B2: NAS ingestion on the ingestion API, two locks, reconciliation on the ingestion side, intake worker; operator-approved edits); Claude Code (Claude Opus 5.5, 2026-11-19 -- v0.3 session B1 proposal revised after B2: endpoint host, spool, units, §8.8 sources and secrets, §9.4 restore order); Claude Code (Claude Opus 5.5, 2026-11-19 -- §5.6: reset and the backfill/migrate tools take both locks)
+updated_at: 2026-11-19--20-55
 context: >
   Current-state reference for RAGNART, the self-hosted RAG retrieval service
   (repository /mnt/nfs/Florian/Gin-AI/projects/RAGNART). It describes how the
@@ -657,8 +657,6 @@ fallback.
 Index lock:
 
 - `ragnart/intake_worker.py` (every run)
-- `utils/rag_reset.py` without `--dry-run`
-- `utils/rag_metadata_backfill.py --apply`, `utils/rag_source_backfill.py --apply`, `utils/rag_registry_migrate.py --apply`
 - `utils/rag_source_register.py --apply`, `utils/rag_source_remove.py --apply`
 
 NAS-ingestion lock:
@@ -666,7 +664,11 @@ NAS-ingestion lock:
 - `utils/rag_sync_nfs.py` (every run except `--dry-run`, including `--rebuild-from-hub`)
 - `scripts/ragnart-ingest-run.sh` (the whole run: sync, WAL checkpoints, snapshot)
 
-Both locks, index lock first: `scripts/sqlite-qdrant-snapshot.sh` (the whole run, standalone or from the run script).
+Both locks, index lock first:
+
+- `scripts/sqlite-qdrant-snapshot.sh` (the whole run, standalone or from the run script)
+- `utils/rag_reset.py` without `--dry-run`
+- `utils/rag_metadata_backfill.py --apply`, `utils/rag_source_backfill.py --apply`, `utils/rag_registry_migrate.py --apply`
 
 A step started by a lock holder finds the lock held by its ancestor and does not take it again. The snapshot script,
 started by the run script, therefore finds the NAS lock held and takes only the index lock.
@@ -712,8 +714,8 @@ index. A connection from a second host while Server 2 writes — including a rea
 `database disk image is malformed`. Therefore the timer, `rag_sync_nfs.py`, the
 snapshot script, `rag_status.py`, `rag_reset.py`, `rag_purge_corrupt.py`, `rag_purge_rescan.py` and
 ad-hoc `sqlite3` sessions all run on Server 2. Of these,
-the sync and the run script take the NAS-ingestion lock, the snapshot script takes both, and `rag_reset.py`
-(without `--dry-run`) takes the index lock. `rag_status.py`, the dry runs, `rag_purge_corrupt.py`,
+the sync and the run script take the NAS-ingestion lock, the snapshot script and `rag_reset.py`
+(without `--dry-run`) take both. `rag_status.py`, the dry runs, `rag_purge_corrupt.py`,
 `rag_purge_rescan.py` and the read-only `ragnart` CLI never take one.
 
 **The search service opens the state DB too, read-only, on Server 2 only.** `ragnart/service.py` holds

@@ -369,3 +369,58 @@ def test_print_report_covers_dry_run_refusal_and_apply(migrate, legacy, registry
 
     migrate.print_report(migrate.run_apply(legacy, registry, drop_legacy=True))
     assert "already dropped" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Single-writer locks on the apply path
+# ---------------------------------------------------------------------------
+# main() takes the index lock, then the NAS-ingestion lock, before it opens any database for
+# writing. The dry-run takes neither. The lock stubs stand in for acquire_or_exit.
+
+@pytest.fixture
+def apply_config(migrate, tmp_path, monkeypatch):
+    """Point main() at tmp_path, with both lock keys present, so no real ragnart.yaml is read."""
+    config = {
+        "rag": {
+            "ingest_lock": str(tmp_path / "rag.lock"),
+            "nas_ingest": {"lock": str(tmp_path / "rag-nas.lock")},
+        },
+        "db_base_path": str(tmp_path),
+    }
+    monkeypatch.setattr(migrate.yaml, "safe_load", lambda handle: config)
+    return config
+
+
+def test_main_apply_takes_the_index_lock_then_the_nas_lock(migrate, legacy, apply_config, tmp_path, monkeypatch):
+    _seed_legacy(legacy)
+    # Each stub returns None, which is what acquire_or_exit returns under an ancestor's lock.
+    taken = []
+    monkeypatch.setattr(migrate, "acquire_or_exit", lambda path: taken.append(path))
+
+    migrate.main(["--apply"])
+
+    assert taken == [str(tmp_path / "rag.lock"), str(tmp_path / "rag-nas.lock")]
+
+
+def test_main_apply_with_nas_lock_held_exits_75_before_any_write(
+    migrate, legacy, apply_config, tmp_path, monkeypatch
+):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    _seed_legacy(legacy)
+    nas_lock = str(tmp_path / "rag-nas.lock")
+
+    # The index lock is free. The NAS lock is held, so main() must stop before any database is opened for writing.
+    def _nas_held(lock_path):
+        if lock_path == nas_lock:
+            sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(migrate, "acquire_or_exit", _nas_held)
+
+    with pytest.raises(SystemExit) as exc:
+        migrate.main(["--apply"])
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    # The legacy tables are still there, and the registry file was never created.
+    assert _table_exists(legacy, "projects")
+    assert not (tmp_path / "sqlite" / "hub_registry.db").exists()

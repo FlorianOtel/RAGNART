@@ -589,3 +589,69 @@ def test_collision_repeated_from_the_old_row_repeats_harmlessly(backfill, state_
 
     assert row_of(state_db, NEW_KEY) == after_first
     assert row_of(state_db, str(old)) is None
+
+
+# --- single-writer locks on the apply path -----------------------------------
+# main() takes the index lock, then the NAS-ingestion lock, before it opens the live
+# database. The dry-run takes neither. The lock stubs below stand in for acquire_or_exit.
+
+@pytest.fixture
+def apply_env(backfill, tmp_path, monkeypatch, qdrant):
+    """Point main() at a temporary db_base_path with both lock keys, and at a mock Qdrant."""
+    config = {
+        "rag": {
+            "qdrant_url": "http://unused:6333",
+            "ingest_lock": str(tmp_path / "rag.lock"),
+            "nas_ingest": {"lock": str(tmp_path / "rag-nas.lock")},
+        },
+        "db_base_path": str(tmp_path),
+    }
+    monkeypatch.setattr(backfill.yaml, "safe_load", lambda handle: config)
+    monkeypatch.setattr(backfill, "get_client", lambda url, timeout=60: qdrant)
+    # The password file is read only on the apply path. Stub it so no real file is needed.
+    monkeypatch.setattr(backfill, "load_password", lambda path: "unused")
+    monkeypatch.setattr(backfill, "get_json", lambda *a, **k: pytest.fail("OpenCode API must not be called"))
+    return config
+
+
+def test_main_apply_takes_the_index_lock_then_the_nas_lock(backfill, apply_env, tmp_path, monkeypatch):
+    # Each stub returns None, which is what acquire_or_exit returns under an ancestor's lock.
+    taken = []
+    monkeypatch.setattr(backfill, "acquire_or_exit", lambda path: taken.append(path))
+
+    assert backfill.main(["--apply"]) == 0
+
+    assert taken == [str(tmp_path / "rag.lock"), str(tmp_path / "rag-nas.lock")]
+
+
+def test_main_apply_with_nas_lock_held_exits_75_and_writes_nothing(
+    backfill, apply_env, tmp_path, monkeypatch, qdrant
+):
+    from ragnart.lock import EXIT_LOCK_HELD
+
+    # One completed row that the apply would migrate. Its pipeline_version must stay NULL.
+    db_path = tmp_path / "sqlite" / "rag_state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    state_db = StateDB(str(db_path))
+    add_completed(state_db, str(tmp_path / "not-yet-migrated.txt"))
+    state_db.close()
+
+    nas_lock = str(tmp_path / "rag-nas.lock")
+
+    # The index lock is free. The NAS lock is held, so main() must stop before any write.
+    def _nas_held(lock_path):
+        if lock_path == nas_lock:
+            sys.exit(EXIT_LOCK_HELD)
+
+    monkeypatch.setattr(backfill, "acquire_or_exit", _nas_held)
+
+    with pytest.raises(SystemExit) as exc:
+        backfill.main(["--apply"])
+
+    assert exc.value.code == EXIT_LOCK_HELD
+    assert qdrant.set_payload.call_count == 0
+    state_db = StateDB(str(db_path), read_only=True)
+    try:
+        assert row_of(state_db, str(tmp_path / "not-yet-migrated.txt"))["pipeline_version"] is None
+    finally:
+        state_db.close()

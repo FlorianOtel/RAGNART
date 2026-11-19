@@ -27,7 +27,7 @@ before an operator runs --apply.
 Usage (run from project root):
     python utils/rag_source_backfill.py            # dry-run (default): report only, write nothing
     python utils/rag_source_backfill.py --dry-run
-    python utils/rag_source_backfill.py --apply    # takes the ingestion lock, then writes
+    python utils/rag_source_backfill.py --apply    # takes both ingestion locks (index, then NAS), then writes
 
 Order on --apply:
     1. Refuse if any point has no known source_type (nothing is written).
@@ -68,7 +68,11 @@ from qdrant_client.models import (
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
-from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
+from ragnart.lock import (  # noqa: E402
+    acquire_or_exit,
+    lock_path_from_config,
+    nas_ingest_lock_path_from_config,
+)
 from ragnart.schema import (  # noqa: E402
     FIELD_PIPELINE_VERSION,
     FIELD_SOURCE_ID,
@@ -356,9 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         print_report(summary)
         return exit_code(summary)
 
-    # Apply: take the single-writer ingestion lock before the live StateDB is opened.
-    # Contention exits at once with EXIT_LOCK_HELD (75) and names the holder.
+    # Apply: take both single-writer ingestion locks before the live StateDB is opened.
+    # The index lock comes first, then the NAS lock (this tool writes rag_state.db, which the
+    # NAS run owns). Contention exits at once with EXIT_LOCK_HELD (75) and names the holder.
     acquire_or_exit(lock_path_from_config(config))
+    acquire_or_exit(nas_ingest_lock_path_from_config(config))
 
     state_db = StateDB(db_path)
     qdrant_client = get_client(config["rag"]["qdrant_url"], timeout=120)

@@ -69,7 +69,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 from ragnart.hashing import hash_file  # noqa: E402
-from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
+from ragnart.lock import (  # noqa: E402
+    acquire_or_exit,
+    lock_path_from_config,
+    nas_ingest_lock_path_from_config,
+)
 from ragnart.opencode_client import get_json, load_password  # noqa: E402
 from ragnart.scanner import claude_jsonl_key  # noqa: E402
 from ragnart.schema import (  # noqa: E402
@@ -671,9 +675,11 @@ def main(argv: list[str] | None = None) -> int:
         print_dry_run_report(summary, args.prefix, args.assumed_mb_per_sec)
         return 0
 
-    # Apply: take the single-writer ingestion lock before the live StateDB is opened.
-    # Contention exits at once with EXIT_LOCK_HELD (75) and names the holder.
+    # Apply: take both single-writer ingestion locks before the live StateDB is opened.
+    # The index lock comes first, then the NAS lock (this tool writes rag_state.db, which the
+    # NAS run owns). Contention exits at once with EXIT_LOCK_HELD (75) and names the holder.
     acquire_or_exit(lock_path_from_config(config))
+    acquire_or_exit(nas_ingest_lock_path_from_config(config))
 
     # The OpenCode password is needed for opencode rows. It is loaded before any write, so a
     # missing password file stops the run with nothing changed.
