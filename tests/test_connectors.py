@@ -28,7 +28,7 @@ from ragnart.schema import (
     SOURCE_ID_CLAUDE_LINUX_SHARED_NFS,
     SOURCE_ID_NAS,
     SOURCE_ID_OPENCODE_K11,
-    SOURCES_HOLDING_PROJECTS,
+    SOURCES_WITH_PROJECT_SUPPORT,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -110,15 +110,15 @@ def test_importing_scanner_or_ingest_does_not_import_connectors():
     assert result.returncode == 0, result.stderr
 
 
-def test_sources_holding_projects_matches_the_connector_table():
-    # schema.SOURCES_HOLDING_PROJECTS is a copy of the capability table, kept in schema.py so
+def test_sources_with_project_support_matches_the_connector_table():
+    # schema.SOURCES_WITH_PROJECT_SUPPORT is a copy of the connector table's ragnart_projects entry, kept in schema.py so
     # that scope.py need not import connectors.py. This test fails if the two drift apart.
     from_connectors = {
         connector.source_id
         for connector in BY_SOURCE_ID.values()
         if CAPABILITY_RAGNART_PROJECTS in connector.capabilities
     }
-    assert SOURCES_HOLDING_PROJECTS == from_connectors
+    assert SOURCES_WITH_PROJECT_SUPPORT == from_connectors
 
 
 def test_importing_the_search_service_loads_neither_ingest_nor_docling():

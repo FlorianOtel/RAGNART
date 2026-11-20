@@ -14,9 +14,10 @@ What is removed, and what is kept:
     separate decision and this tool never does it.
 
 The source is looked up case-insensitively (RegistryDB.source_by_id), and every filter uses the
-stored id. A source that holds ragnart projects (SOURCES_HOLDING_PROJECTS in ragnart/schema.py: nas) is
-refused unless --allow-projects-source is given, so its projects' points cannot be removed by accident.
-The registry kind is not part of this rule: a source of any kind that holds no projects is removable.
+stored id. A source that is the home of at least one project in the hub registry (RegistryDB.list_projects,
+home_source_id, case-insensitive) is refused unless --allow-projects-source is given, so its
+projects' points cannot be removed by accident. The registry kind is not part of this rule: a source
+of any kind that homes no project is removable.
 
 Modes (the dry-run is the default):
 
@@ -34,7 +35,7 @@ Usage (run from project root):
     python utils/rag_source_remove.py --source nas --allow-projects-source
 
 Exit codes: 0 when the dry-run listed, or the apply removed. 1 when refused: the source is not
-registered, the registry file is absent, or a source holding projects was named without
+registered, the registry file is absent, or a source homing projects was named without
 --allow-projects-source.
 75 when --apply finds the ingestion lock held (taken by acquire_or_exit, which exits).
 """
@@ -58,7 +59,7 @@ from ragnart.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
 from ragnart.ingest_api import _scroll_source_points, group_points_by_key  # noqa: E402
 from ragnart.lock import acquire_or_exit, lock_path_from_config  # noqa: E402
 from ragnart.registry import RegistryDB  # noqa: E402
-from ragnart.schema import FIELD_SOURCE_ID, SOURCES_HOLDING_PROJECTS  # noqa: E402
+from ragnart.schema import FIELD_SOURCE_ID  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -76,33 +77,27 @@ def _load_config() -> dict:
         return yaml.safe_load(handle)
 
 
-def find_source(registry_path: str, source_id: str) -> dict | None:
-    """
-    Return the registered source whose id matches source_id in any letter case, or None.
-
-    The registry is opened read-only here, so a dry-run cannot write to it. The caller checks that
-    the file exists first.
-    """
-    registry = RegistryDB(registry_path, read_only=True)
-    try:
-        return registry.source_by_id(source_id)
-    finally:
-        registry.close()
-
-
-def refusal_for(source: dict | None, source_name: str, allow_projects: bool) -> str | None:
+def refusal_for(
+    registry: RegistryDB, source: dict | None, source_name: str, allow_projects: bool
+) -> str | None:
     """
     The reason the removal must stop, or None. Used by both the dry-run and the apply.
 
-    A source whose stored id is in SOURCES_HOLDING_PROJECTS holds ragnart projects, so its points include
-    project content. It is refused unless allow_projects is set. The registry kind does not decide this.
+    A source that is the home of at least one project in the hub registry has project content among
+    its points. It is refused unless allow_projects is set. Home ids compare case-insensitively.
+    The registry kind and the set of sources with project support do not decide this.
     """
     if source is None:
         return f"no source is registered as {source_name!r}. Nothing was read or removed."
-    if source["id"] in SOURCES_HOLDING_PROJECTS and not allow_projects:
+    homed = [
+        project["id"] for project in registry.list_projects()
+        if (project["home_source_id"] or "").casefold() == source["id"].casefold()
+    ]
+    if homed and not allow_projects:
         return (
-            f"{source['id']!r} holds ragnart projects (SOURCES_HOLDING_PROJECTS). Its points include "
-            "project content. Pass --allow-projects-source to remove it anyway. Nothing was read or removed."
+            f"{source['id']!r} is the home of {len(homed)} ragnart project(s) in the hub registry. "
+            "Its points include project content. Pass --allow-projects-source to remove it anyway. "
+            "Nothing was read or removed."
         )
     return None
 
@@ -153,14 +148,14 @@ def run_dry_run(client, registry_path: str, source_name: str, allow_projects: bo
     if not Path(registry_path).exists():
         print(f"REFUSED: the hub registry {registry_path} is absent. Nothing was read or removed.")
         return 1
-    source = find_source(registry_path, source_name)
-    reason = refusal_for(source, source_name, allow_projects)
-    if reason:
-        print(f"REFUSED: {reason}")
-        return 1
-
+    # Read-only, so a dry-run cannot write to the registry.
     registry = RegistryDB(registry_path, read_only=True)
     try:
+        source = registry.source_by_id(source_name)
+        reason = refusal_for(registry, source, source_name, allow_projects)
+        if reason:
+            print(f"REFUSED: {reason}")
+            return 1
         plan = plan_removal(client, registry, source)
     finally:
         registry.close()
@@ -185,7 +180,7 @@ def run_apply(client, registry_path: str, source_name: str, allow_projects: bool
     registry = RegistryDB(registry_path)
     try:
         source = registry.source_by_id(source_name)
-        reason = refusal_for(source, source_name, allow_projects)
+        reason = refusal_for(registry, source, source_name, allow_projects)
         if reason:
             print(f"REFUSED: {reason}")
             return 1
@@ -228,8 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-projects-source",
         action="store_true",
-        help="Permit removing a source that holds ragnart projects (SOURCES_HOLDING_PROJECTS). "
-             "Without it, such a source is refused.",
+        help="Permit removing a source that is the home of at least one ragnart project in the hub "
+             "registry. Without it, such a source is refused.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="List what would be removed (the default).")

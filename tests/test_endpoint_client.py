@@ -291,7 +291,7 @@ def test_publish_project_returns_the_409_refusal_body(mbp, sent):
     assert (sent[-1].method, sent[-1].url.path) == ("POST", "/v1/projects")
     assert _body(sent[-1]) == {"id": "proj-1", "name": "My Project", "path": "/Users/fotel/MBP/proj"}
     assert refusal["refused"] is True
-    assert refusal["reason"].startswith("MBP cannot hold ragnart projects")
+    assert refusal["reason"].startswith("project records from MBP are not supported yet")
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +391,7 @@ def test_publish_project_from_nas_refused_for_a_project_homed_elsewhere(nas, con
     refusal = nas.publish_project("mbp-proj", "Hijack", path="/x", owner="florian", tags={})
 
     assert refusal["refused"] is True
-    assert "already homed on 'MBP'" in refusal["reason"]
+    assert "is homed on MBP; a project has one home (D21)" in refusal["reason"]
 
 
 def test_remove_project_posts_the_id_and_removes_the_row(nas, sent, config):

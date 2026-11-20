@@ -191,7 +191,7 @@ def test_unknown_source_is_refused(tmp_path):
 def test_source_that_cannot_hold_projects_is_refused(tmp_path, source_id):
     registry_db = _new_db(tmp_path)
 
-    with pytest.raises(ScopeError, match=f"{source_id} cannot hold ragnart projects"):
+    with pytest.raises(ScopeError, match=f"{source_id} has no project support yet"):
         resolve_scope([f"{source_id}:{ROOT_PATH}"], registry_db)
 
 

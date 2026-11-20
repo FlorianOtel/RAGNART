@@ -91,5 +91,5 @@ def test_unknown_source_is_refused_in_any_case(registry) -> None:
 
 
 def test_a_source_that_cannot_hold_projects_is_refused_in_any_case(registry) -> None:
-    with pytest.raises(ScopeError, match="cannot hold ragnart projects"):
+    with pytest.raises(ScopeError, match="has no project support yet"):
         resolve_scope(["CLAUDE-LINUX-SHARED-NFS:/mnt/nfs/x/proj"], registry)

@@ -12,7 +12,7 @@ The grammar, one term per `scope` value. Repeated terms are unioned.
 A path term names its source first. The text before the first ':' is the source id
 (for example `nas`), and the rest is the path. A path term with no ':' is refused: a
 bare path does not say which store it is in. The source must be registered, and its
-connector must be able to hold ragnart projects (only `nas` can, in v0.3).
+project support must be built for it (only `nas`, in v0.3).
 
 `name:` terms are reserved for v0.4 and are refused for now.
 
@@ -31,7 +31,7 @@ from __future__ import annotations
 from qdrant_client.models import FieldCondition, Filter, MatchAny
 
 from .registry import RegistryDB
-from .schema import FIELD_PROJECT_ID, GLOBAL_PROJECT_ID, SOURCES_HOLDING_PROJECTS
+from .schema import FIELD_PROJECT_ID, GLOBAL_PROJECT_ID, SOURCES_WITH_PROJECT_SUPPORT
 
 # The single term that selects everything (global items plus all ragnart projects).
 ALL_TERM = "all"
@@ -44,7 +44,7 @@ NAME_PREFIX = "name:"
 
 # The project-holding sources, casefolded, so that a term's source can be checked against
 # them case-insensitively (source ids are compared case-insensitively everywhere).
-_HOLDING_PROJECTS_FOLDED = frozenset(source.casefold() for source in SOURCES_HOLDING_PROJECTS)
+_WITH_PROJECT_SUPPORT_FOLDED = frozenset(source.casefold() for source in SOURCES_WITH_PROJECT_SUPPORT)
 
 
 class ScopeError(ValueError):
@@ -128,7 +128,7 @@ def _ids_for_path_term(term: str, projects: list[dict], source_ids: dict[str, st
     Return the ids of the projects a `<source>:<path>` or `<source>:<path>/` term selects.
 
     The text before the first ':' is the source, matched case-insensitively. It must be a
-    registered source whose connector can hold ragnart projects. Only projects whose home
+    registered source with project support built. Only projects whose home
     source is that source are then matched, by exact path or by subtree (for a trailing slash).
 
     source_ids maps the casefolded id of each registered source to its stored id. From here
@@ -141,9 +141,9 @@ def _ids_for_path_term(term: str, projects: list[dict], source_ids: dict[str, st
     stored_source = source_ids.get(typed_source.casefold())
     if stored_source is None:
         raise ScopeError(f"{term}: unknown source '{typed_source}'")
-    # The capability check reads the schema set, not the connector table (see SOURCES_HOLDING_PROJECTS).
-    if stored_source.casefold() not in _HOLDING_PROJECTS_FOLDED:
-        raise ScopeError(f"{term}: {stored_source} cannot hold ragnart projects")
+    # The support check reads the schema set, not the connector table (see SOURCES_WITH_PROJECT_SUPPORT).
+    if stored_source.casefold() not in _WITH_PROJECT_SUPPORT_FOLDED:
+        raise ScopeError(f"{term}: {stored_source} has no project support yet")
 
     # Only the projects homed in this source can match this term. Compared case-insensitively.
     homed = [

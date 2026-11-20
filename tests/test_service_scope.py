@@ -130,7 +130,7 @@ def test_source_that_cannot_hold_projects_returns_422(seeded, served):
         )
 
     assert response.status_code == 422
-    assert "cannot hold ragnart projects" in response.json()["detail"]
+    assert "has no project support yet" in response.json()["detail"]
     assert served.calls == []
 
 

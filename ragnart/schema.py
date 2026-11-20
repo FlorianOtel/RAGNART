@@ -82,12 +82,14 @@ def validate_source_id(source_id: str) -> None:
     if source_id.casefold() in RESERVED_SOURCE_IDS:
         raise ValueError(f"source id {source_id!r} is reserved")
 
-# The sources whose connector has the ragnart_projects capability, that is, the
-# sources that can hold ragnart projects (design §4.5). scope.py reads this set
-# instead of importing ragnart.connectors, because that module pulls in the
+# The sources whose ingestion side has ragnart-project support built: marker
+# discovery, publishing and attachment (design §4.5). It is not a property or a
+# rule of a source: endpoint project support is v0.4, and this set grows then.
+# Where a project may live is decided by D21 (one home), not by this set.
+# scope.py reads this set instead of importing ragnart.connectors, because that module pulls in the
 # ingestion code (docling), which the search service must never load.
 # tests/test_connectors.py keeps this set in step with the connector table.
-SOURCES_HOLDING_PROJECTS = frozenset({SOURCE_ID_NAS})
+SOURCES_WITH_PROJECT_SUPPORT = frozenset({SOURCE_ID_NAS})
 
 # The pipeline version every point and queue row carries from v0.3 on.
 PIPELINE_VERSION_P1 = "p1"

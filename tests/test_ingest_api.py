@@ -619,16 +619,18 @@ def test_project_publish_is_refused_and_logged(api, caplog):
         response = api.post(
             "/v1/projects",
             headers=_auth(MBP_SECRET),
-            json={"id": "proj-1", "name": "My Project", "path": "/Users/fotel/MBP/proj"},
+            json={"id": "fresh-proj", "name": "My Project", "path": "/Users/fotel/MBP/proj"},
         )
 
     assert response.status_code == 409
     body = response.json()
     assert body["refused"] is True
-    assert body["reason"].startswith("MBP cannot hold ragnart projects")
-    assert "today nas" in body["reason"]
+    assert body["reason"] == (
+        "project records from MBP are not supported yet: "
+        "project support is built for the NAS ingestion only (v0.4)"
+    )
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert any("MBP" in r.getMessage() and "proj-1" in r.getMessage() and "My Project" in r.getMessage()
+    assert any("MBP" in r.getMessage() and "fresh-proj" in r.getMessage() and "My Project" in r.getMessage()
                for r in warnings)
 
 
@@ -753,7 +755,7 @@ def test_publish_of_a_project_homed_on_another_source_is_refused_with_409(api, c
     assert response.status_code == 409
     body = response.json()
     assert body["refused"] is True
-    assert "already homed on 'MBP'" in body["reason"]
+    assert body["reason"] == "project mbp-proj (mbp-proj) is homed on MBP; a project has one home (D21)"
     registry = _registry(config)
     try:
         project = next(p for p in registry.list_projects() if p["id"] == "mbp-proj")
@@ -776,8 +778,31 @@ def test_home_comparison_is_case_insensitive(api, config):
     assert response.status_code == 200
 
 
-def test_a_non_capable_source_writes_nothing_to_the_registry(api, config):
-    """MBP lacks the capability: its publish is refused with 409 and the registry gets no row."""
+def test_a_copied_marker_homed_on_nas_published_by_mbp_gets_the_d21_reason(api, config):
+    """D21 is checked before project support: MBP publishing nas's project id is refused as homed elsewhere."""
+    response = api.post(
+        "/v1/projects", headers=_auth(MBP_SECRET),
+        json=_publish_body(id=PROJECT_ID, owner=None),
+    )
+
+    assert response.status_code == 409
+    reason = response.json()["reason"]
+    assert "is homed on nas; a project has one home (D21)" in reason
+    assert "not supported yet" not in reason
+
+
+def test_a_new_project_id_from_mbp_gets_the_not_supported_yet_reason(api):
+    """A project id no one homes, published by MBP, is refused for want of project support, not by D21."""
+    response = api.post("/v1/projects", headers=_auth(MBP_SECRET), json=_publish_body(id="brand-new", owner=None))
+
+    assert response.status_code == 409
+    reason = response.json()["reason"]
+    assert reason.startswith("project records from MBP are not supported yet")
+    assert "D21" not in reason
+
+
+def test_a_source_without_project_support_writes_nothing_to_the_registry(api, config):
+    """MBP has no project support built: its publish is refused with 409 and the registry gets no row."""
     api.post("/v1/projects", headers=_auth(MBP_SECRET), json=_publish_body(id="from-mbp", owner=None))
 
     registry = _registry(config)
@@ -787,8 +812,8 @@ def test_a_non_capable_source_writes_nothing_to_the_registry(api, config):
         registry.close()
 
 
-def test_fixed_owner_capable_source_refuses_an_owner_in_the_publish(api, config):
-    """A capable source with a fixed owner may not name one: the same rule as an upsert (_checked_owner)."""
+def test_fixed_owner_supported_source_refuses_an_owner_in_the_publish(api, config):
+    """A source with project support and a fixed owner may not name one: the same rule as an upsert (_checked_owner)."""
     # nas is made to have a fixed owner for this test only: the owner rule reads the registry row.
     raw = sqlite3.connect(registry_db_path(config))
     raw.execute("UPDATE sources SET owner = ? WHERE id = ?", (CONFIGURED_OWNER, SOURCE_ID_NAS))
@@ -836,8 +861,8 @@ def test_remove_of_a_project_homed_elsewhere_is_409_and_keeps_it(api, config):
         registry.close()
 
 
-def test_remove_from_a_non_capable_source_is_409(api, config):
-    """MBP lacks the capability, so its remove is refused whatever the project."""
+def test_remove_from_a_source_without_project_support_is_409(api, config):
+    """MBP has no project support built, so its remove is refused (here by D21: the project is nas's)."""
     response = api.post("/v1/projects/remove", headers=_auth(MBP_SECRET), json={"id": PROJECT_ID})
 
     assert response.status_code == 409

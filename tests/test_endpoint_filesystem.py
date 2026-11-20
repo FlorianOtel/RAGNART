@@ -636,7 +636,7 @@ def test_project_marker_is_refused_and_its_files_are_still_submitted(ws, hub_con
 
     assert (sent[-1].method, sent[-1].url.path) == ("POST", "/v1/projects")
     assert any(
-        record.levelname == "WARNING" and "refused by the hub: MBP cannot hold ragnart projects" in record.getMessage()
+        record.levelname == "WARNING" and "refused by the hub: project records from MBP are not supported yet" in record.getMessage()
         for record in caplog.records
     )
     assert upserted_keys(hub_config) == {str(project / "notes.md")}

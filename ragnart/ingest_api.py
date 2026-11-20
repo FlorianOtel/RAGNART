@@ -56,7 +56,7 @@ from ragnart.schema import (
     GLOBAL_PROJECT_ID,
     OPENCODE_KEY_PREFIX,
     PIPELINE_VERSION_P1,
-    SOURCES_HOLDING_PROJECTS,
+    SOURCES_WITH_PROJECT_SUPPORT,
 )
 
 logger = logging.getLogger(__name__)
@@ -421,13 +421,13 @@ class ChangeMetadataBody(BaseModel):
 
 class ProjectBody(BaseModel):
     """
-    A request to publish a ragnart project from a source with the ragnart_projects capability.
+    A request to publish a ragnart project.
 
     id, name and path are the marker's fields. owner is the project's owner: it is required for a
     source with no fixed owner (nas) and must be configured in ragnart.yaml, and it may not be sent
     to a source with a fixed owner (checked by _checked_owner). tags is the marker's tag set, each
     value a string; the registry replaces the project's whole tag set with it. A request from a
-    source without the capability is refused before these fields are checked.
+    source whose project support is not built is refused before these fields are checked.
     """
     id: str
     name: str
@@ -728,35 +728,51 @@ async def info(
 # Projects (session B2): the hub registry is written here, synchronously
 #
 # A project is not an item, so it does not go through the intake queue: the registry row and its
-# tags are written when the request arrives. Only a source with the ragnart_projects capability
-# (SOURCES_HOLDING_PROJECTS, today nas) may hold projects. Every other source is refused with 409,
-# as in session B1. A project id that is already homed on another source is refused with 409 (the
-# D21 gate), so one source can never take over another source's project.
+# tags are written when the request arrives. Two refusals, both 409, checked in this order:
+#   1. D21 (one home): a project id homed on another source is refused, so one source can never
+#      take over another source's project.
+#   2. Project support: only the sources in SOURCES_WITH_PROJECT_SUPPORT (today nas) have project
+#      support built in their ingestion; endpoint project support is v0.4. Every other source is
+#      refused until then.
 # ---------------------------------------------------------------------------
 
-def _holds_projects(source_id: str) -> bool:
-    """True when the source has the ragnart_projects capability. Source ids compare case-insensitively."""
-    capable = {source.casefold() for source in SOURCES_HOLDING_PROJECTS}
-    return source_id.casefold() in capable
+def _has_project_support(source_id: str) -> bool:
+    """True when project support is built for the source. Source ids compare case-insensitively."""
+    supported = {source.casefold() for source in SOURCES_WITH_PROJECT_SUPPORT}
+    return source_id.casefold() in supported
 
 
-def _project_refusal(source: dict, project_id: str, name: str, why: str | None = None) -> JSONResponse:
+def _project_refusal(source: dict, project_id: str, name: str, why: str) -> JSONResponse:
     """
     The 409 refusal of a project request, logged at WARNING with the source and the project.
 
     The body keeps the B1 shape: {'refused': True, 'reason': ...}. The client reads the refusal as
     an answer (ragnart/endpoint_client.py publish_project), not as a failure.
     """
-    capable = ", ".join(sorted(SOURCES_HOLDING_PROJECTS))
-    reason = why or (
-        f"{source['id']} cannot hold ragnart projects "
-        f"(only sources with the ragnart_projects capability, today {capable})"
-    )
     logger.warning(
         "refused project request: source=%s project=%s name=%s reason=%s",
-        source["id"], project_id, name, reason,
+        source["id"], project_id, name, why,
     )
-    return JSONResponse(status_code=409, content={"refused": True, "reason": reason})
+    return JSONResponse(status_code=409, content={"refused": True, "reason": why})
+
+
+def _unsupported_refusal(source: dict, project_id: str, name: str) -> JSONResponse:
+    """The 409 refusal for a source whose project support is not built yet."""
+    return _project_refusal(
+        source, project_id, name,
+        f"project records from {source['id']} are not supported yet: "
+        "project support is built for the NAS ingestion only (v0.4)",
+    )
+
+
+def _home_refusal(source: dict, project: dict) -> JSONResponse:
+    """The 409 refusal of the D21 gate: the project is homed on another source (or has no home)."""
+    home = project["home_source_id"] or "no source"
+    name = project["name"] or ""
+    return _project_refusal(
+        source, project["id"], name,
+        f"project {project['id']} ({name}) is homed on {home}; a project has one home (D21)",
+    )
 
 
 def _project_by_id(registry: RegistryDB, project_id: str) -> dict | None:
@@ -784,23 +800,20 @@ async def publish_project(
     """
     Publish one ragnart project from this source: write its registry row and replace its tags.
 
-    Refused with 409 when the source lacks the ragnart_projects capability, or when the project id
-    is already homed on another source. Refused with 422 when the id is the reserved 'global', or
-    when the owner does not pass _checked_owner. On success the registry matches the request.
+    Refused with 409 when the project id is already homed on another source (D21, checked first),
+    or when project support is not built for the source. Refused with 422 when the id is the
+    reserved 'global', or when the owner does not pass _checked_owner. On success the registry matches the request.
     Re-publishing the same project from the same source updates it (upsert, idempotent).
     """
-    if not _holds_projects(source["id"]):
-        return _project_refusal(source, body.id, body.name)
-
     if body.id == GLOBAL_PROJECT_ID:
         raise HTTPException(422, f"project id {GLOBAL_PROJECT_ID!r} is reserved")
     registry = request.app.state.registry
+    # D21 first: a project homed elsewhere is refused whatever the source's project support.
     existing = _project_by_id(registry, body.id)
     if existing is not None and _homed_on_another_source(existing, source):
-        return _project_refusal(
-            source, body.id, body.name,
-            why=f"project {body.id!r} is already homed on {existing['home_source_id']!r}",
-        )
+        return _home_refusal(source, existing)
+    if not _has_project_support(source["id"]):
+        return _unsupported_refusal(source, body.id, body.name)
     checked_owner = _checked_owner(request.app.state.config, source, body.owner)
 
     # The project row and its tags are written in turn. Both writes are idempotent, so a failure
@@ -820,22 +833,19 @@ async def remove_project(
     """
     Remove one ragnart project that this source homes: its row, tags, references and grants.
 
-    404 when no such project exists. 409 when the source lacks the capability, or when the project
-    is homed on another source (or is the reserved 'global'). Items attached to the project are not
+    404 when no such project exists. 409 when the project is homed on another source or is the
+    reserved 'global' (D21, checked first), or when project support is not built for the source. Items attached to the project are not
     touched here; the sync re-attaches them in the same run.
     """
-    if not _holds_projects(source["id"]):
-        return _project_refusal(source, body.id, "")
-
     registry = request.app.state.registry
     existing = _project_by_id(registry, body.id)
+    # D21 first, then project support, then existence.
+    if existing is not None and _homed_on_another_source(existing, source):
+        return _home_refusal(source, existing)
+    if not _has_project_support(source["id"]):
+        return _unsupported_refusal(source, body.id, "")
     if existing is None:
         raise HTTPException(404, f"no project {body.id!r} in the registry")
-    if _homed_on_another_source(existing, source):
-        return _project_refusal(
-            source, body.id, existing["name"] or "",
-            why=f"project {body.id!r} is homed on {existing['home_source_id']!r}, not on {source['id']!r}",
-        )
     registry.remove_project(body.id)
     logger.info("removed project %s from source %s", body.id, source["id"])
     return {"removed": True, "id": body.id}

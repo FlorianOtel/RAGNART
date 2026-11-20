@@ -202,7 +202,7 @@ def _would_submit(plan: SyncPlan, state_db: StateDB) -> dict[str, Counter]:
     would_resubmit counts are reported beside it, and a real run sends both.
     """
     per_source: dict[str, Counter] = {source: Counter() for source in REQUIRED_SOURCES}
-    # Projects are published and removed through the NAS source only (SOURCES_HOLDING_PROJECTS).
+    # Projects are published and removed through the NAS source only (SOURCES_WITH_PROJECT_SUPPORT: project support is built for it only).
     per_source[SOURCE_ID_NAS]["projects_publish"] += len(plan.project_upserts)
     per_source[SOURCE_ID_NAS]["projects_remove"] += len(plan.project_removals)
     for old_path in plan.moves:

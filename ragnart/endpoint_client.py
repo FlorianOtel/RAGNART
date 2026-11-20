@@ -222,8 +222,8 @@ class HubClient:
         Ask the hub to publish a ragnart project from this source (session B2: the hub writes the registry).
 
         owner and tags are sent only when given: owner for a source with no fixed owner (nas), tags as the
-        project's whole tag set. A source without the ragnart_projects capability is refused with 409. A
-        project homed on another source is refused with 409 too. A refusal is an answer, not a failure,
+        project's whole tag set. A project homed on another source is refused with 409 first (D21); then a source whose
+        project support is not built (not nas yet, v0.4) is refused with 409 too. A refusal is an answer, not a failure,
         so its body ({'refused': True, 'reason': ...}) is returned rather than raised.
         """
         body = {"id": project_id, "name": name, "path": path}
@@ -241,7 +241,7 @@ class HubClient:
         Ask the hub to remove a ragnart project that this source homes.
 
         Unlike publish_project, a refusal is raised: 404 (no such project) and 409 (homed on another source,
-        or the source lacks the capability) come back as HubError, so the caller decides what they mean.
+        or project support is not built for the source) come back as HubError, so the caller decides what they mean.
         """
         return _json_or_raise(self._send("POST", "/v1/projects/remove", json={"id": project_id}))
 
