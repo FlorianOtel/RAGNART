@@ -139,7 +139,7 @@ def ws(tmp_path, hub, monkeypatch) -> SimpleNamespace:
     real_client = HubClient
     monkeypatch.setattr(
         endpoint, "HubClient",
-        lambda base_url, secret_file: real_client(base_url, secret_file, http_client=hub),
+        lambda base_url, secret_file, **kwargs: real_client(base_url, secret_file, http_client=hub, **kwargs),
     )
     workspace = SimpleNamespace(
         base=base,
@@ -894,3 +894,45 @@ def test_the_command_line_refuses_a_rebuild_over_a_non_empty_state(ws, hub_confi
     assert code == endpoint.EXIT_FAILED
     assert len(state_rows(ws)) == 1
 
+
+
+# ---------------------------------------------------------------------------
+# An unreachable hub is one log line; any other failure keeps its traceback
+# ---------------------------------------------------------------------------
+
+def _raise_connect_error(action, source, client):
+    """Stands in for the upload: the hub cannot be reached."""
+    raise httpx.ConnectError("All connection attempts failed")
+
+
+def test_unreachable_hub_logs_one_line_without_a_traceback(ws, hub_config, monkeypatch, caplog):
+    """A transport failure gives exactly one ERROR record, with no exc_info, and the run is marked failed."""
+    (ws.root / "notes.md").write_bytes(b"hello")
+    monkeypatch.setattr(endpoint, "_send_upsert", _raise_connect_error)
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        assert run(ws, now=NOW) == endpoint.EXIT_FAILED
+
+    records = [r for r in caplog.records if r.name == LOGGER_NAME]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert records[0].getMessage() == (
+        f"MBP: hub unreachable (ConnectError: All connection attempts failed); "
+        "nothing sent, the next run retries"
+    )
+
+
+def test_another_failure_still_logs_a_traceback(ws, hub_config, monkeypatch, caplog):
+    """Anything that is not a transport error keeps logger.exception, so the traceback is in the log."""
+    (ws.root / "notes.md").write_bytes(b"hello")
+
+    def boom(action, source, client):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(endpoint, "_send_upsert", boom)
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        assert run(ws, now=NOW) == endpoint.EXIT_FAILED
+
+    records = [r for r in caplog.records if r.name == LOGGER_NAME]
+    assert len(records) == 1
+    assert records[0].exc_info is not None

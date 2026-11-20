@@ -139,7 +139,7 @@ def ws(tmp_path, hub, monkeypatch) -> SimpleNamespace:
     real_client = HubClient
     monkeypatch.setattr(
         endpoint, "HubClient",
-        lambda base_url, secret_file: real_client(base_url, secret_file, http_client=hub),
+        lambda base_url, secret_file, **kwargs: real_client(base_url, secret_file, http_client=hub, **kwargs),
     )
     workspace = SimpleNamespace(
         base=base,

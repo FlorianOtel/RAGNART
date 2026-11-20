@@ -379,8 +379,16 @@ def _checked_project_id(registry: RegistryDB, project_id: str | None) -> str | N
     return project_id
 
 
-def _accepted(request_id: str) -> JSONResponse:
-    """The 202 answer every write returns: the request id, and the status it was recorded with."""
+def _accepted(request: Request, source: dict, request_id: str) -> JSONResponse:
+    """
+    The 202 answer every write returns: the request id, and the status it was recorded with.
+
+    Logs one INFO line per accepted write, naming the route, the source and the caller's User-Agent
+    (cut to 200 characters), so the journal shows which program submitted which request.
+    The line holds no secret: the Authorization header is never read here.
+    """
+    user_agent = request.headers.get("user-agent", "-")[:200]
+    logger.info("%s from %s (%s) -> request %s", request.url.path, source["id"], user_agent, request_id)
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": "received"})
 
 
@@ -513,7 +521,7 @@ async def upsert_bytes(
         if spool_path.exists():
             os.remove(spool_path)
         raise
-    return _accepted(request_id)
+    return _accepted(request, source, request_id)
 
 
 @app.post("/v1/upsert/text", status_code=202)
@@ -537,7 +545,7 @@ async def upsert_text(
         modified_at=parsed_modified_at,
         owner=checked_owner, tag=body.tag, project_id=checked_project_id,
     )
-    return _accepted(request_id)
+    return _accepted(request, source, request_id)
 
 
 @app.post("/v1/delete", status_code=202)
@@ -549,7 +557,7 @@ async def delete_item(
     """Ask the hub to remove one item of this source. The worker deletes its points."""
     _check_key(source, body.key)
     request_id = request.app.state.registry.insert_intake(source["id"], "delete", body.key)
-    return _accepted(request_id)
+    return _accepted(request, source, request_id)
 
 
 @app.post("/v1/change-key", status_code=202)
@@ -568,7 +576,7 @@ async def change_key(
     request_id = request.app.state.registry.insert_intake(
         source["id"], "change_key", body.key, new_key=body.new_key,
     )
-    return _accepted(request_id)
+    return _accepted(request, source, request_id)
 
 
 @app.post("/v1/change-metadata", status_code=202)
@@ -598,7 +606,7 @@ async def change_metadata(
     request_id = state.registry.insert_intake(
         source["id"], "change_metadata", body.key, metadata=stored_metadata,
     )
-    return _accepted(request_id)
+    return _accepted(request, source, request_id)
 
 
 # ---------------------------------------------------------------------------

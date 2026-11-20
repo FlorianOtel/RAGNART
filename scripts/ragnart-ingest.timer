@@ -1,5 +1,5 @@
 [Unit]
-Description=RAGNART ingestion — every 6 hours
+Description=RAGNART NAS ingestion run — every 6 hours
 
 [Timer]
 # Fire at 01:00, 07:00, 13:00, 19:00 local time (off-peak; avoids the busy :00 mark)

@@ -485,3 +485,35 @@ def test_secret_never_appears_in_repr_errors_or_logs(mbp, tmp_path, caplog):
     error = exc_info.value
     for text in (repr(mbp), str(error), repr(error), caplog.text):
         assert MBP_SECRET not in text
+
+
+# ---------------------------------------------------------------------------
+# User-Agent: every request names the program and the source that sent it
+# ---------------------------------------------------------------------------
+
+def _user_agent_of_one_request(tmp_path, **client_kwargs) -> str:
+    """Make a HubClient over a MockTransport, send one request, and return the User-Agent it carried."""
+    secret_file = tmp_path / "secret"
+    secret_file.write_text("s3cret", encoding="utf-8")
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["user-agent"])
+        return httpx.Response(200, json={"items": []})
+
+    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    HubClient(BASE_URL, secret_file, http_client=http, **client_kwargs).items()
+    return seen[0]
+
+
+def test_user_agent_names_agent_version_and_source(tmp_path):
+    """The header is '<agent>/<package version> (source <id>)', and the version is the package's own."""
+    from importlib.metadata import version
+    agent = _user_agent_of_one_request(tmp_path, agent="ragnart-endpoint", source_id="MBP")
+    assert agent == f"ragnart-endpoint/{version('ragnart')} (source MBP)"
+
+
+def test_user_agent_default_when_no_agent_or_source_is_given(tmp_path):
+    """A client made without agent and source_id still sends a User-Agent, with the default names."""
+    assert _user_agent_of_one_request(tmp_path).startswith("ragnart-client/")
+    assert _user_agent_of_one_request(tmp_path).endswith(" (source unknown)")

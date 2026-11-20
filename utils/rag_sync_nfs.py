@@ -150,7 +150,7 @@ def build_clients(config: dict) -> dict[str, HubClient]:
         secret_path = secrets.get(source_id)
         if not secret_path:
             raise ValueError(f"ragnart.yaml rag.nas_ingest.secrets has no path for source '{source_id}'.")
-        clients[source_id] = HubClient(hub_url, secret_path)
+        clients[source_id] = HubClient(hub_url, secret_path, source_id=source_id, agent="ragnart-nas-ingest")
     return clients
 
 

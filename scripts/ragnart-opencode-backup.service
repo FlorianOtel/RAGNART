@@ -8,6 +8,7 @@ Type=oneshot
 User=florian
 Environment=HOME=/home/florian
 ExecStart=/mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/opencode-db-backup.sh
+SyslogIdentifier=ragnart-opencode-backup
 StandardOutput=journal
 StandardError=journal
 

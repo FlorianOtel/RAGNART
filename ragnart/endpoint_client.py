@@ -15,6 +15,7 @@ header of each request. It is never logged, and it is not part of repr() or of a
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -78,6 +79,14 @@ def _item_fields(owner: str | None, tag: str | None, project_id: str | None) -> 
     return fields
 
 
+def _package_version() -> str:
+    """The installed version of the ragnart package, or 'unknown' when it has no package metadata."""
+    try:
+        return version("ragnart")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 class HubClient:
     """
     One endpoint source's connection to the hub's ingestion API.
@@ -86,6 +95,10 @@ class HubClient:
         base_url:    The API's base URL, e.g. 'http://<hub>:8101'.
         secret_file: A file holding the source's secret. Surrounding whitespace is stripped.
         timeout:     Seconds to wait for one request.
+        source_id:   The id of the source this client submits for; it goes in the User-Agent header only.
+        agent:       The program name sent in the User-Agent header, so the hub's log shows who submitted:
+                     'ragnart-endpoint' (the Mac runner) or 'ragnart-nas-ingest' (the NAS ingestion run).
+                     The header reads '<agent>/<package version> (source <source id>)'.
         http_client: Optional httpx.Client to send through instead of a new one. Tests pass a client
                      bound to the API app; in that case base_url is kept for repr() only.
 
@@ -99,6 +112,8 @@ class HubClient:
         secret_file: str | Path,
         timeout: float = 60,
         *,
+        source_id: str = "unknown",
+        agent: str = "ragnart-client",
         http_client: httpx.Client | None = None,
     ) -> None:
         # Read once. A later change to the file does not affect this client.
@@ -107,6 +122,8 @@ class HubClient:
             raise ValueError(f"secret file {secret_file} is empty")
         self._secret = secret
         self._base_url = base_url
+        # Identifies the caller in the hub's log. Built once: it holds no secret.
+        self._user_agent = f"{agent}/{_package_version()} (source {source_id})"
         if http_client is not None:
             self._http = http_client
         else:
@@ -125,7 +142,7 @@ class HubClient:
 
     def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Send one request with this source's Bearer secret. The answer is returned unchecked."""
-        headers = {"Authorization": f"Bearer {self._secret}"}
+        headers = {"Authorization": f"Bearer {self._secret}", "User-Agent": self._user_agent}
         return self._http.request(method, path, headers=headers, **kwargs)
 
     # ------------------------------------------------------------------

@@ -3,8 +3,12 @@
 <!--
   LaunchAgent for the endpoint runner on the operator's Mac (MBP endpoint, host M3Max.local).
 
-  Install on the Mac (not on the hub): copy to ~/Library/LaunchAgents/com.ragnart.ingest.plist, then
-      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ragnart.ingest.plist
+  Install on the Mac (not on the hub):
+    1. Build the launcher app: scripts/macos/ragnart-ingest-app/build.sh
+       (macOS charges Local Network access to this app, not to python).
+    2. Approve the "RAGNART Ingest" Local Network prompt on its first network use, while at the Mac.
+    3. Copy this file to ~/Library/LaunchAgents/com.ragnart.ingest.plist, then
+           launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ragnart.ingest.plist
 
   The runner reads its secrets and sources from ~/.ragnart/endpoint.yaml and ~/.ragnart/secrets/.
   This plist holds no secret. StartInterval 21600 is every six hours; RunAtLoad false means loading
@@ -17,12 +21,16 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/fotel/.python-3.12/bin/python</string>
-        <string>-m</string>
-        <string>ragnart.endpoint</string>
+        <string>/Users/fotel/Applications/RAGNART Ingest.app/Contents/MacOS/ragnart-ingest</string>
         <string>run</string>
         <string>--config</string>
         <string>/Users/fotel/.ragnart/endpoint.yaml</string>
+    </array>
+
+    <!-- Ties this job to the app, so the Local Network permission is the app's. -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.ragnart.ingest</string>
     </array>
 
     <key>StartInterval</key>

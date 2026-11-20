@@ -1,5 +1,5 @@
 [Unit]
-Description=RAGNART ingestion API (endpoint writes on port 8101; reads GET /v1/items live from Qdrant)
+Description=RAGNART ingestion API (every source submits here; port 8101)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -13,6 +13,7 @@ Environment=HOME=/home/florian
 ExecStart=/home/florian/Gin-AI/.Gin-AI-python-3.12/bin/uvicorn ragnart.ingest_api:app --host 0.0.0.0 --port 8101
 Restart=on-failure
 RestartSec=5
+SyslogIdentifier=ragnart-ingest-api
 StandardOutput=journal
 StandardError=journal
 

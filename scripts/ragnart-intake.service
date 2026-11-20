@@ -1,5 +1,5 @@
 [Unit]
-Description=RAGNART hub intake worker (applies endpoint requests from the ingestion API)
+Description=RAGNART intake worker (applies submitted requests; the only index writer)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -12,6 +12,7 @@ Environment=HOME=/home/florian
 # not a failure, so systemd treats it as success and the timer's next slot runs normally.
 ExecStart=/home/florian/Gin-AI/.Gin-AI-python-3.12/bin/python -m ragnart.intake_worker
 SuccessExitStatus=75
+SyslogIdentifier=ragnart-intake
 StandardOutput=journal
 StandardError=journal
 

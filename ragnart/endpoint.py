@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import yaml
 
 from ragnart.chat_render import _parse_claude_chat
@@ -976,7 +977,7 @@ def run(
             try:
                 # The client is not closed here. The process ends after the run, and closing would also
                 # close a client that a caller passed in (the tests do).
-                client = HubClient(config.hub_url, source.secret_file)
+                client = HubClient(config.hub_url, source.secret_file, source_id=source.id, agent="ragnart-endpoint")
                 run_source(
                     source, client=client, state=state, grace=grace, now=now, dry_run=dry_run,
                     resubmit_batch_size=batch,
@@ -984,6 +985,14 @@ def run(
             except SourceError as exc:
                 failed += 1
                 logger.error("%s: %s", source.id, exc)
+            except httpx.TransportError as exc:
+                # The hub could not be reached (connect error, timeout, network error). The cause is
+                # plain, so one line without a traceback; nothing was sent, and the next run retries.
+                failed += 1
+                logger.error(
+                    "%s: hub unreachable (%s: %s); nothing sent, the next run retries",
+                    source.id, type(exc).__name__, exc,
+                )
             except Exception:
                 failed += 1
                 logger.exception("%s: the run failed", source.id)
@@ -1062,7 +1071,7 @@ def rebuild_from_hub(config: EndpointConfig, *, source_id: str | None = None) ->
         # Phase 1: read every listing and walk. Nothing is written yet.
         plans: list[tuple[SourceConfig, list[dict], dict[str, FoundFile]]] = []
         for source in sources:
-            client = HubClient(config.hub_url, source.secret_file)
+            client = HubClient(config.hub_url, source.secret_file, source_id=source.id, agent="ragnart-endpoint")
             items = client.items()
             found: dict[str, FoundFile] = {}
             if source.connector == CONNECTOR_CLAUDE_CODE:

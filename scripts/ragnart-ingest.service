@@ -1,5 +1,5 @@
 [Unit]
-Description=RAGNART ingestion (sync + ingest)
+Description=RAGNART NAS ingestion run (scan, reconcile and submit to the ingestion API; snapshot)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -8,6 +8,7 @@ Type=oneshot
 User=florian
 Environment=HOME=/home/florian
 ExecStart=/mnt/nfs/Florian/Gin-AI/projects/RAGNART/scripts/ragnart-ingest-run.sh
+SyslogIdentifier=ragnart-ingest
 StandardOutput=journal
 StandardError=journal
 # 2-hour hard cap — kills a stuck ingestion so the next timer slot fires cleanly.

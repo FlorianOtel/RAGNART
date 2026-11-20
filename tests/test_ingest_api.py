@@ -1216,3 +1216,19 @@ def test_change_metadata_unconfigured_owner_on_a_no_fixed_owner_source_is_422(ap
     )
     assert response.status_code == 422
     assert _change_metadata_rows(config, SOURCE_ID_NAS) == []
+
+
+def test_accepted_write_logs_route_source_user_agent_and_request_id(api, caplog):
+    """One INFO line per accepted write: route, source id, User-Agent (cut to 200 chars) and request id."""
+    headers = {**_auth(MBP_SECRET), "User-Agent": "ragnart-endpoint/9.9 (source MBP)" + "x" * 300}
+    with caplog.at_level("INFO", logger="ragnart.ingest_api"):
+        response = api.post("/v1/delete", headers=headers, json={"key": "/Users/fotel/MBP/a.md"})
+
+    assert response.status_code == 202
+    request_id = response.json()["request_id"]
+    lines = [r.getMessage() for r in caplog.records if r.levelname == "INFO" and "-> request" in r.getMessage()]
+    assert len(lines) == 1
+    ua = ("ragnart-endpoint/9.9 (source MBP)" + "x" * 300)[:200]
+    assert lines[0] == f"/v1/delete from MBP ({ua}) -> request {request_id}"
+    # The secret is never in the log line.
+    assert MBP_SECRET not in lines[0]
