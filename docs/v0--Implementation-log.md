@@ -2,8 +2,8 @@
 title: "RAGNART -- v0 implementation log"
 created_at: 2026-11-13--14-04
 created_by: Claude Code (/brain pipeline -- Claude Opus 5.5 orchestrating, Claude Haiku 5.5 implementing)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A entry: what was done with commit `969d741`, the four kickoff decisions, deviations, the Part 0 and Part B evidence, open items and the handover to session B); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- v0.3 session A open items: both proposals approved and applied); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1 entry: ingestion API, intake worker, endpoint sources MBP and claude-MBP, live bring-up and DoD, bench and ragignore results; v0.3 status line); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-19 -- B2 follow-up: four tools take both locks)
-updated_at: 2026-11-19--20-55
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 post-review doc fixes); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- section pointers updated after the as-is rewrite); Claude Code (Claude Opus 5.5, 2026-11-14 -- design review session entry, v0.2 handover); Claude Code (Claude Haiku 5.5, 2026-11-15 -- bridge session entry, v0.2 handover open items); Claude Code (Claude Fable 5.2, 2026-11-15 -- workflow design session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 session entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A entry); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B entry; decisions as an unlabelled numbered list, session-uuid rule cites `docs/RAGNART-design.md` §14 D11; both point counts stated); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C entry, the closing session; v0.2 closed; `## v0.2` heading added above `## v0.1`; v0.2 session B, A, fix-first item 5 and bridge subsections moved under `## v0.2`; workflow design session subsection moved under `## v0.2`); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- v0.3 section opened with the design review entry); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion entry: the notebook model, from what to how); Claude Code (Claude Opus 5.5, 2026-11-18 -- follow-up entry: persistent `cd` after `init`, session relocation open, how the agent searches, no session state, `session:current`, open, capture hook, collateral, resume and compaction, the web as a scope, relocation tested, the fork verified); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A entry: what was done with commit `969d741`, the four kickoff decisions, deviations, the Part 0 and Part B evidence, open items and the handover to session B); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- v0.3 session A open items: both proposals approved and applied); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1 entry: ingestion API, intake worker, endpoint sources MBP and claude-MBP, live bring-up and DoD, bench and ragignore results; v0.3 status line); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-19 -- B2 follow-up: four tools take both locks); Claude (Claude Fable 5.2, claude.ai checkpoint evaluation with the operator, 2026-11-20 -- v0.4 section opened with the checkpoint entry: findings, v0.4 in two parts, future considerations)
+updated_at: 2026-11-20--20-30
 context: >
   Per-session log for RAGNART's v0 train (v0.1 spin-off through v0.5 tenancy),
   mirroring AYA's docs/v0--Implementation-log.md format. The plan is
@@ -31,6 +31,55 @@ session of v0.1; `Plan Section 6 v0.1` means the v0.1 work-item list in that doc
 
 **Log, not status.** The status table is `docs/Implementation-plan.md` Section 9. This
 log records what happened, including what diverged.
+
+---
+
+## v0.4 -- Project mode
+
+Plan: `docs/Implementation-plan.md` Section 6, v0.4. Status: **planned** (see Plan Section 9), in two parts: v0.4a and v0.4b.
+
+### 2026-11-20--19-55 to 2026-11-20--20-30 -- checkpoint evaluation: where the notebook stands; v0.4 in two parts; future considerations
+
+Checkpoint with the operator in claude.ai (Claude Fable 5.2), on `main` at `86a7213`. Documentation
+only. The evaluation read the documents and the package code; it ran no test and reached no live
+service.
+
+The operator's question: the goal was a self-hosted NotebookLM, and the scope grew into a fuller RAG
+design faster than that goal was pursued. Is the enlarged design still consistent with the goal, and
+would it carry to a team or a small organisation?
+
+**Findings.**
+
+| # | Finding | Where |
+| --- | --- | --- |
+| 1 | The design still describes a notebook; the code holds none. v0.1 to v0.3 built the ingestion side: sources, the hub, the ingestion API, reconciliation. Everything a notebook user does (`init`, `add`, a question at the notebook's scope, the "no good hits" stop) is v0.4. The `ragnart` CLI has three read-only commands, and the one ragnart project is the repository's hand-written marker, which the v0.4 migration removes | design §1.1; `ragnart/cli.py` |
+| 2 | The notebook model (D27, D32 to D41, R1 to R14) was designed before any notebook was used. The v0.2 project code was built to an earlier model, which v0.4 changes before it adds to it | Plan Section 6 v0.4 |
+| 3 | v0.3 makes a first notebook cheap: an upsert carries `project_id`, and `POST /v1/projects` publishes a project record | `ragnart/ingest_api.py` |
+| 4 | `session_id` has no payload index. A scope that includes referenced sessions filters on it (design §8.8). The comment on `FIELD_SESSION_ID` in `ragnart/schema.py` says it is indexed; `_KEYWORD_INDEX_FIELDS` in `ragnart/collection.py` does not list it | Plan Section 6 v0.4b, References |
+| 5 | The hub gives an interactive submission no priority. Design §7.3 states it; the intake worker runs every 10 minutes and applies requests in order of arrival, and no work item listed it. Without it an `add` waits for the next slot | Plan Section 6 v0.4a, item 6 |
+| 6 | For use by a team, the patterns of the ingestion side carry over: identity by source and key, the hub as the only writer, payload rewrites with no re-embedding, the deletion guards, a required and echoed scope. The access model is the thinnest part and is scheduled last: the `user` of a search is trusted, `grants` is read by no code, the owner rule governs `global` items permanently, and no connector reports who may read an item. A ragnart project is bound to one host (R14, design §13.3) | design §6.5, §13.3, §15.3 |
+| 7 | The v0.4 estimate of 2–3 sessions covered about twenty work items in two harnesses; v0.3 took three sessions for less | Plan Section 6 v0.4 |
+
+**Decisions** (operator).
+
+| # | Decision | Recorded in |
+| --- | --- | --- |
+| 1 | v0.4 is delivered in two parts. v0.4a is the notebook loop: the migration to the notebook model as its own step, `init`, `add` and `commit` for files and pages, the `name:` scope term, the relevance verdict, `/ragnart ask` in Claude Code. v0.4b is the rest of project mode, and starts after v0.4a has been used for real work; its kickoff reviews its work items, and the decisions behind them, against that use | Plan Section 6 v0.4, Section 9 |
+| 2 | Use by a team or an organisation is paused: it is not a goal of any planned version. The design records which choices would be hard to retrofit if it became one | design §15 |
+| 3 | The provisions P1 to P7 of design §15.2 are not adopted by this entry. Each is confirmed or declined at the v0.4a kickoff | Plan Section 8, item 21 |
+
+**Deviations from the plan.** None in the order of the versions. The v0.4 estimate becomes 2 sessions
+for v0.4a and 3 or more for v0.4b, estimated again at the v0.4b kickoff.
+
+**Handover to v0.4a.**
+
+- Read Plan Section 6 v0.4 ("Two parts", then v0.4a) and design §15.
+- Kickoff decisions: the provisions of design §15.2; where the first notebooks live and where their
+  sessions run; how an interactive submission is applied at once; the first value of `min_relevance`.
+- Measure how long the scheduled NAS run holds the NAS-ingestion lock: an `add` that meets it exits 75
+  until v0.4b.
+- Start the labelled set from real questions before the verdict is built.
+- Still due from Plan Section 7, Future work: rotate the two Mac secrets after the trip of 2026-11-20..22.
 
 ---
 

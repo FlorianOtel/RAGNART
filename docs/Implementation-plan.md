@@ -2,8 +2,8 @@
 title: "RAGNART — Implementation plan"
 created_at: 2026-11-13--08-30
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design of docs/RAGNART-design.md §2.3, §4.7, §4.8: new v0.3 Sources, later versions renumbered (project mode v0.4, Kotaemon v0.5, tenancy v0.6); §2 decisions, §4 invariants, §7 terms, §8 parameters, §9 status); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- design D27 to D31 and the amended D8, D10, D15, D19: §2 decisions, §4 invariants, v0.3 and v0.4 work items and definitions of done, §7 terms and future work, §8 open decisions); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, design D32 to D37 and the amended D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29: §2 decisions, §5 access model, v0.3 registry item, v0.4 rewritten, v0.5 uploads, §7 terms, §8 open decisions; then D38 to D41, references as resources, the crawl and project folders, no implicit commit, D42: central renamed the hub; projects addressed by unique name); Claude Code (Claude Opus 5.5, 2026-11-18 -- housekeeping: v0.4 kickoff list, §8 items 9 and 12, v0.4 estimate 2–3; v0.3 aligned with the redesign: registry shaped for references and names, metadata example, optional one-turn-one-place; v0.4: persistent `cd` into the project folder after `init`; session relocation to verify; how the agent searches; the working reference, no session state; `session:current`; open, capture, collateral, resume; `web` as a scope); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A: §3 baseline re-measured (corpus, indexed fields, restore triple, registry), §4 invariants as built, §6 v0.3 session A items delivered and the kickoff decisions, one turn one place moved to v0.4, §7 snapshots, §8 items 16, 17 and 19 settled, §9 v0.3 row); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved §4 bench gate for payload-wide migrations: old-code probe and post-migration stability); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: §6 v0.3 split into B1 and B2, B1 delivered items and DoD; §2 version-count row; §3 items 1, 7 and 8 (item 1 re-measured over all five sources); §7 operations; §8 item 16 id rule and endpoint ids; §9 row); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-20 -- project support is built for the NAS ingestion only; D21 checked first); Claude Code (Claude Opus 5.5, 2026-11-20 -- RAGNART names, User-Agent, one-line hub-unreachable log)
-updated_at: 2026-11-20--01-49
+updated_by: Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.1 close: §6 v0.1 dated note, §7 changelog note, §9 status row, v0.2 entry criterion); Claude Code (Claude Opus 5.5, 2026-11-13 -- post-v0.1 ops: Qdrant local config, daily snapshot retention, data root RAGNART--databases); Claude Code (Claude Opus 5.5, 2026-11-13 -- as-is pass: current-state only); Claude Code (Claude Opus 5.5, 2026-11-13 -- v0.2 fix-first items); Claude Code (Claude Opus 5.5, 2026-11-14 -- aligned with docs/RAGNART-design.md; v0.3 rewritten as project mode); Claude Code (Claude Opus 5.5, 2026-11-14 -- v0.2 prerequisites: corpus hygiene item 0, unscheduled design items assigned); Claude Code (Claude Haiku 5.5, 2026-11-14 -- p1 version rule, ragnart-git parallel decision, items 0-4 delivered, v0.3 CLI verbs on the git mapping); Claude Code (Claude Haiku 5.5, 2026-11-14 -- deviations A–G reference, Ollama context length 2048, v0.2 fix-first item 5 and reconciliation findings, future-work subsection); Claude Code (Claude Haiku 5.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §3 item 1 measured baseline, fix-first list order 0-6); Claude Code (Claude Fable 5.2, 2026-11-15 -- v0.3 aligned with the project workflow of docs/RAGNART-design.md §7.3 to §7.5); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 fix-first item 5 delivered for every index writer; project.toml reserved keys per design §4.5; session attribution cites design §4.3); Claude Code (Claude Haiku 5.5, v0.2 session A -- fix-first item 6 delivered; search cap and OpenCode backup delivered; scope required on /v1/search; settled kickoff decisions; subagent and session attribution rules); Claude Code (Claude Haiku 5.5, v0.2 session B -- baseline data model and kickoff decisions, work items 1-4 delivered, items 5 and 8 rewritten, migration steps 3-5 and DoD status; the session-uuid collision rule (`docs/RAGNART-design.md` §4.2, §14 D11) and the measured DoD point-count outcome; DoD bench result, backfill runtime and restore pair size; decision labels removed from the plan, `docs/RAGNART-design.md` §14 is the only register; point-count arithmetic and access/attribution rows aligned with design §4.3, §4.6, §6); Claude Code (Claude Haiku 5.5, v0.2 session C -- scope required and §4 invariants, §6 v0.2 work items and Definition-of-done results, §9 v0.2 row done; §3 item 1 consistent empty rows, §1 and §2 v0.2 session count, §6 v0.2 project_id item delivered; §6 v0.2 estimated-sessions line keeps the estimate only; the Actual sentence removed); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design of docs/RAGNART-design.md §2.3, §4.7, §4.8: new v0.3 Sources, later versions renumbered (project mode v0.4, Kotaemon v0.5, tenancy v0.6); §2 decisions, §4 invariants, §7 terms, §8 parameters, §9 status); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- design D27 to D31 and the amended D8, D10, D15, D19: §2 decisions, §4 invariants, v0.3 and v0.4 work items and definitions of done, §7 terms and future work, §8 open decisions); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, design D32 to D37 and the amended D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29: §2 decisions, §5 access model, v0.3 registry item, v0.4 rewritten, v0.5 uploads, §7 terms, §8 open decisions; then D38 to D41, references as resources, the crawl and project folders, no implicit commit, D42: central renamed the hub; projects addressed by unique name); Claude Code (Claude Opus 5.5, 2026-11-18 -- housekeeping: v0.4 kickoff list, §8 items 9 and 12, v0.4 estimate 2–3; v0.3 aligned with the redesign: registry shaped for references and names, metadata example, optional one-turn-one-place; v0.4: persistent `cd` into the project folder after `init`; session relocation to verify; how the agent searches; the working reference, no session state; `session:current`; open, capture, collateral, resume; `web` as a scope); Claude Code (Claude Haiku 5.5, /brain pipeline -- v0.3 session A: §3 baseline re-measured (corpus, indexed fields, restore triple, registry), §4 invariants as built, §6 v0.3 session A items delivered and the kickoff decisions, one turn one place moved to v0.4, §7 snapshots, §8 items 16, 17 and 19 settled, §9 v0.3 row); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Opus 5.5, 2026-11-18 -- operator-approved §4 bench gate for payload-wide migrations: old-code probe and post-migration stability); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: §6 v0.3 split into B1 and B2, B1 delivered items and DoD; §2 version-count row; §3 items 1, 7 and 8 (item 1 re-measured over all five sources); §7 operations; §8 item 16 id rule and endpoint ids; §9 row); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-20 -- project support is built for the NAS ingestion only; D21 checked first); Claude Code (Claude Opus 5.5, 2026-11-20 -- RAGNART names, User-Agent, one-line hub-unreachable log); Claude (Claude Fable 5.2, claude.ai checkpoint evaluation with the operator, 2026-11-20 -- v0.4 in two parts, v0.4a the notebook loop and v0.4b the rest, with a checkpoint between them; the interactive-submission item and the `session_id` index named; §1, §2, §8 items 8, 9 and 21, §9)
+updated_at: 2026-11-20--20-30
 context: >
   Versioned, staged implementation plan for RAGNART, a self-hosted RAG
   retrieval service, built out into a nested, three-tier (Archive / Runtime /
@@ -26,7 +26,8 @@ context: >
 This plan implements the design in `docs/RAGNART-design.md` in six versions,
 each sized to one Claude Code `/brain` session, except v0.2, which takes five
 (the bridge session, the item 5 session, and v0.2 sessions A, B and C), and
-v0.3, which takes three (sessions A, B1 and B2). The design
+v0.3, which takes three (sessions A, B1 and B2). v0.4 is delivered in two
+parts, v0.4a and v0.4b (§6). The design
 document says *what* RAGNART is and why; this plan says in which order it is
 built and how each step is accepted. Each version section is meant to be
 self-contained: a session reads this document, its own version section, and the
@@ -65,8 +66,8 @@ commit message and in the implementation log.
 | Projects | A ragnart project is a notebook: a folder created by `ragnart init <name>`, whose managed folders `inbox/`, `resources/` and `collateral/` sit beside `.ragnart/`; its material, indexed by commits, is `resources/` and `collateral/`. Every other file of the folder is not indexed: the global crawl does not enter a project folder. `.ragnart/` holds state only. Nesting has no meaning. Addressed by its `name`, unique across the hub registry; the folder's path is metadata; `project.toml` with required `name`, immutable `id`, free tags, and no `mode` | design D2b, D27, D32, D33 (§4.5) |
 | Tiers | Transient = ephemeral cache (not indexed); Archive; Runtime; one store, one pipeline, two policies that do not overlap: curated in a ragnart project's managed folders, static everywhere else | design D3, D27 (§7) |
 | Retrieval | Scope × grounding: scope is where evidence may come from, including `web`; grounding is whether an answer may go beyond it; not fully orthogonal. Defaults `project+strict` / `all+strict`, changes only by the operator; retrieval-only | design D4, D4b (§8) |
-| Number of versions / sessions | Six versions; v0.2 takes five sessions (bridge, item 5, A, B, C), v0.3 takes three (A, B1, B2), v0.4 two to three, the others one each | operator |
-| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 sources (connectors, the hub and the ingestion side, hub registry, ingestion API) · v0.4 project mode (CLI, skill, session-start hook, capture, collateral) · v0.5 Kotaemon · v0.6 tenancy & authentication | operator |
+| Number of versions / sessions | Six versions; v0.2 takes five sessions (bridge, item 5, A, B, C), v0.3 takes three (A, B1, B2), v0.4 is in two parts (v0.4a two, v0.4b three or more), the others one each | operator |
+| Version scope | v0.1 spin-off · v0.2 nested tree and data model · v0.3 sources (connectors, the hub and the ingestion side, hub registry, ingestion API) · v0.4 project mode (CLI, skill, session-start hook, capture, collateral), in two parts: v0.4a the notebook loop, v0.4b the rest · v0.5 Kotaemon · v0.6 tenancy & authentication | operator |
 | Package name, dot-directory | `ragnart`, `.ragnart/` | operator |
 | Service host | Server 2 (192.168.1.95), beside ingestion | operator |
 | Symbolic links | A filesystem construct, ingested by the filesystem connector's rules as any file is. A symbolic link never creates a reference | design D28 (§4.5, §13.4) |
@@ -101,6 +102,8 @@ commit message and in the implementation log.
 | Librarian guarantee | The search API returns the evidence and its verdict: hit id, rerank score, count of good hits, reranker status. The client's command prints the status line and the "no good hits" message. Staying within the evidence in free conversation is best-effort. `min_relevance` is applied by the API, with one global value | operator; design D31 (§8.1, §8.7, §9.2) |
 | Scope of the design review of 2026-11-16 | It settled D27 to D31 and amended D8, D10, D15 and D19. The order and the scope of the versions in §6 are unchanged | operator |
 | Scope of the design discussion of 2026-11-17 | It settled D32 to D42 and amended D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28 and D29. The order of the versions is unchanged; v0.4 grows by references to sessions, registration, `commit`, `mv` and `repair` | operator |
+| Delivery of v0.4 | In two parts. v0.4a is the notebook loop: the migration to the notebook model, `init`, `add` and `commit` for files and pages, the `name:` scope term, the relevance verdict, `/ragnart ask` in Claude Code. v0.4b is the rest of project mode; it starts after v0.4a has been used for real work, and its kickoff reviews its work items against that use. The order of the versions is unchanged | operator, checkpoint evaluation of 2026-11-20 (§6 v0.4) |
+| Use by a team or an organisation | Not a goal of any planned version. `docs/RAGNART-design.md` §15 records which choices would be hard to retrofit; its provisions (§15.2) are confirmed or declined at the v0.4a kickoff | operator, checkpoint evaluation of 2026-11-20 |
 
 ## 3. Current baseline
 
@@ -815,47 +818,236 @@ reference (`docs/RAGNART-design.md` §4.5, §14 D32 to D37). The v0.2 code was
 built to an earlier model, so this version changes that behaviour before it
 adds to it.
 
-**Work items.**
-- Project content and membership (design §4.5), which change v0.2 behaviour:
-  - A file belongs to a ragnart project only when it is in that project's
-    `resources/` or `collateral/`; `inbox/` holds working material and is
-    never indexed. Every other file of the project folder is not indexed. A nested ragnart project has no
-    `parent`, and its files are not the outer one's. `mode` and
-    `inherit_access` are reserved and ignored.
-  - Managed files are keyed `ragnart://<project id>/<relative path>`, with
-    their full path as locator (design §4.2).
-  - Sessions are `global` items; no rule reads `launch_dir`. The v0.2
-    assignment of sessions by `launch_dir` is removed.
-  - A registered ragnart project whose marker is malformed keeps its last good
-    record. One whose marker is missing is tombstoned (`missing_since`) for the
-    grace period. The registered path keeps a duplicated id.
-  - The global crawl reads a `.ragnart/` marker and does not enter its
-    folder (design §1.2, deviation D). A commit applies the admission rules
-    and no exclusion rule. `check-ignore` names the project folder.
-  - A marker with an unknown `id` in a folder that holds indexed `global`
-    items is refused, logged at ERROR on every run, and walked past as if it
-    were not there (design §4.5).
-- Registration (design §4.5): `init` registers the project folder with its
-  ingestion host; the sync reads the registered folders as well as walking
-  the crawl roots; `ragnart repair <path>` re-registers a folder moved by
-  hand. A move on one ingestion host rewrites locators only.
+**Two parts.** v0.4 is delivered in two parts, each with its own work items and
+Definition of done. v0.3 built the write path a notebook needs: an upsert carries
+`project_id`, and `POST /v1/projects` publishes a project record. The first part
+is therefore small.
+
+| Part | Delivers | Starts when |
+| --- | --- | --- |
+| **v0.4a — the notebook loop** | Create a notebook, add files and pages to it, ask it, and get cited passages or "no good hits": the migration to the notebook model, `init`, `add`, `commit`, the `name:` scope term, the relevance verdict, `/ragnart ask` in Claude Code | v0.3 is done |
+| **v0.4b — the rest of project mode** | Sessions in a notebook (references, the current project, creation from a session, the hook and the status line), capture and the inbox, collateral, the marker guards, `mv` and `repair`, coalescing commits, calibration, OpenCode | After the checkpoint below |
+
+- **v0.4a is built to the design as it stands.** Where it builds less than the
+  design, the smaller form is named in its "Reduced in v0.4a" table, and v0.4b
+  completes it. v0.4a builds nothing that v0.4b must undo.
+- **Checkpoint between the parts.** No ragnart project has been used under the
+  notebook model yet: the model was designed ahead of any use, and the v0.2 code
+  was built to an earlier one. v0.4b therefore starts after v0.4a has been used
+  for real work: at least two notebooks, over about two weeks. The v0.4b kickoff
+  reviews its work items, and the design decisions they implement (design §14
+  D9, D29, D34, D36, D38), against that use. Each item is confirmed, changed or
+  dropped there, and a changed decision is amended in the design first.
+- **Use by a team or an organisation is not a goal of v0.4.** The provisions of
+  `docs/RAGNART-design.md` §15.2 keep that option open at the cost of a field or
+  a reserved word each. They are confirmed or declined at the v0.4a kickoff (§8
+  item 21), because v0.4a writes the first files and scope terms they concern.
+
+#### v0.4a — the notebook loop
+
+**Goal.** The shortest path to a usable notebook: `ragnart init <name>`,
+`ragnart add <file or URL>`, a question at the notebook's scope, and an answer
+with its sources or the "no good hits" stop reported by the API.
+
+**Work items**, in this order.
+
+1. **The migration to the notebook model, as its own step** (Data migration,
+   below), before any new behaviour. It changes what a scoped search returns, so
+   it is gated on its own.
+2. **Project content and membership** (design §4.5), which change v0.2 behaviour:
+   - A file belongs to a ragnart project only when it is in that project's
+     `resources/` or `collateral/`; `inbox/` is created by `init`, holds working
+     material and is never indexed. Every other file of the project folder is not
+     indexed. A nested ragnart project has no `parent`, and its files are not the
+     outer one's. `mode` and `inherit_access` are reserved and ignored.
+   - Managed files are keyed `ragnart://<project id>/<relative path>`, with their
+     full path as locator (design §4.2).
+   - Sessions are `global` items; no rule reads `launch_dir`. The v0.2 assignment
+     of sessions by `launch_dir` is removed.
+   - The global crawl reads a `.ragnart/` marker and does not enter its folder
+     (design §1.2, deviation D). A commit applies the admission rules and no
+     exclusion rule. `check-ignore` names the project folder.
+   - A marker with an unknown `id` in a folder that holds indexed `global` items
+     is refused, logged at ERROR on every run, and walked past as if it were not
+     there (design §4.5, D41). This rule is delivered with the one before it: once
+     the crawl stops at a marker, a marker placed by hand would otherwise remove
+     its folder's content from the index.
+   - Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
+     `.ragnart/`, `.opencode/` and `.agents/` to `config/ragignore`, so the NAS
+     crawl never ingests them, including under a refused marker
+     (`docs/RAGNART-design.md` §1.2, §4.5).
+3. **`init`** (design §4.5): it creates the folder `<name>` with `.ragnart/`, the
+   managed folders and a `project.toml` with `name`, a new `id`,
+   `grounding = "strict"` and `capture = true`; prints them; registers the
+   folder; publishes the project record to the hub at once, so the new project is
+   known to search immediately. It commits nothing. When the hub cannot be
+   reached it still succeeds, says so, and the next commit or sync publishes
+   the record. It refuses a folder `<name>` that already exists. It never
+   changes what is indexed.
+4. **Registration** (design §4.5): `init` registers the project folder with its
+   ingestion host; the sync reads the registered folders as well as walking the
+   crawl roots. A project folder renamed or moved on the same ingestion host is
+   found by the next sync by its `id`: its `projects` row gets the new path and
+   the locators of its managed files are rewritten. Their keys do not change, so
+   nothing is re-embedded.
+5. **Names** (design §4.5, §8.8): `name` unique across the hub registry without
+   regard to case, checked at `init` and at every publication; the scope term
+   `name:<name>`, which the client completes from a bare name.
+6. **`add` and `commit`** for files, folders and URLs (design §7.3): `add` copies
+   a file or a folder into `resources/`, wherever the original is and whether or
+   not it is already an item (D28), or fetches a URL into it as Markdown
+   with front matter, records the provenance, commits and waits; `add --no-commit`
+   only copies; `commit` reconciles `resources/` and `collateral/` with the index
+   and waits. A file in `collateral/` is indexed with `source_type = collateral`.
+   There is no implicit commit: the scheduled run commits no ragnart project. A
+   commit removes what has left `resources/` and `collateral/` at once, with no
+   tombstone, and runs no deletion phase when a folder cannot be read or the `id`
+   does not match. Every file gets an outcome: indexed, refused, failed or
+   pending. Non-zero exit when a file was refused or failed.
+   - **`add` and `commit` are clients of the ingestion API.** They plan on the
+     ingestion side, submit through the API with the project's `project_id`, and
+     wait on the status of each request (design §7.3, §12). They write neither
+     the index nor the hub registry directly.
+   - **An interactive submission is applied at once.** The design has the hub
+     give an interactive submission priority over a scheduled run's bulk (design
+     §7.3). That is not built: the intake worker runs every 10 minutes
+     (`ragnart-intake.timer`) and applies requests in order of arrival. Without
+     it, an `add` waits for the next slot, behind whatever the last NAS run
+     queued. The mechanism is decided at kickoff.
+7. **`.ragnart/provenance/`**, one file per copy placed by `add`, with its origin
+   and time (design §4.5).
+8. **The concurrency rules that `add` and `commit` need** (design §10.6): R1, R2,
+   R3, R11, R13 and R14. R6 and R7 are the hub's per-item order of requests,
+   built in v0.3. R5 is built in a reduced form (below).
+9. **The relevance verdict in the search response** (design §8.7): a hit id and
+   the rerank score on each hit, the count of good hits, and whether reranking
+   ran. `min_relevance` is applied by the API to the raw rerank score, with one
+   global value. This item depends on nothing else in v0.4 and may be delivered
+   first.
+10. **The labelled set, started** (design §9.3): a plain file of queries with the
+    sources they should return, and of questions that should end in "no good
+    hits", written from real use. The first value of `min_relevance` is set by
+    hand from it; `ragnart calibrate` is v0.4b.
+11. **CLI**: `init`, `add`, `add --no-commit`, `commit`, and `where`, which prints
+    the ragnart project of the working directory (the nearest `.ragnart/` at or
+    above it). The read-only `status`, `ls-files` and `check-ignore` were
+    delivered with v0.2 item 0; here `status` and `ls-files` gain a project
+    scope: they list a ragnart project's resources and collateral with their
+    outcomes, and the files not indexed, and why (design §7.3, §7.4).
+12. **The `/ragnart` skill for Claude Code, in its smallest form**:
+    `/ragnart ask` and `/ragnart status`. `ask` sends a fixed request template
+    whose scope is the `name:` term of the working directory's ragnart project,
+    or the scope the operator gave with `--scope`; it copies the echoed scope
+    into the status line of the answer, stops when the API reports no good hit,
+    and answers under the project's `grounding` (`strict` by default) (design
+    §8.1, §8.3, §8.8). `/rag` is unchanged.
+
+**Reduced in v0.4a.** Each row is completed by v0.4b.
+
+| In v0.4a | In the design |
+| --- | --- |
+| The ragnart project a command or `/ragnart ask` acts on is the one that holds the shell's working directory, found each time | A session's current project, set once for its life and recorded by its working reference (D38) |
+| `strict` governs `/ragnart ask` only | `strict` governs every informational answer of a session in a ragnart project; the hook re-injects the librarian rules (§7.4, §8.1) |
+| A commit that meets a running commit, or the scheduled NAS run, exits 75 at once and names the holder, as every writer does (design §10.3) | Commits coalesce per ragnart project, and an add waits for the first commit that started after its files were in place (D36, R4, R5) |
+| A ragnart project whose marker is missing or malformed is removed in the same sync, as built in v0.2 | The marker guards: last good record, and a 24-hour tombstone (D29) |
+| Material is files, folders and pages | Also references to sessions and to ragnart projects (D34) |
+| Scope `project` is the ragnart project alone | The ragnart project, the sessions it references and the ragnart projects it references (§8.1) |
+| Uncommitted changes are listed by `ragnart status` | Also counted by the session-start hook and the status line (§7.4) |
+| Claude Code | Claude Code and OpenCode |
+
+**Data migration & rollback.** Payload only, after a restore triple, and with
+the bench gate for a payload-wide migration (§4).
+- The files that today carry a ragnart project's `project_id` because they
+  sit under its holding directory return to `global`, by `set_payload` and
+  with no re-embedding (today: the files of the RAGNART repository).
+- The sessions that today carry a ragnart project's `project_id` return to
+  `global` the same way. No reference is written for them: no ragnart project
+  is left to hold them.
+- The RAGNART repository's hand-written marker is removed, and with it the
+  RAGNART ragnart project: a code repository is not a ragnart project (design
+  §4.5, D41). The repository's files stay `global` and indexed. A notebook
+  about RAGNART, if wanted, is created later with `ragnart init`, and the
+  sessions wanted in it are added there once references are built (v0.4b).
+- No managed files exist yet, so no item is re-keyed to `ragnart://`.
+- Resources and collateral enter through the normal ingestion pipeline.
+
+**Definition of done.**
+- After the migration, the bench gate of §4 passes, and no item carries a
+  `project_id` other than `global`.
+- `ragnart init ACME-Q2`, run in a folder with indexed content, creates
+  `ACME-Q2/` with `.ragnart/` and the managed folders, writes `strict` and
+  capture on, and leaves the index unchanged. Run again, it refuses. A second
+  `init` with the same name elsewhere is refused.
+- A file and a URL added to a test project are returned by a search at
+  `name:<project>`, each with its source, and by no search at the scope of
+  another ragnart project. The file is a copy under `resources/`, with a
+  provenance entry, and the original is untouched.
+- An `add` reports "indexed" without waiting for the next intake slot.
+- A file placed into `resources/` by hand is listed as not indexed by
+  `ragnart status`, is not indexed by the scheduled run, and is indexed by
+  `ragnart commit`. A file that an exclusion rule would match is indexed there
+  all the same. A file deleted from `resources/` leaves the index at the next
+  commit.
+- A refused file is reported with its reason, and the command exits non-zero.
+- A marker placed by hand in a folder with indexed content is refused with an
+  ERROR, and nothing leaves the index; a marker placed in an empty folder
+  makes a ragnart project.
+- The files of a project folder outside `resources/` and `collateral/`, those
+  of its `inbox/` included, are not indexed: no search returns them. A ragnart
+  project nested in another's folder is not covered by a search at the outer
+  project's scope.
+- After the project folder is renamed, the next sync keeps the ragnart project
+  and its items, and nothing is re-embedded.
+- `/ragnart ask`, run in the project folder, starts its answer with the status
+  line copied from the API's response, and cites the passages it used. A
+  question whose answer is not in the ragnart project ends in "no good hits",
+  reported by the API.
+
+**Risks.** Staying within the evidence under `strict` depends on the skill being
+followed; nothing enforces it (design §8.1). The change of project content alters
+built v0.2 behaviour: a scoped search of a ragnart project no longer returns the
+other files of its folder. An `add` or a `commit` started while the scheduled NAS
+run holds the NAS-ingestion lock exits 75 until v0.4b; how long that run holds
+the lock decides how often this is met, and it is measured at kickoff.
+
+**Decisions to confirm at kickoff.**
+- The provisions of `docs/RAGNART-design.md` §15.2, each adopted or declined
+  (§8 item 21).
+- Where the first notebooks live and where their sessions run. The write path
+  for a project action from a host other than the ragnart project's ingestion
+  host is open (design §13.3) and is not needed for v0.4a if notebooks are homed
+  on the `nas` source and worked on from Server 2.
+- How an interactive submission is applied at once (work item 6).
+- The first value of `min_relevance`.
+
+**Estimated sessions.** 2.
+
+#### v0.4b — the rest of project mode
+
+**Entry criteria.** v0.4a's Definition of done met, and the checkpoint above held.
+
+**Work items.** Each is reviewed at the checkpoint before it is built.
+- Marker guards (design §4.5, D29): a registered ragnart project whose marker is
+  malformed keeps its last good record. One whose marker is missing is
+  tombstoned (`missing_since`) for the grace period. The registered path keeps a
+  duplicated id.
+- `ragnart repair <path>` re-registers a folder moved by hand to a place no
+  registration or walk covers (design §4.5).
 - References (design §4.5): a `.reference` file in `resources/` per
   reference, written by `ragnart add` for a session or a ragnart project,
   removed as any resource is; read on each commit and published; `GET /v1/projects` returns each ragnart project's references; a term
   naming a ragnart project includes its referenced sessions, matched by
   `session_id` and resolved before the search (design §8.8); the client
   resolves scope `project` to the current ragnart project and those it
-  references. A missing target is reported.
+  references. A missing target is reported. `add` accepts a ragnart project by
+  name. The filter on `session_id` needs a keyword index on that payload field:
+  it has none today (`_KEYWORD_INDEX_FIELDS` in `ragnart/collection.py`; the
+  comment on `FIELD_SESSION_ID` in `ragnart/schema.py` says otherwise). Creating
+  the index re-embeds nothing.
 - One turn, one place (design §4.2): the Claude Code connector indexes each turn once, by its message
   id, so a forked session's copied turns are not indexed again. It changes the chunks of forked sessions,
   so the bench gate (§4) applies to it as to any change of what is indexed. The OpenCode equivalent is
   not verified.
-- Names (design §4.5, §8.8): `name` unique across the hub registry without
-  regard to case, checked at `init` and at every publication; the scope term
-  `name:<name>`, which the client completes from a bare name; `add` accepts a
-  ragnart project by name. The status line shows the project's name.
-- `.ragnart/provenance/`, one file per copy placed by `add` or `capture`,
-  with its origin and time (design §4.5).
 - The session's current project (design §4.5, §7.3): recorded by the
   session's reference in the project, marked `working = true`; found by the
   hook by location or by a local lookup of the working reference to the
@@ -883,39 +1075,20 @@ adds to it.
 - Opening an existing ragnart project from inside a session (design §7.3):
   `/ragnart open <name>`, the creation sequence without `init`, behind the
   same gate; only a project on a source of the session's own host.
-- `add` and `commit` (design §7.3): `add` copies or captures, records the
-  provenance, commits and waits; `add --no-commit` only copies; `commit`
-  reconciles `resources/` and `collateral/` with the index and waits; `note`
-  and `drop` commit.
-  There is no implicit commit: the scheduled run commits no ragnart project,
-  and the hook and the status line count uncommitted changes. Adding a file
-  from the project's own `inbox/` or `collateral/` moves it into
-  `resources/`, with its provenance. A commit removes what has left the
-  `resources/` and `collateral/` at once, with no tombstone, and runs no deletion phase when
-  a folder cannot be read or the `id` does not match. A commit and
-  `ragnart status` report stale collateral. Commits coalesce per ragnart project (a
-  generation number), and every file gets an outcome: indexed, refused,
-  failed or pending. Non-zero exit when a file was refused or failed.
-- The concurrency rules R1 to R14 (design §10.6).
-- `ragnart` CLI, built on the git mapping (`docs/RAGNART-design.md` §1.2):
-  `init`, `init --from`, `add`, `add --no-commit`, `commit`, `rm`
+- `add` and `commit`, completed (design §7.3): `note` and `drop` commit. Adding
+  a file from the project's own `inbox/` or `collateral/` moves it into
+  `resources/`, with its provenance. Commits coalesce per ragnart project (a
+  generation number). The hook and the status line count uncommitted changes.
+- The remaining concurrency rules (design §10.6): R4, R5 in full, R8, R9, R10
+  and R12.
+- The rest of the `ragnart` CLI, built on the git mapping
+  (`docs/RAGNART-design.md` §1.2): `init --from`, `rm`
   (appends a pattern to the nearest `.ragignore`; never deletes a file),
   `mv` (a file, or a ragnart project), `repair`, `diff`, `fsck`, `gc`, and
-  `capture`, `drop`, `note`, `where`, `expect`, `calibrate`, `grant`,
+  `capture`, `drop`, `note`, `expect`, `calibrate`, `grant`,
   `revoke`, `transfer`, which have no git equivalent. Plus the metadata
   listing (`ls` with type and time filters, answered from the state
-  database). `status`, `ls-files` and `check-ignore` are not v0.4 work: they
-  were delivered with v0.2 item 0. `ls-files` gains the project-scoped
-  listing and the inbox listing under `--others`, and `status` the
-  project-scoped list of files not indexed (design §7.3, §7.4).
-- `init` (design §4.5): it creates the folder `<name>` with `.ragnart/`, the
-  managed folders and a `project.toml` with `name`, a new `id`,
-  `grounding = "strict"` and `capture = true`; prints them; registers the
-  folder; publishes the project record to the hub at once, so the new project is
-  known to search immediately. It commits nothing. When the hub cannot be
-  reached it still succeeds, says so, and the next commit or sync publishes
-  the record. It refuses a folder `<name>` that already exists. It never
-  changes what is indexed.
+  database). `ls-files` gains the inbox listing under `--others`.
 - `ragnart mv` of a ragnart project to another source (design §4.5): copy,
   verify, release the old home, claim the new one; the hub rewrites the
   `source_id` of the managed files' chunks, the fifth request of the
@@ -931,25 +1104,21 @@ adds to it.
   on. The skill instructs the model to do every web search and fetch with the
   harness's tools, never `curl` or a shell command, so the hook sees each
   page; other routes fall back to the skill's instruction, best-effort.
-- Operator add, keep and note (design §7.3): a file or a folder is always
-  copied into `resources/`, wherever the original is, then committed.
+- Keep and note (design §7.3): a kept inbox item moves to `resources/` and is
+  committed; a note is saved as a Markdown file in `resources/` and committed.
 - Collateral (design §7.3): Markdown written by the agent's own file tools
   into `collateral/`, then committed; a presentation or chart sits beside its
   Markdown source. The model lists `sources:` in the front matter; the first
   commit records their content hashes in `.ragnart/provenance/`, and later
-  commits and `status` report stale collateral. Indexed with
-  `source_type = collateral`; the inbox items it lists are kept. Working
-  files stay out of `collateral/`.
-- `/ragnart` skill for Claude Code and OpenCode: the action vocabulary and the
-  capture policy (design §7.3), scope (including `web`, resolved by the skill
-  through the harness's tools) and grounding knobs with defaults at
-  three levels (design §8.2), the status line and the "no good hits in this
-  scope" stop, both copied from the API's response and never judged by the
-  model, through a fixed request template whose scope comes from the
-  session's settings (design §8.1, §8.8), one-off `ask`, verbose translation of
-  natural-language requests. A `ragnart search` verb only if the template
-  proves unreliable.
-  `/rag` becomes an alias (design §8.9).
+  commits and `status` report stale collateral. The inbox items it lists are
+  kept. Working files stay out of `collateral/`.
+- The `/ragnart` skill, completed, for Claude Code and OpenCode: the action
+  vocabulary and the capture policy (design §7.3), scope (including `web`,
+  resolved by the skill through the harness's tools) and grounding knobs with
+  defaults at three levels (design §8.2), the status line and the "no good hits
+  in this scope" stop on every answer that used retrieval, verbose translation
+  of natural-language requests. A `ragnart search` verb only if the template
+  proves unreliable. `/rag` becomes an alias (design §8.9).
 - Session-start hook and harness status line (design §7.4): the session's
   current project from its working reference, or, for a session started in a project
   folder, that project made current and the session added to it; and the
@@ -961,74 +1130,37 @@ adds to it.
 - The client's default source (design §8.2): a setting of the `/ragnart`
   skill, shown by `/ragnart status` and changed by `/ragnart source`. The
   skill completes a bare path term with it and shows the completed term.
-- Add `.ragnart/` to the global git-ignore file (`core.excludesFile`); add
-  `.ragnart/`, `.opencode/` and `.agents/` to `config/ragignore`, so the NAS
-  crawl never ingests them (`docs/RAGNART-design.md` §1.2, §4.5).
-- The relevance verdict in the search response (design §8.7): a hit id and the
-  rerank score on each hit, the count of good hits, and whether reranking ran.
-  `min_relevance` is applied by the API to the raw rerank score, with one
-  global value. This item depends on neither v0.3 nor the rest of v0.4, and may
-  be delivered before them.
 - Retrieval calibration (design §9.2, §9.3): `type_weights` (including
   `collateral` and the session types; they change order only) and the fetch
-  sizes as knobs at three levels; the labelled set, a plain file that includes
-  questions which should end in "no good hits", started from real use and grown
-  with `/ragnart expect`; `ragnart calibrate`, which finds `min_relevance` and
+  sizes as knobs at three levels; the labelled set grown with
+  `/ragnart expect`; `ragnart calibrate`, which finds `min_relevance` and
   sweeps nothing else.
 
-**Data migration & rollback.** Payload only, after a restore pair (§4).
-- The files that today carry a ragnart project's `project_id` because they
-  sit under its holding directory return to `global`, by `set_payload` and
-  with no re-embedding (today: the files of the RAGNART repository).
-- The sessions that today carry a ragnart project's `project_id` return to
-  `global` the same way. No reference is written for them: no ragnart project
-  is left to hold them.
-- The RAGNART repository's hand-written marker is removed, and with it the
-  RAGNART ragnart project: a code repository is not a ragnart project (design
-  §4.5, D41). The repository's files stay `global` and indexed. A notebook
-  about RAGNART, if wanted, is created later with `ragnart init`, and the
-  sessions wanted in it are added there.
-- No managed files exist yet, so no item is re-keyed to `ragnart://`.
-- The cache is plain files; resources and collateral enter through the normal
-  ingestion pipeline.
+**Data migration & rollback.** None planned: v0.4a made the migration. The
+inbox is plain files.
 
 **Definition of done.**
-- `ragnart init ACME-Q2`, run in a folder with indexed content, creates
-  `ACME-Q2/` with `.ragnart/` and the managed folders, writes `strict` and
-  capture on, and leaves the index unchanged. Run again, it refuses.
 - In a test project: pages fetched by the agent appear in the inbox listing
   with an expiry date and are not in the index; after "keep" and an operator
   "add", those items are returned by a `project + strict` search with
   citations; a dropped item is restored by a keep within the grace period and
   deleted by `gc` after it.
 - A file placed into `resources/` by hand is counted as an uncommitted change
-  by the status line, is not indexed by the scheduled run, and is indexed by
-  `ragnart commit`. A file that an exclusion rule would match is indexed there
-  all the same.
-- A marker placed by hand in a folder with indexed content is refused with an
-  ERROR, and nothing leaves the index; a marker placed in an empty folder
-  makes a ragnart project.
+  by the status line.
 - `ragnart add collateral/<file>` moves a piece of collateral into
   `resources/`.
 - Ten adds in quick succession cost at most two commits, and each reports the
-  outcome of its own files; a refused file is reported with its reason and
-  the command exits non-zero.
+  outcome of its own files.
 - A piece of collateral is returned as derived material, and the inbox items
   it lists are kept.
 - The same flow works in Claude Code and OpenCode.
 - Every answer shows the status line; scope changes happen only through the
   commands or a stated natural-language translation.
-- The files of a project folder outside its managed folders, and its inbox,
-  are not indexed: no search returns them.
-- A ragnart project nested in another's folder is not covered by a search at
-  the outer project's scope.
-- A file added to a ragnart project is a copy under its `resources/`, with a
-  provenance entry, and the original is untouched.
 - A session that creates a ragnart project is added to it and has it as its
   current project; asked to create a second one, the skill refuses. A session
   started in a project folder is added to it and found at its scope; a session referenced explicitly from elsewhere is found too; neither
   is re-ingested.
-- After the project folder is renamed, or moved by hand and found with
+- After the project folder is moved by hand and found with
   `ragnart repair`, its sessions and its references still belong to it, and
   nothing is re-embedded. After `ragnart mv` to another source, the same holds.
 - A `project.toml` made invalid leaves the ragnart project, its tags and its
@@ -1037,27 +1169,23 @@ adds to it.
   tombstone.
 - A search at scope `project` covers a referenced ragnart project, and does not
   follow that project's own references.
-- A question whose answer is not in the ragnart project ends in "no good hits",
-  reported by the API.
 
-**Risks.** Capture, the action vocabulary and staying within the evidence under
-`strict` depend on the skill being followed; nothing enforces them (design
-§8.1). The change of project content alters built v0.2 behaviour: a scoped
-search of a ragnart project no longer returns the other files of its folder.
-A commit that waits needs the v0.3 split of the hub and the ingestion side;
-without it, a commit meets the lock of a scheduled run that parses for hours
-(design §7.3). Whether OpenCode loads skills from `~/.claude/skills`, and
-whether it has an equivalent of the session-start hook, is unverified (§8).
+**Risks.** Capture and the action vocabulary depend on the skill being followed;
+nothing enforces them (design §8.1). Whether OpenCode loads skills from
+`~/.claude/skills`, and whether it has an equivalent of the session-start hook,
+is unverified (§8). The session mechanics depend on behaviour of Claude Code and
+OpenCode that their documentation does not state, verified against single
+versions (design §4.5, §7.3).
 
-**Decisions to confirm at kickoff.** The open items of
-`docs/RAGNART-design.md` §13.3 that this version depends on: the write path
-for project actions from a host other than the ragnart project's ingestion
-host; the desktop apps (Claude, OpenCode): how the operator opens the
-fork and whether the agent can spawn it there; OpenCode relocation and
+**Decisions to confirm at kickoff.** The outcome of the checkpoint, item by
+item. The open items of `docs/RAGNART-design.md` §13.3 that this part depends
+on: the write path for project actions from a host other than the ragnart
+project's ingestion host; the desktop apps (Claude, OpenCode): how the operator
+opens the fork and whether the agent can spawn it there; OpenCode relocation and
 whether an OpenCode fork keeps each turn's message id (design §13.3).
 Verified at kickoff: §8 items 8 and 9.
 
-**Estimated sessions.** 2–3. The scope grew with the design of 2026-11-17 and 2026-11-18: references to sessions, registration, `commit`, `mv`, `repair`, `open`, the capture hook and the relocation of a session.
+**Estimated sessions.** 3 or more, estimated again at its kickoff. The scope grew with the design of 2026-11-17 and 2026-11-18: references to sessions, registration, `commit`, `mv`, `repair`, `open`, the capture hook and the relocation of a session.
 
 ### v0.5 — Kotaemon
 
@@ -1067,7 +1195,7 @@ driving the CLI.
 
 **Entry criteria.** None strict for the stock-Kotaemon spike, which can be
 done any time. The plugin needs v0.2's `scope` parameter and
-`GET /v1/projects`, and v0.4's `add`.
+`GET /v1/projects`, and v0.4a's `add`.
 
 **Work items.**
 - Spike (any time before this version, if useful): run stock Kotaemon
@@ -1341,8 +1469,8 @@ set (`docs/RAGNART-design.md` §5.5, §9.3).
 | 5 | Token vs OIDC detail (format, issuer, storage) | per-client tokens first, OIDC optional later | v0.6 kickoff |
 | 6 | Invalid/missing-token behaviour | not pre-decided — rejected (401) vs anonymous-no-grants | v0.6 kickoff |
 | 7 | Docker on Server 1 (for Kotaemon's container) | unverified — check before v0.5 kickoff | v0.5 kickoff |
-| 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.4 kickoff |
-| 9 | Claude Desktop Code session transcript location | unverified — needed for relocating a session in the desktop app (design §13.3) and before the Runtime-tier check can be written | v0.4 kickoff |
+| 8 | OpenCode skill loading from `~/.claude/skills` | unverified per OpenCode docs — test early | v0.4b kickoff |
+| 9 | Claude Desktop Code session transcript location | unverified — needed for relocating a session in the desktop app (design §13.3) and before the Runtime-tier check can be written | v0.4b kickoff |
 | 10 | Backfill batch size / pilot scope (one owner first?) | checkpoint every 100 items; pilot on one subtree first | settled |
 | 11 | Notifications (channel, events: failed run, guard tripped, snapshot failed, reconciliation problems) | not scheduled; ntfy on Server 1 available | open |
 | 12 | Corpus-hygiene policy: CSV and data files, size and chunk caps, mirrored trees | decided in fix-first item 0 (design §5.2, D6) | settled |
@@ -1354,6 +1482,7 @@ set (`docs/RAGNART-design.md` §5.5, §9.3).
 | 18 | Whether access is scoped by source | open; part of the tenancy design | v0.6 kickoff |
 | 19 | The ragnart project tables when they move to the hub registry: rename `project_links` for references to ragnart projects and sessions, drop `source_links` and the `parent` and `mode` columns of `projects` | settled: `project_links` becomes `project_references` (`project_id`, `kind` `session` or `project`, `target_id`, `working`); `source_links` dropped; `parent`, `mode` and `inherit_access` dropped; `home_source_id` added to `projects`; `project_tags` and `grants` unchanged; the name-uniqueness index deferred to v0.4 | settled |
 | 20 | Mechanism of an embedding model change: a second vector or a second collection, and the switch between them | open; needed only when a second embedding model is chosen | when needed |
+| 21 | The provisions of `docs/RAGNART-design.md` §15.2, which keep use by a team open: P1 a format version in the files of a project folder; P2 the source in a session reference; P3 the origin of a copy recorded as an identity; P4 the `id:` scope term, `id` reserved, and no `/` or `:` in a name; P5 a principal on every search request; P6 no reference, tag or grant in the payload; P7 `add` and `commit` only through the ingestion API | each adopted or declined on its own; P6 and P7 are already the design | v0.4a kickoff |
 
 ## 9. Version status table
 
@@ -1362,7 +1491,8 @@ set (`docs/RAGNART-design.md` §5.5, §9.3).
 | v0.1 Spin-off | done | 1 | RAGNART: `e4de8a3` (import), `1d702fe` (adaptation), `796635f` (comparison tool, pins); SoHoAI: `95d5d0d` (removal, 307 stub) |
 | v0.2 Nested | done | 5 | `c41c08c` (items 0-4), `b88d4a4` (item 5), `c4e5616` (session A), `8a0f6b3` (session B), `64472db` (session C phase 1), `c7c4999` (session C phase 2), `49e03de` (session C phase 3) |
 | v0.3 Sources | done | 3 of 3 (A, B1, B2) | `969d741`, `ebfa3de` (session A); `d68634d` (session B1); `4e2d9df` (session B2) |
-| v0.4 Project mode | planned | — | — |
+| v0.4a Project mode: the notebook loop | planned | — | — |
+| v0.4b Project mode: the rest | planned; starts after the checkpoint of §6 v0.4 | — | — |
 | v0.5 Kotaemon | planned | — | — |
 | v0.6 Tenancy & authentication | planned | — | — |
 

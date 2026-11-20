@@ -2,8 +2,8 @@
 title: "RAGNART — Design"
 created_at: 2026-11-13--23-55
 created_by: Claude Code (Claude Opus 5.5)
-updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction; the web is a scope, scope and grounding not fully orthogonal; relocation tested: spawn in the project folder, operator resumes it; fork verified, one turn one place; the switch stays the operator's instruction, worded per client); Claude Code (Claude Haiku 5.5, 2026-11-18 -- v0.3 session A: source ids and the connector contract, the hub registry and its reshaped project tables, `source_id` and `pipeline_version` on every item and chunk, source-qualified scope terms and the bare-path 422, the per-source reconciliation check, the restore triple; status lines of §1.1, §2.3, §4.1 to §4.5, §4.7, §4.8, §8.3, §8.7, §8.8, §10.1, §10.3, §10.4, §12; one turn, one place marked not built, v0.4); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: the ingestion API, the intake table and worker, endpoint sources MBP and claude-MBP, the source id rule; status lines of §1.1, §2.3, §4.2, §4.5, §4.7, §4.8, §5.2, §10.2, §10.3, §12 and the host table §2.1); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-20 -- project support is built for the NAS ingestion only; D21 checked first); Claude Code (Claude Opus 5.5, 2026-11-20 -- RAGNART names, User-Agent, one-line hub-unreachable log)
-updated_at: 2026-11-20--01-49
+updated_by: Claude Code (Claude Fable 5.2); Claude Code (Claude Haiku 5.5, 2026-11-15 -- §10.3 single-writer lock for every index writer, holder and fail-fast exit 75; §13.2 sync-lock item removed); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session A invariants); Claude Code (Claude Haiku 5.5, 2026-11-15 -- v0.2 session B: baseline data model; one item per session uuid (§14 D11, newest copy wins); ragnart project spelled out; §4.2 sentence restored after the one-item paragraph insert); Claude Code (Claude Haiku 5.5, 2026-11-16 -- v0.2 session C: built state for markers, attachment, moves, tombstones, plan-then-apply, scope API, /v1/projects, collapse and reconciliation; §14 D12 to D17; §4.5 marker-discovery wording says ragnart project); Claude Code (Claude Fable 5.2, 2026-11-16 -- multi-source design: connectors and sources, central and the ingestion side, the three stores, source-qualified scope terms; new §2.3, §4.7, §4.8; §14 D18 to D26; later versions renumbered for the new v0.3); Claude (Claude Fable 5.2, claude.ai design-review session with the operator, 2026-11-16 -- pipeline scope and the two kinds of version change §4.1, §5; four ingestion requests §2.3, §12; the notebook model, membership, references and marker guards §4.5; an add always copies §7.3; no ingestion mode §7.2, §7.4; the librarian's guarantee and the relevance verdict §8.1, §8.7, §9; open items §13.3; §14 D8, D10, D15, D19 amended, D27 to D31 added); Claude Code (Claude Opus 5.5, 2026-11-17 -- design discussion with the operator, the notebook model worked back from what to how: `ragnart init <name>`, managed folders beside `.ragnart/`, `.ragnart/` as state only, references by stable id with files as the exception, sessions referenced by the hook, exclusion rules out of managed folders, `add` and `commit`, registration, project-relative keys, `mv` and `repair`, concurrency §10.6; §14 D2, D2b, D3, D9, D10, D12, D15, D19, D21, D27, D28, D29 amended, D32 to D41 added; references are resources, the session's current project, creation from inside a session; the crawl does not enter a project folder, no implicit commit, hand-made markers; central renamed the hub, D42; `init` publishes the project record; projects addressed by unique name; corrections from an independent consistency review); Claude Code (Claude Opus 5.5, 2026-11-18 -- after `init` the session moves its shell into the project folder; relocating the session itself is an open item; how the agent searches, D31 amended; no separate session state, the working reference; `session:current`, settled for Claude Code and OpenCode; `/ragnart open`; the capture hook; writing collateral; resume and compaction; the web is a scope, scope and grounding not fully orthogonal; relocation tested: spawn in the project folder, operator resumes it; fork verified, one turn one place; the switch stays the operator's instruction, worded per client); Claude Code (Claude Haiku 5.5, 2026-11-18 -- v0.3 session A: source ids and the connector contract, the hub registry and its reshaped project tables, `source_id` and `pipeline_version` on every item and chunk, source-qualified scope terms and the bare-path 422, the per-source reconciliation check, the restore triple; status lines of §1.1, §2.3, §4.1 to §4.5, §4.7, §4.8, §8.3, §8.7, §8.8, §10.1, §10.3, §10.4, §12; one turn, one place marked not built, v0.4); Claude Code (Claude Haiku 5.5, v0.3 session A fix-up -- migration 4 reserved in _MIGRATIONS; migrate tool decides by table presence; migration 4 wording in the schema bullet and §4.8 status); Claude Code (Claude Haiku 5.5, 2026-11-19 -- v0.3 session B1: the ingestion API, the intake table and worker, endpoint sources MBP and claude-MBP, the source id rule; status lines of §1.1, §2.3, §4.2, §4.5, §4.7, §4.8, §5.2, §10.2, §10.3, §12 and the host table §2.1); Claude Code (Claude Opus 5.5, v0.3 session B2: NAS ingestion on the ingestion API); Claude Code (Claude Opus 5.5, 2026-11-20 -- project support is built for the NAS ingestion only; D21 checked first); Claude Code (Claude Opus 5.5, 2026-11-20 -- RAGNART names, User-Agent, one-line hub-unreachable log); Claude (Claude Fable 5.2, claude.ai checkpoint evaluation with the operator, 2026-11-20 -- §15 future considerations: what would be hard to retrofit for use by a team or an organisation; pointers in §1.1 and §6.5; v0.4 delivered in two parts)
+updated_at: 2026-11-20--20-30
 context: >
   The design of RAGNART: a self-hosted retrieval system and knowledge-base manager for one
   household lab (two servers and a Synology NAS), covering ingestion, access control,
@@ -77,6 +77,10 @@ a **Status** line. Summary:
 | Connectors and sources (§4.7), the hub and the ingestion side (§2.3), the three stores (§4.8), `source_id` on every item and chunk (§4.3, §4.4), source-qualified scope terms (§8.8) | Built: the connector contract as a code interface, the three hub sources and the two endpoint sources registered, the hub registry, `source_id` on every item and chunk, and source-qualified scope terms. Every source, the NAS ones included, submits through the ingestion API (v0.3, session B2). The NAS ingestion runs on Server 2 as an ingestion side, with `rag_state.db` as its state database and its own lock; the endpoint sources run on their own host, with that host's state database (§2.3) |
 | Ingestion API, and sources on hosts other than Server 2 (§2.3, §12) | Built (v0.3, sessions B1 and B2): the ingestion API for every source, the three NAS-side sources on it as an ingestion side on Server 2, and two endpoint sources on the operator's Mac |
 | Kotaemon (§12) | v0.5 |
+| Future considerations: use by a team or an organisation (§15) | Considerations, not decisions. The provisions of §15.2 are confirmed or declined at the v0.4a kickoff |
+
+v0.4 is delivered in two parts, v0.4a and v0.4b (`docs/Implementation-plan.md` §6). A status of
+"v0.4" in this document does not say which part.
 
 ### 1.2 Parallel with git
 
@@ -1241,6 +1245,7 @@ deliberately distinct access rules, not one rule with a temporary gap.
 Authentication (OAuth with group claims) is added when a second user exists.
 Multi-tenancy is designed now and built later: the data model (project ids on every chunk,
 grants shaped for persons and groups) is in place from v0.2 so nothing has to be backfilled.
+What would still be hard to retrofit for use by a team is listed in §15.
 How sources enter the access model is open: whether access is also scoped by source is decided with
 tenancy (§13.3).
 
@@ -2331,3 +2336,83 @@ None open. The purge record is the sync log line of §10.2, rule 4.
 | D40 | There is no implicit commit. A ragnart project's index changes only by `ragnart add`, `ragnart note`, `ragnart commit` and `ragnart drop`; the scheduled run commits no ragnart project. Uncommitted changes are counted by the session-start hook and the status line, and the skill offers a commit, never makes one (§7.3) | Every change to a ragnart project's index stays a deliberate act, and every outcome of a commit has someone to report it to. A timer commit would have no caller, and refusals and failures would be silent | A file placed or deleted by hand waits for a commit, as an unstaged change does in git. `drop` commits. `gc` changes no index. Live references (sessions, other ragnart projects) still change the scope without a commit, by design |
 | D41 | No marker changes what is indexed. A marker with an unknown `id` found by the crawl is registered only in a folder that holds no indexed `global` item; otherwise it is refused, logged at ERROR on every run, and the folder is walked as if it had no marker. A code repository is not a ragnart project (§4.5) | Under D39 a marker removes its folder from the crawl, so a marker placed by hand in a folder of material would delete that material from the index after the grace period, below the reach of the mass-delete guard. The reasoning is that of deviation G | Turning an existing folder of material into a ragnart project is not supported: `init` a new one and `add` what is wanted. A ragnart project about a repository is its own folder. The RAGNART repository's hand-written marker is removed in the v0.4 migration |
 | D42 | The role that runs the pipeline, the index and the search API is called the hub; its registry is the hub registry, and a source run on the hub's own host is a hub source (§2.3, §4.7, §4.8) | "Central" named both the role and a kind of source, two different things sharing a word | The ingestion side keeps its name. `init` publishes the project record to the hub at once (D10) |
+
+## 15. Future considerations: use by a team or an organisation
+
+RAGNART is designed for one household lab and one operator (§1, §2.1). Use by a team or a small
+organisation, as a shared service that manages the context given to models, is not a goal of any
+planned version. This section records which choices would be hard to change if it became one, so
+that the notebook work of v0.4 does not close the option by accident. Nothing here is a decision:
+an item enters the decision register (§14) only when a version adopts it.
+
+**Status.** Considerations only. The provisions of §15.2 are confirmed or declined at the v0.4a
+kickoff (`docs/Implementation-plan.md` §6, §8 item 21). §15.3 is not scheduled.
+
+### 15.1 What is hard to change
+
+A choice is as hard to change as the place it is recorded in.
+
+| Where a choice is recorded | Cost of a later change | Why |
+|---|---|---|
+| The hub registry (§4.8) | Low | One database on one host, with numbered migrations (§4.1). Tags, references and grants are rows |
+| A state database (§4.3) | Low | Bookkeeping. A lost one is rebuilt from the hub's listing (§4.8) |
+| The Qdrant payload (§4.4) | Low to moderate | Rewritten by filter, with no re-embedding, as the metadata backfill and the source backfill were. The cost grows with the corpus |
+| The vectors | High, with a defined procedure | A pipeline version change (§4.1) |
+| Files in project folders: `project.toml`, the `.reference` files, `.ragnart/provenance/` (§4.5) | High | They lie in folders on every source that holds ragnart projects, they are the authority (§4.8), and RAGNART never rewrites `project.toml` (§10.6, R11). No migration reaches them |
+| Grammar that clients hold: scope terms (§8.8), key formats (§4.2), CLI verbs, the skill's request template | High | Every client carries a copy, so a change needs every client changed together |
+
+The first three rows are where the design already keeps what changes often. The last two are where
+v0.4 writes for the first time.
+
+### 15.2 Provisions that are cheap when v0.4 writes its first files
+
+Each provision keeps an option open at the cost of a field or a reserved word. Each would cost a
+migration of files or of clients if it were added after ragnart projects exist.
+
+| # | Provision | What it keeps open | Why it is hard later |
+|---|---|---|---|
+| P1 | A format version in every file RAGNART defines in a project folder: `project.toml` (written by `init`), each `.reference` file, each provenance entry | Any later change to those formats | Files in project folders have no migration (§15.1). A reader that finds no version cannot tell an old file from a damaged one |
+| P2 | A reference to a session names the session's source as well as its id: kind, `source_id`, id. `project_references` gains the column | References when one hub serves several people | An item's identity is the pair (source, key), and the same uuid submitted by two sources is two items (§4.2). A reference by id alone, matched by `session_id` (§8.8), covers both, and only the access rule then keeps them apart. A reference to a ragnart project needs no source: a ragnart project has one home (D21) |
+| P3 | A provenance entry records the origin of a copy as an identity: `source_id` and key when the original is an item, the URL for a page, the path otherwise | Rules on what may be added to a shared ragnart project | An add copies (D28), and the copy falls under the ragnart project's access rule (§7.3). In a shared ragnart project an add therefore shares the content with everyone who holds a grant. Whether the person who added it could read the original, and whether the original was later restricted or deleted, can be answered only from a recorded identity |
+| P4 | Clients address a ragnart project by its `id`: a scope term `id:<uuid>`, with `id` reserved among the source ids (§4.7). `name:` stays the term for people. A name contains no `/` and no `:` | Names unique per owner or per group, instead of across the hub | Names are unique across the hub registry (D2b). With many people, two will want the same name. Qualifying names by owner changes what `name:<name>` means, and the skill's request template sends that term on every search (§8.8) |
+| P5 | Every search request names its principal, and `resolve_scope()` receives it, including where it resolves references | Enforcing grants without changing any caller | The seam is in place (§6.5). It stays a seam only if no client builds a filter and no path resolves a scope without a principal. v0.4 adds the first new path: references (§8.8) |
+| P6 | Nothing that expresses membership by reference, or access, is copied into the payload: references, tags and grants stay in the hub registry | Changing who may read, or what a ragnart project references, without touching Qdrant | Already the design (§4.5, D34). It is listed because v0.4 is where the shortcut is tempting: a field on chunks naming the ragnart projects that reference them would simplify the scope filter and make every reference a payload rewrite |
+| P7 | `add` and `commit` reach the index and the hub registry only through the ingestion API (§12) | A project action started on another host (§13.3) | Already the design (§7.3). A command that wrote the registry or a state database directly, from the ragnart project's own host, could not later be run from a laptop |
+
+### 15.3 What v0.4 does not address
+
+These parts of the design hold for one operator and would need design work before a team used
+RAGNART. None is made harder by v0.4, provided the provisions of §15.2 hold.
+
+- **Access to `global` items.** The owner rule governs them permanently (§6.5): an item is read by
+  its owner, or by everyone when its owner is the shared space, and the owner comes from the
+  registration of the item's source (§4.7). In an organisation most material would be `global`
+  (shared drives, wikis, tickets), and the store it comes from already says who may read each item.
+  The connector contract (§4.7) has no element for that: a connector reports no readers for an item,
+  and no change token for them. The payload side would be a rewrite (§15.1). The contract is the
+  hard part, because it touches every connector and every item.
+- **Identity.** The `user` of a search is trusted as given, and a source's secret identifies a
+  source, not a person (§12). Both are v0.6, and how the two relate is open (§13.3).
+- **Where a ragnart project lives.** A ragnart project has one home, a folder on a source RAGNART can
+  write to (D21). Its folder is the authority (§4.8). An action on it from another host is refused
+  (§10.6, R14). A session works in it only on the host that holds it (D38). A team on laptops meets
+  all four at once. The alternative, with the hub registry as the authority and the folder as one
+  client's working copy, reverses D33 and §4.8. It stays reachable as long as the hub never depends
+  on a ragnart project's path (D2b), and P4 and P7 hold.
+- **Copies.** Every add duplicates a file (D28). The redundancy is accepted for one operator. With
+  many people adding the same documents it multiplies storage and ingestion, and each copy is
+  detached from its original (P3).
+- **What may be used for inference, and where.** An item carries an owner, a project, a source and a
+  type, and nothing that says how sensitive it is or which models may receive it. RAGNART returns
+  passages to any client that asks, and the client chooses the model (D4b). There is no secret
+  filter (§5.6), and sessions, the largest kind of item in the corpus, hold whatever was typed into
+  them. A sensitivity class would be a payload field and a filter (§15.1); a default per source,
+  set when the source is registered, is the cheap place to start it. A search is written to the
+  service log and to no audit record.
+- **One hub.** A state database on NFS opened by one host, fail-fast locks, one intake worker on a
+  timer and a crawl every 6 hours (§10.3) fit one operator. They are implementation behind the
+  ingestion API and the search API, and can be replaced without changing either.
+
+**Not hard to change.** The session mechanics (the current project, the hooks, capture, the inbox
+and the status line) are client-side and specific to each harness (§7.3, §7.4). They can be rebuilt
+without touching stored data.
